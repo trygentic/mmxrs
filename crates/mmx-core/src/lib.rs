@@ -11,6 +11,7 @@ pub mod p2tiles;
 pub mod ram;
 pub mod traps;
 pub mod zero;
+pub mod zero_data;
 
 pub use game::Game;
 pub use traps::{TrapFn, TrapLog, TrapReturn, TrapTable};

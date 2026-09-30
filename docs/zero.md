@@ -215,3 +215,162 @@ cutscenes only. The route is a tile/sprite viewer such as Mesen2's. Community
 sprite-sheet sites have X2/X3 Zero sheets as reference. The art is Capcom's, so
 like the ROM it stays out of the repository (LEGAL.md). Only art you painted
 yourself may be shared.
+
+## X1 Zero data
+
+Code: `crates/mmx-core/src/zero_data.rs` (`extract_x1(rom) -> ZeroSet`,
+`zero_frame_for`). Sheet: `cargo xtask zerosheet --out DIR` (one PNG per frame
+plus `sheet.png`). The art is Capcom's: render it locally, never commit it.
+
+**Where Zero is.** Highway ending, enemy table slot 1 (`$0EA8`), id `+0A = $33`,
+`+11 = $2C` (palette 6, priority 2), sprite set `+16 = $53`, graphics slot
+`+10 = $51`, DMA lists `+31 = $85:A96E`, `+18 = 0`. His portrait in the text
+box is enemy slot 0: id `$3C`, set `$7A`, graphics `$71`, lists `$85:A8E8`,
+`+18 = $20`. From power-on to frame 4200 (Dr. Cain's log, X's spec screen,
+the warning text) there is no Zero object and no Zero tile in VRAM; the
+attract demo after that was not checked.
+
+**Tiles: compressed, decompressed once, then streamed.** At scene load the
+graphics loader (`$80:B230`, the listing's `$80:B271`; queued as a task by
+`$80:B252` through `$80:813B`, called per id from `$80:B0DA`; those two are
+listing PCs) decompresses
+graphics id `$98` into `$7F:0000 + $F8` and records the start in
+`$7F:8000[id*2]` (Zero: `$7F:2DA0`). Graphics table `$86:F69B`, 5 B per id:
+`size16, src16, bank` (the listing labels it `$86:F6F7`; the cartridge operand
+is `$F69B`). Zero, id `$51`: `$2100` B (264 tiles) from `$A3:E4F6`. Portrait,
+id `$71`: `$520` B (41 tiles) from `$A6:EAB7`.
+
+Format (Rust `decompress`): per 8 output bytes, a control byte and a fill byte;
+control bits MSB first, 1 = next literal byte, 0 = the fill byte. The source
+skips from `$xx:FFFF` to `$xx+1:8000`. `decode(ROM)` equals the WRAM buffer
+for the first 8012 bytes (the tail was overwritten by a later allocation in the
+dump) and equals VRAM `$6400-$65FF` for the stand page (test
+`zero_data_extract_x1`).
+
+Then `$84:8FCA` streams it like X: `+31` points at a word table in bank `$85`
+(offset per frame, relative to the table); each list entry is 5 B `len/16,
+src16 (+ $7F:8000[+10*2]), bank, dest_hi` (bit 7 = last), dest word
+`(dest_hi & $7F) << 8 + (+18 << 4)`. Zero's pages go to `$6400`/`$6500`, VRAM
+tiles `$40-$5F`. A frame with an empty list keeps the previous page.
+
+**Layouts.** `$8D:8000 + set*3` -> frame table (`$8D:95F9` for set `$53`, 35
+frames), `+ frame*3` -> layout: count, then 4 B per sprite `x, y, tile, attr`
+(`attr` bit 5 = 16x16, 6 = hflip, 7 = vflip, 1-3 palette ORed with `+11`;
+priority and name bit come from `+11`). Emitter `$80:D6BD`: tile `+ +18`,
+flipped `x' = -x - 8` (or `-16`).
+
+**Palette** `$85:C0C0` (id `$7B`), see above.
+
+**Frames** (index = set `$53` frame; 35-46 are set `$7A` portrait frames):
+
+| # | name | # | name |
+|---|---|---|---|
+| 0-3 | dash 1-4 (with dust; the dash-in) | 18 | turn (3/4 view) |
+| 4 | stand | 19 | fist |
+| 5 | stand blink | 20 | arms up |
+| 6 | stand breathe | 21 | leap |
+| 7 | aim | 22-23 | clinging 1-2 |
+| 8-10 | shoot charged 1-3 (shot ball drawn) | 24-27 | shocked 1-4 (sparks) |
+| 11 | shoot recoil | 28-31 | lying 1-4 |
+| 12-15 | materialize 1-4 (beam in/out) | 32-34 | kneel 1-3 |
+| 16 | beam land | 35-38 | portrait facing right, talk 1-4 |
+| 17 | beam | 39 | portrait hurt |
+| | | 40-43 | portrait facing left, talk 1-4 |
+| | | 44-46 | portrait eyes shut 1-3 |
+
+Highway cutscene sequence (`+17`): dash 0-3, stand 4, aim 7, shoot 8/9/10,
+recoil 11, 18, idle 4/5/6 while talking, beam out 13, 16, 17. Frames 19-34 are
+the Sigma-stage scene (Zero on Vile's ride armour); they share the set.
+Against the fan sheet: no walk cycle (X1 has only the dash), no jump/fall, no
+wall poses, no saber; "unused poses" are 18-20, hurt is 24-27, lying/dying
+28-31, beam-in 12-17. Buster shots and explosions are separate objects, not
+in set `$53`.
+
+**X -> Zero mapping** (`zero_frame_for(action, frame)`), X frames measured on
+Octopus: stand 0-2 (blink), stand-shoot 49-50, walk 13-22 (shooting 3-12),
+jump 32-34 (shooting 23-25), fall 35-36 (26-27), land 37-38, hurt 51-53,
+ready 81.
+
+| X action | Zero frame |
+|---|---|
+| `$00` stand / `$02` ready | 4, X frame 1/2 -> 5/6, 49 -> 11, 50 -> 7 |
+| `$06` jump, `$08` fall | 21 leap |
+| `$0A` land | 34 kneel |
+| `$0C` death | 28-31 lying |
+| `$0E` hurt | 24-27 shocked |
+| `$22` beam-in | 17 beam (X's beam-in frame numbers not measured; 12-16 unused) |
+
+Fallback (`None`, draw X's frame in Zero's colours): `$04` walk and
+walk-shoot, `$10` wall kick, `$12` wall slide, every other action (dash,
+ladders, stage exit `$1A`, Vile capture `$2E-$32`, ...). The dash frames 0-3
+are there for a dash action once one is known.
+
+States: `states/zero-arrive.state` (Zero dashing in) and
+`states/zero-scene.state` (standing, frame 4 page in VRAM): `xtask dump --load
+states/highway-vile.state --frames 3000 --p1tap 8000@1000-3000/40 --save
+1950=states/zero-arrive.state,3000=states/zero-scene.state` (B every 40 frames
+advances the text). The test reads `MMX_ZERO_STATE` or
+`states/zero-scene.state` and skips the VRAM check without it.
+
+## X3 extraction plan
+
+Research only. `roms/` in the main checkout does hold `Mega Man X3 (USA).zip`
+and an X2 image; only their headers and hashes were read, plus one peek at the
+X3 set table below.
+
+**Gate** (headerless, 2 MiB): title `MEGAMAN X3`, map `$20` (LoROM), type
+`$F3` (Cx4), size `$0B`, region `$01`, version 0, checksum `$4055`;
+CRC32 `FA0FE671`, SHA-1 `b226f7ec59283b05c1e276e2f433893f45027cac`,
+SHA-256 `65b03268afac296330e8ff8d60dd0825879e13ed658b37713c034a3bd074f1d7`.
+X2 for reference: `MEGAMAN X2`, type `$F3`, 1.5 MiB, CRC32 `947B0355`.
+
+**What is known.**
+- The Cx4 does maths: trig, wireframes, scaling/rotation and sprite
+  positioning (command `$00` "sprite functions") [1][2]. Sprite tiles
+  are not decompressed by it.
+- X3 keeps X1's object engine. Justin3009's Zero Project source addresses
+  "sprite assembly" (layouts) in bank `$8F`, pointer tables in `$8D` (Frog
+  armour walk at `$8D:96F2`), and per-frame VRAM loads as ROM -> VRAM pairs with
+  tile counts, e.g. saber projectile frame 1: ROM `$3AE660` -> `$6580`,
+  `$3AE740` -> `$E680` [3]. The table at `$8D:8000` in the X3 ROM is 3-byte
+  pointers like X1's (`$0D:8231, $0D:835D, ...`).
+- The layout entry order differs: X3 is `attr, x, y, tile` (set 0 frame 0:
+  `00 F8 E8 05`, `20 F5 F0 00`), X1 is `x, y, tile, attr`.
+- Playable Zero's tiles are streamed per frame from uncompressed ROM like X's
+  (the Zero Project data points at raw ROM offsets). Level/enemy graphics use
+  X3's LZSS-type compression (Euclid's document [4]); cutscene-only art may
+  too.
+
+**Plan for `extract_x3(rom) -> ZeroSet`.**
+1. Gate on the hash above.
+2. Find Zero's player block the same way as here: a save state with Zero
+   playable (X3 lets you call him from a Sub-screen via the Zero capsule once
+   per stage), dump WRAM, read `+16/+17/+31/+18` of the player slot.
+3. Walk `$8D:8000[set]` for the frame count and each layout (X3 entry order),
+   and the `+31` DMA lists for the ROM ranges (5-byte entries, as in X1,
+   verified by diffing VRAM after a frame change). Tiles are copied raw.
+4. Saber: the swing is part of Zero's own frame set (body + blade sprites);
+   the blade projectile / trail is a separate object whose layouts start at
+   `$8F:DBA5` [3]. Add both, named from a rendered sheet, then map X actions
+   to Zero frames, now with walk, jump, dash, wall and saber frames.
+5. If some Zero art (portrait, cutscene) is compressed, port the X3
+   decompressor from [4] or trace it the way `$80:B230` was traced here.
+6. Test: `decode(ROM) == VRAM` against an X3 state with Zero on screen.
+
+Effort: about 2 days with an X3 ROM on the desk (1 day to find the set and
+lists and confirm the entry formats, 1 day for names, mapping and tests),
+plus X3 ROM loading in `Game` if states have to come from our emulator (Cx4
+is emulated by the vendored core; `Game::from_rom` rejects coprocessors
+today, so a separate probe binary or a relaxed loader is needed).
+
+**X2: not supported.** X2 (also Cx4) has Zero in cutscenes and as a boss
+(the X-Hunter base fight when his parts are not recovered): buster, dash and
+jump frames at best, no saber, no player set, no wall frames. It would give a
+few more poses than X1 but needs its own decoder; X3 is the only source of a
+full playable Zero.
+
+Sources:
+[1] [SnesLab, Capcom Cx4](https://sneslab.net/wiki/Capcom_Cx4),
+[2] [superfamicom.org, Capcom Cx4 - Hitachi HG51B169](https://wiki.superfamicom.org/capcom-cx4-hitachi-hg51b169),
+[3] [justin3009/MMX3-ZeroProject, MMX3_SpriteSetup.asm](https://github.com/justin3009/MMX3-ZeroProject/blob/master/MMX3_SpriteSetup.asm),
+[4] [Euclid, Mega Man X3 Decompression Routine (romhacking.net)](https://www.romhacking.net/documents/205/).
