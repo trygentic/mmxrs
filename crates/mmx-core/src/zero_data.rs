@@ -49,11 +49,22 @@ pub struct Frame {
     pub tiles_used: Vec<u16>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ZeroSet {
     /// 4bpp SNES planar tiles, 32 B each.
     pub tiles: Vec<u8>,
     /// BGR555.
+    pub palette: [u16; 16],
+    pub frames: Vec<Frame>,
+    /// X3's saber wave (empty for X1). See [`extract_x3_wave`].
+    pub wave: WaveSet,
+}
+
+/// X3's saber wave (the green crescent): its own object, 2-row pages
+/// (`tiles_used` has 32 slots; layout tiles are rebased to them).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WaveSet {
+    pub tiles: Vec<u8>,
     pub palette: [u16; 16],
     pub frames: Vec<Frame>,
 }
@@ -62,15 +73,46 @@ impl ZeroSet {
     /// The VRAM page the game streams for `frame`, 32 B per slot: 1 KiB for
     /// X1 (tiles `$40-$5F`), 1.5 KiB for X3 (tiles `$00-$2F`); stale slots are zero.
     pub fn page(&self, frame: usize) -> Vec<u8> {
-        let mut p = vec![0u8; self.frames[frame].tiles_used.len() * 32];
-        for (slot, &t) in self.frames[frame].tiles_used.iter().enumerate() {
-            if t != NO_TILE {
-                let s = usize::from(t) * 32;
-                p[slot * 32..slot * 32 + 32].copy_from_slice(&self.tiles[s..s + 32]);
-            }
+        page_of(&self.tiles, &self.frames[frame])
+    }
+}
+
+fn page_of(tiles: &[u8], f: &Frame) -> Vec<u8> {
+    let mut p = vec![0u8; f.tiles_used.len() * 32];
+    for (slot, &t) in f.tiles_used.iter().enumerate() {
+        if t != NO_TILE {
+            let s = usize::from(t) * 32;
+            p[slot * 32..slot * 32 + 32].copy_from_slice(&tiles[s..s + 32]);
+        }
+    }
+    p
+}
+
+impl WaveSet {
+    /// The wave's 32-slot page for `frame`, colours remapped through `map`
+    /// (wave index -> the wearer's palette index). Pure.
+    pub fn page(&self, frame: usize, map: &[u8; 16]) -> Vec<u8> {
+        let mut p = page_of(&self.tiles, &self.frames[frame]);
+        for t in p.chunks_exact_mut(32) {
+            remap_tile(t, map);
         }
         p
     }
+}
+
+/// Recolour one 4bpp planar tile in place: pixel value `v` -> `map[v]`. Pure.
+pub fn remap_tile(t: &mut [u8], map: &[u8; 16]) {
+    let mut out = [0u8; 32];
+    for r in 0..8 {
+        for bit in 0..8 {
+            let v = (t[2 * r] >> bit & 1) | (t[2 * r + 1] >> bit & 1) << 1 | (t[16 + 2 * r] >> bit & 1) << 2 | (t[17 + 2 * r] >> bit & 1) << 3;
+            let m = map[usize::from(v)];
+            for (k, o) in [2 * r, 2 * r + 1, 16 + 2 * r, 17 + 2 * r].into_iter().enumerate() {
+                out[o] |= (m >> k & 1) << bit;
+            }
+        }
+    }
+    t[..32].copy_from_slice(&out);
 }
 
 /// Set `$53` frames 0..34, named from the Highway cutscene's `+$17` sequence
@@ -209,7 +251,7 @@ pub fn extract_x1(rom: &[u8]) -> Result<ZeroSet, String> {
     tiles.resize(tiles.len().div_ceil(32) * 32, 0);
     frames.extend(self::frames(rom, PORTRAIT_SET, PORTRAIT_DMA, &PORTRAIT_NAMES, base)?);
     let palette = std::array::from_fn(|i| rw(rom, ZERO_PALETTE + 2 * i as u32).unwrap_or(0));
-    Ok(ZeroSet { tiles, palette, frames })
+    Ok(ZeroSet { tiles, palette, frames, wave: WaveSet::default() })
 }
 
 /// X action (`+$02`) and frame (`+$17 & $7F`) -> the X1 Zero frame to draw,
@@ -299,6 +341,11 @@ pub const X3_NAMES: [&str; 138] = [
 /// words. Offsets wrap inside bank `$85`. Returns `(slot, rom address)`;
 /// empty = keep the page.
 fn x3_dma(rom: &[u8], list: u32, f: usize) -> Result<Vec<(usize, u32)>, String> {
+    x3_dma_at(rom, list, f, 0x6000)
+}
+
+/// [`x3_dma`] with the page starting at VRAM word `base`.
+fn x3_dma_at(rom: &[u8], list: u32, f: usize, base: u16) -> Result<Vec<(usize, u32)>, String> {
     let mut x = (list & 0xFF0000) | (list + u32::from(rw(rom, list + 2 * f as u32)?)) & 0xFFFF;
     let mut slots = Vec::new();
     loop {
@@ -308,7 +355,7 @@ fn x3_dma(rom: &[u8], list: u32, f: usize) -> Result<Vec<(usize, u32)>, String> 
         }
         let src = rl(rom, x + 1)?;
         let dest = rw(rom, x + 4)?;
-        let first = usize::from((dest & 0x7FFF).checked_sub(0x6000).ok_or("X3 DMA below $6000")? / 16);
+        let first = usize::from((dest & 0x7FFF).checked_sub(base).ok_or("X3 DMA below the page")? / 16);
         for k in 0..n / 32 {
             slots.push((first + k as usize, src + 32 * k));
         }
@@ -385,7 +432,70 @@ pub fn extract_x3(rom: &[u8]) -> Result<ZeroSet, String> {
         }
     }
     let palette = std::array::from_fn(|i| rw(rom, X3_PALETTE + 2 * i as u32).unwrap_or(0));
-    Ok(ZeroSet { tiles, palette, frames })
+    Ok(ZeroSet { tiles, palette, frames, wave: extract_x3_wave(rom)? })
+}
+
+/// The saber wave: X3 object set `$4D` (spawned by Zero's charged attack,
+/// act `$4A`/`$4E`, on the blade pose 84/93), lists `$85:DD84`, palette
+/// `$8C:B5A0` (X3's sprite palette 3). Streamed like Zero: VRAM `$6300`/`$6400`
+/// + `+18 = 8` tiles, layout tiles `$30-$35`/`$40-$45` (+ 8 in OAM).
+pub const X3_WAVE_SET: u8 = 0x4D;
+pub const X3_WAVE_DMA: u32 = 0x85DD84;
+pub const X3_WAVE_PALETTE: u32 = 0x8CB5A0;
+/// Frames 0-4 are the flight (0 spawn, 1 unfurl, 2-4 loop); 5-6 were never seen.
+pub const X3_WAVE_FRAMES: usize = 5;
+/// Two rows of 16 (only columns 0-5 are used).
+pub const X3_WAVE_PAGE_TILES: usize = 32;
+
+/// See [`X3_WAVE_SET`]. Pure (ROM bytes in; caller checks it is X3).
+pub fn extract_x3_wave(rom: &[u8]) -> Result<WaveSet, String> {
+    let mut tiles = Vec::new();
+    let mut frames = Vec::new();
+    let mut page = vec![NO_TILE; X3_WAVE_PAGE_TILES];
+    for f in 0..X3_WAVE_FRAMES {
+        let slots = x3_dma_at(rom, X3_WAVE_DMA, f, 0x6300)?;
+        if !slots.is_empty() {
+            page = vec![NO_TILE; X3_WAVE_PAGE_TILES];
+        }
+        for (s, a) in slots {
+            for k in 0..32 {
+                tiles.push(rd(rom, a + k)?);
+            }
+            *page.get_mut(s).ok_or(format!("wave frame {f}: DMA past the page"))? = (tiles.len() / 32 - 1) as u16;
+        }
+        let mut sprites = x3_layout(rom, X3_WAVE_SET, f)?;
+        for s in &mut sprites {
+            s.tile = s.tile.checked_sub(0x30).filter(|&t| usize::from(t) + if s.big { 17 } else { 0 } < X3_WAVE_PAGE_TILES).ok_or(format!("wave frame {f}: tile {:02X}", s.tile))?;
+        }
+        frames.push(Frame { name: "wave", sprites, tiles_used: page.clone() });
+    }
+    let palette = std::array::from_fn(|i| rw(rom, X3_WAVE_PALETTE + 2 * i as u32).unwrap_or(0));
+    Ok(WaveSet { tiles, palette, frames })
+}
+
+/// The wave's flight, measured in X3 (`states/x3-zero-stand.state`, charge,
+/// release; docs/zero.md "The saber"): frame `t` (0 = spawn) -> `(dx, dy,
+/// frame, box)`, offsets from Zero's origin at the spawn (x toward his
+/// facing), `box` = X3's `+20` hit box `(x, y, half w, half h)` (x toward
+/// the facing). On the ground it drops 3 px a frame to `+1`; in the air it
+/// keeps its height. From `t = 4` it moves 6 px a frame, frames 3, 4, 2, ...
+/// Pure.
+pub fn x3_wave_step(t: u8, air: bool) -> (i16, i16, usize, (i8, i8, u8, u8)) {
+    let t = i16::from(t);
+    let reach = if air { 27 } else { 29 };
+    let dx = if t == 0 { 8 } else { reach + 6 * (t - 3).max(0) };
+    let dy = if air { -8 } else { (-8 + 3 * t).min(1) };
+    let frame = match t {
+        0 | 1 => 0,
+        2 | 3 => 1,
+        _ => [3, 4, 2][((t - 4) % 3) as usize],
+    };
+    let bx = match t {
+        0 => (0, 0, 4, 4),     // $B7FB
+        1 => (1, 0, 16, 9),    // $B807 (x -1 facing left)
+        _ => (15, 0, 16, 9),   // $B80B / $B80F
+    };
+    (dx, dy, frame, bx)
 }
 
 /// X1 action (`+$02`) and frame (`+$17 & $7F`) -> X3 Zero frame
@@ -541,5 +651,49 @@ mod tests {
             }
         }
         assert!(used.iter().filter(|&&t| t != NO_TILE).count() >= 25);
+    }
+
+    #[test]
+    fn zero_data_x3_wave_step() {
+        assert_eq!(x3_wave_step(0, false), (8, -8, 0, (0, 0, 4, 4)));
+        assert_eq!(x3_wave_step(3, false).0, 29);
+        assert_eq!(x3_wave_step(5, false), (41, 1, 4, (15, 0, 16, 9)));
+        assert_eq!(x3_wave_step(5, true).1, -8);
+        let id: [u8; 16] = std::array::from_fn(|i| i as u8);
+        let mut t: [u8; 32] = std::array::from_fn(|i| (i * 37) as u8);
+        let t0 = t;
+        remap_tile(&mut t, &id);
+        assert_eq!(t, t0);
+    }
+
+    #[test]
+    fn zero_data_extract_x3_wave() {
+        let Some(path) = std::env::var_os("MMX_X3_ROM") else {
+            eprintln!("MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let mut g = crate::Game::from_rom_any(std::fs::read(path).expect("read MMX_X3_ROM")).expect("load X3");
+        let w = extract_x3(g.rom_bytes()).unwrap().wave;
+        assert_eq!(w.frames.len(), X3_WAVE_FRAMES);
+        assert_eq!(w.palette[7], 0x338C);
+        // decode(ROM) == VRAM: the wave in flight, frame 4's tiles at $6380/$6480
+        // (`+18 = 8`). State: docs/zero.md "The saber".
+        let state = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/x3-zero-wave.state");
+        let Ok(s) = std::fs::read(state) else {
+            eprintln!("{state} missing; VRAM check skipped");
+            return;
+        };
+        g.load_state(&s).unwrap();
+        let id: [u8; 16] = std::array::from_fn(|i| i as u8);
+        let page = w.page(4, &id);
+        let used = &w.frames[4].tiles_used;
+        assert_eq!(used.iter().filter(|&&t| t != NO_TILE).count(), 10);
+        for (slot, &t) in used.iter().enumerate() {
+            if t != NO_TILE {
+                let v = 0x6380 + (slot / 16) * 0x100 + (slot % 16) * 16;
+                let vram: Vec<u8> = g.vram()[v..v + 16].iter().flat_map(|w| w.to_le_bytes()).collect();
+                assert_eq!(page[slot * 32..][..32], vram[..], "slot {slot:02X}");
+            }
+        }
     }
 }

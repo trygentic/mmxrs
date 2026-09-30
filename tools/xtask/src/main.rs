@@ -16,7 +16,7 @@ const USAGE: &str = "usage: cargo xtask <command>
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
   ledger
   rominfo
-  zerosheet [--x3 PATH] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data) -> DIR/NN_name.png + DIR/sheet.png
+  zerosheet [--x3 PATH [--wave]] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data; --wave: the saber wave) -> DIR/NN_name.png + DIR/sheet.png
 env: MMX_ROM=path/to/Mega Man X (USA).sfc, MMX_X3_ROM=path/to/Mega Man X3 (USA).sfc (P2 as X3 Zero; = --x3)";
 
 fn main() {
@@ -439,6 +439,12 @@ fn zerosheet(args: &[String]) -> i32 {
             (zero_data::extract_x3(&b).unwrap_or_else(|e| die(&e)), (96usize, 88usize, 48i32, 44i32))
         }
         None => (zero_data::extract_x1(game(rom()).rom_bytes()).unwrap_or_else(|e| die(&e)), (64, 64, 32, 44)),
+    };
+    // `--wave` (with `--x3`): the saber wave's frames instead, in its own palette.
+    let z = if args.iter().any(|a| a == "--wave") {
+        zero_data::ZeroSet { tiles: z.wave.tiles, palette: z.wave.palette, frames: z.wave.frames, wave: Default::default() }
+    } else {
+        z
     };
     let rgb = |c: u16| -> u32 {
         let ch = |v: u16| u32::from(v & 31) << 3 | u32::from(v & 31) >> 2;
