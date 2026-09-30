@@ -208,15 +208,11 @@ fn stages_progress_in_order_and_no_ice_servers_connects_fast() {
         "a loopback link with no ICE servers took {:?}",
         linked.elapsed()
     );
-    assert_eq!(
-        stages[0],
-        [
-            ConnectStage::Signalling,
-            ConnectStage::WaitingForPeer,
-            ConnectStage::EstablishingLink,
-            ConnectStage::Connected
-        ]
-    );
+    // The intermediate stages are observed by polling, so a fast link can skip
+    // one (seen intermittently on a loaded machine). Require the endpoints;
+    // the monotonic check below covers the order.
+    assert_eq!(stages[0].first(), Some(&ConnectStage::Signalling));
+    assert_eq!(stages[0].last(), Some(&ConnectStage::Connected));
     assert_eq!(stages[1].last(), Some(&ConnectStage::Connected));
     for w in stages.iter() {
         assert!(
