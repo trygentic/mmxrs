@@ -353,6 +353,18 @@ user is the collapsing road chunk (`$1428` table type 9, `$82:E720`, call
 sites `$82:E7A5`/`$82:E7AE`; states `r2-2`, `r3-0`, `hw-f`). The
 Highway's road-attacker cars (types `$11`/`$12`) are not platforms: X can't
 stand on them, they hurt through `$84:9B03`.
+Rechecked for the "P2 can't ride the cars" report (`r3-10`, cars drive at
+Y 435 on the road at 431): P1 alone, 26 jump timings standing, walking
+right and walking left: never stands above Y 427. Jump at f75: X comes down
+on car 0 and is hit at f102 (hp 16 -> 14, act `$0E`). X poked onto car 0's
+roof at f60 (`--poke 7E0BAD=38@60,7E0BAE=19@60,7E0BB0=90@60,7E0BB1=01@60`):
+falls through it to the road (Y 400 -> 431 by f77). Per car, the frame runs
+the car `$81:D551` and its driver `$81:DCD0` (from the dispatch at
+`$80:F9DD`), which call only `$84:9B03`/`$84:9B43` (contact) and their own
+terrain code; `$84:AB81`/`$84:AB56`: 0 hits (`trace --calls --find`), and
+the listing around them only reads `$0BAD`/`$0BB0` (aiming). Nothing in
+the ROM carries X on a car, so there is nothing to rerun for P2. The trucks
+are level terrain, which P2's own physics already stands on.
 
 P2's pass: an `Observe` trap on both entries reruns the routine isolated
 with P2's block swapped in (`with_p2_swapped`), the guard `in_contact` set.
