@@ -329,6 +329,18 @@ charged shots checked (`target/z/shot_strip.png`, highway-start charge:
 the half charge sits on Zero, then flies left). unverified: special
 weapons; `$84:9DE0` also does `DEC $0C20` (block `+$78`) for weapon `$08`.
 
+**Zero's muzzle.** The muzzle table is cartridge `$86:BDDD` (2 bytes per
+entry, `dx` toward the facing, `dy` signed); `+3C` = 2 * (pose base +
+`+0F & $0F`), from the fire routines `$81:93B2`/`$81:9435` (bases: stand 0,
+jump 1, fall 4, land 7, walk 9, dash `$13`, wall slide `$17`, wall kick
+`$1A`). The anchor is `$81:A57B`; the half charge (`+0A = 1`) re-anchors x
+only. X's muzzle sat at Zero's fist (stand: X (16,-3), Zero's cannon 27 px
+out, 7 up). `zero_data::ZERO_MUZZLE` (measured in X3, docs in the table)
+moves a Zero player's shot at `HOOK_SHOT_SLOT_DONE` (the owner's block is
+live there) whenever it sits exactly at X's muzzle: the first update and
+every re-anchor. P2's slots when the X3 set is loaded, every other slot when
+P1 is Zero (`--zero`). No-op otherwise (parity).
+
 ## Platforms and items (`coop_objects.rs`)
 
 Both bugs had the same cause as enemy contact: the object's own update tests
