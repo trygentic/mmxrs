@@ -238,6 +238,42 @@ fn save_state_carries_p2_tile_page() {
 }
 
 #[test]
+fn save_state_carries_coop_state() {
+    use mmx_core::coop::{CoopState, OFF_HP, OFF_POS_X};
+    let mut g = game();
+    step(&mut g, 2);
+    g.coop.enabled = true;
+    g.coop.p2[OFF_POS_X] = 0x34;
+    g.coop.p2[OFF_HP] = 9;
+    g.coop.p2_hidden = false;
+    g.coop.p2_scratch[1] = 0x77;
+    g.coop.down_frames = 12;
+    g.coop.p2_fx = 0b101;
+    g.coop.p2_warp = true;
+    g.coop.saber.t = 5;
+    g.coop.revive.spot = Some((0x100, 0x80));
+    let s = g.save_state();
+    let info = Game::state_info(&s).unwrap();
+    assert_eq!((info.frame_count, info.tiles.as_deref()), (2, Some("P2T5")));
+    assert_eq!(info.coop.as_ref(), Some(&g.coop));
+
+    let mut fresh = game();
+    fresh.coop.enabled = true; // the frontend's setting, kept across the load
+    fresh.load_state(&s).unwrap();
+    assert_eq!(fresh.coop, g.coop);
+    assert_eq!(fresh.frame_count(), 2);
+
+    // A state from before the `COOP` tail: a default co-op state (P2 hidden,
+    // it re-anchors), settings kept.
+    let old = &s[..s.windows(4).rposition(|w| w == b"COOP").unwrap()];
+    assert!(Game::state_info(old).unwrap().coop.is_none());
+    fresh.load_state(old).unwrap();
+    assert_eq!(fresh.coop, CoopState { enabled: true, ..CoopState::default() });
+    // A cut tail is an error, not a silent default.
+    assert!(fresh.load_state(&s[..s.len() - 1]).is_err());
+}
+
+#[test]
 fn rom_header_checks() {
     let mut headered = vec![0u8; 512];
     headered.extend(rom_with("MEGAMAN X", 0, 0));
