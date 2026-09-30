@@ -9,6 +9,7 @@ pub mod coop_objects;
 pub mod coop_stages;
 pub mod display;
 mod game;
+pub mod hooks;
 pub mod netgame;
 pub mod netlog;
 pub mod p2tiles;
