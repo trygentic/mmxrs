@@ -76,3 +76,8 @@ clock still do not advance.
 - `Game::isolated_trace = Some(vec![])` records every PC fetched inside
   `call_isolated*`; `cargo xtask cooptrace --frame F` diffs P1's and P2's
   player update and prints each branch that went a different way.
+- `cargo xtask lagdiff --frames N [script] [--refill] [--dump A-B]`: solo
+  and co-op (P2 idle) in lockstep; the first real-time opcode fetch where
+  P1's PC or master clock differs (isolated calls are not in the trace).
+  With P2 drawn, the traces differ from frame 2 (NMI uploads), so `--dump`
+  both traces and compare phase times (how the Rev 1 lag frame was found).

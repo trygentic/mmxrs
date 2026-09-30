@@ -337,13 +337,18 @@ impl Game {
     /// Debug aid: one frame like [`Game::step`], returning `PBR:PC` of every
     /// opcode fetched (traps still fire). Big (~100k entries per frame).
     pub fn trace_frame(&mut self, pads: Pads) -> Vec<u32> {
+        self.trace_frame_mclk(pads).into_iter().map(|(pc, _)| pc).collect()
+    }
+
+    /// [`Game::trace_frame`] with the master clock at each fetch.
+    pub fn trace_frame_mclk(&mut self, pads: Pads) -> Vec<(u32, u64)> {
         let inputs = SnesInputs { p1: joypad(pads.p1), p2: joypad(pads.p2) };
         let mut out = Vec::with_capacity(120_000);
         let mut rendered = false;
         while !(rendered && self.emu.at_instruction_boundary()) {
             self.dispatch_traps();
             if self.emu.at_instruction_boundary() && self.emu.next_tick_fetches_opcode() {
-                out.push(self.regs().pbr_pc());
+                out.push((self.regs().pbr_pc(), self.emu.master_cycles()));
             }
             let effect = self
                 .emu

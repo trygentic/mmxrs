@@ -283,6 +283,12 @@ impl SnesEmulator {
         cpu.is_mid_instruction() && cpu.registers().pc != pc
     }
 
+    /// Master clock (debug: lag-frame bisection).
+    #[must_use]
+    pub fn master_cycles(&self) -> u64 {
+        self.total_master_cycles
+    }
+
     #[must_use]
     pub fn wram(&self) -> &[u8; 0x20000] {
         self.memory.main_ram()
