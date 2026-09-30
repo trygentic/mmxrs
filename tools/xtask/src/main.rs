@@ -18,7 +18,7 @@ const USAGE: &str = "usage: cargo xtask <command>
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
   ledger
   rominfo
-  zerosheet [--x3 PATH [--wave|--slash]] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data; --wave: the saber wave, --slash: the slash arc) -> DIR/NN_name.png + DIR/sheet.png
+  zerosheet [--x3 PATH [--wave|--slash|--sfx]] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data; --wave: the saber wave, --slash: the slash arc) -> DIR/NN_name.png + DIR/sheet.png; --sfx: his X3 sounds -> DIR/swing.wav
   netsim [--mode rollback|lockstep] [--rtt MS] [--jitter MS] [--loss PCT] [--delay N] [--prediction N] [--frames N]
        [--load STATE] [--x3 PATH] [--zero] [--timing ntsc|pal] [--seed N] [--report F.json] [--record PREFIX] [script]
        two session games over a simulated link (virtual clock); host plays pad 1 of the script, guest pad 2;
@@ -500,6 +500,15 @@ fn zerosheet(args: &[String]) -> i32 {
         }
         None => (zero_data::extract_x1(game(rom()).rom_bytes()).unwrap_or_else(|e| die(&e)), (64, 64, 32, 44)),
     };
+    // `--sfx` (with `--x3`): Zero's X3 sounds as DIR/NAME.wav instead.
+    if args.iter().any(|a| a == "--sfx") {
+        let s = &z.sounds.as_ref().unwrap_or_else(|| die("--sfx needs --x3")).swing;
+        let pcm: Vec<(f32, f32)> = s.pcm.iter().map(|&x| (f32::from(x) / 32768.0, f32::from(x) / 32768.0)).collect();
+        let p = out.join("swing.wav");
+        write_wav(&p, &pcm, s.rate).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+        println!("wrote {} ({} samples at {} Hz)", p.display(), pcm.len(), s.rate);
+        return 0;
+    }
     // `--wave` (with `--x3`): the saber wave's frames instead, in its own palette.
     let fx = if args.iter().any(|a| a == "--wave") {
         Some(z.wave.clone())

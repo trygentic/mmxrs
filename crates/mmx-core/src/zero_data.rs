@@ -60,6 +60,8 @@ pub struct ZeroSet {
     pub wave: WaveSet,
     /// X3's green saber slash arc (`None` for X1). See [`extract_x3_slash`].
     pub slash: Option<WaveSet>,
+    /// X3's saber sound (`None` for X1). See [`extract_x3_sounds`].
+    pub sounds: Option<ZeroSounds>,
 }
 
 /// An X3 effect set drawn next to Zero: the saber wave (2-row pages,
@@ -254,7 +256,7 @@ pub fn extract_x1(rom: &[u8]) -> Result<ZeroSet, String> {
     tiles.resize(tiles.len().div_ceil(32) * 32, 0);
     frames.extend(self::frames(rom, PORTRAIT_SET, PORTRAIT_DMA, &PORTRAIT_NAMES, base)?);
     let palette = std::array::from_fn(|i| rw(rom, ZERO_PALETTE + 2 * i as u32).unwrap_or(0));
-    Ok(ZeroSet { tiles, palette, frames, wave: WaveSet::default(), slash: None })
+    Ok(ZeroSet { tiles, palette, frames, wave: WaveSet::default(), slash: None, sounds: None })
 }
 
 /// X action (`+$02`) and frame (`+$17 & $7F`) -> the X1 Zero frame to draw,
@@ -435,7 +437,14 @@ pub fn extract_x3(rom: &[u8]) -> Result<ZeroSet, String> {
         }
     }
     let palette = std::array::from_fn(|i| rw(rom, X3_PALETTE + 2 * i as u32).unwrap_or(0));
-    Ok(ZeroSet { tiles, palette, frames, wave: extract_x3_wave(rom)?, slash: Some(extract_x3_slash(rom)?) })
+    Ok(ZeroSet {
+        tiles,
+        palette,
+        frames,
+        wave: extract_x3_wave(rom)?,
+        slash: Some(extract_x3_slash(rom)?),
+        sounds: Some(extract_x3_sounds(rom)?),
+    })
 }
 
 /// The saber wave: X3 object set `$4D` (spawned by Zero's charged attack,
@@ -593,9 +602,167 @@ pub fn zero_x3_frame_for(x_action: u8, x_frame: u8) -> Option<usize> {
     })
 }
 
+// ------------------------------------------------------------ X3 sounds
+
+/// Mono PCM (`rate` Hz), envelope and pitch already applied.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Sample {
+    pub pcm: Vec<i16>,
+    pub rate: u32,
+}
+
+/// Zero's X3 sounds. Only the saber whoosh: X3 plays the same hurt and death
+/// sounds for X and Zero (docs/zero.md "Sounds").
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ZeroSounds {
+    pub swing: Sample,
+}
+
+/// X3's SPC sample `$0E` (DIR `$3900`: start `$415A`, loop `$4190`): 8 BRR
+/// blocks at `$89:AF25` (file `$4AF25`), looping on the last 2.
+pub const X3_WHOOSH_BRR: u32 = 0x89AF25;
+pub const X3_WHOOSH_BLOCKS: usize = 8;
+pub const X3_WHOOSH_LOOP_BLOCK: usize = 6;
+/// Its voice's `PITCH` per NTSC frame from key-on (`xtask dump --apu`, the
+/// ball after Zero's swing, `x3-zero-stand` + charge + Y at 215), then key-off.
+pub const X3_WHOOSH_PITCH: [u16; 42] = [
+    0x02A0, 0x0330, 0x0480, 0x0540, 0x0670, 0x0A70, 0x0AA0, 0x0930, 0x0720, 0x05F0, 0x0610, 0x0630, 0x05E0, 0x0490,
+    0x0390, 0x0380, 0x03D0, 0x0380, 0x0260, 0x0270, 0x0230, 0x0220, 0x01C0, 0x0160, 0x0140, 0x0140, 0x0150, 0x00C0,
+    0x0090, 0x0090, 0x0090, 0x0090, 0x0080, 0x0060, 0x0050, 0x0050, 0x0060, 0x0040, 0x0030, 0x0030, 0x0030, 0x0030,
+];
+/// The DSP's output rate; `PITCH` `$1000` = one BRR sample per output sample.
+pub const DSP_RATE: u32 = 32_000;
+
+/// BRR blocks (9 bytes: header `ssss ffle`, 16 nibbles high first) -> samples,
+/// the vendored DSP's shift and filter math (15-bit results).
+pub fn brr_decode(data: &[u8]) -> Vec<i16> {
+    let (mut p1, mut p2) = (0i32, 0i32);
+    let mut out = Vec::with_capacity(data.len() / 9 * 16);
+    for b in data.chunks_exact(9) {
+        let (shift, filter) = (b[0] >> 4, (b[0] >> 2) & 3);
+        for i in 0..16 {
+            let n = i32::from(if i % 2 == 0 { (b[1 + i / 2] as i8) >> 4 } else { ((b[1 + i / 2] as i8) << 4) >> 4 });
+            let s = match shift {
+                0 => n >> 1,
+                1..=12 => n << (shift - 1),
+                _ if n < 0 => -2048,
+                _ => 0,
+            };
+            let s = match filter {
+                0 => s,
+                1 => s + p1 + (-p1 >> 4),
+                2 => s + (p1 << 1) + (-(3 * p1) >> 5) - p2 + (p2 >> 4),
+                _ => s + (p1 << 1) + (-(13 * p1) >> 6) - p2 + ((3 * p2) >> 4),
+            };
+            let s = i32::from(((s.clamp(-32768, 32767) as i16) << 1) >> 1);
+            out.push(s as i16);
+            (p2, p1) = (p1, s);
+        }
+    }
+    out
+}
+
+/// Play `brr` (looping from sample `lp`) on one voice at `pitch[f]` during
+/// NTSC frame `f` (the DSP's 12-bit fraction; linear interpolation and a
+/// `[1 2 1] / 4` smoothing instead of its Gaussian), full envelope, then the
+/// driver's key-off (GAIN `$BF`, 64 samples to silence). `gain` in 1/256.
+/// Integer math: both netplay peers get the same samples.
+fn render(brr: &[i16], lp: usize, pitch: &[u16], gain: i32) -> Vec<i16> {
+    const RELEASE: usize = 64;
+    let n = (pitch.len() as u64 * u64::from(DSP_RATE) * 10_000 / 600_988) as usize;
+    let mut out = Vec::<i32>::with_capacity(n + RELEASE);
+    let mut pos = 0u32; // 1/4096 sample
+    for k in 0..n + RELEASE {
+        let f = (k as u64 * 600_988 / (u64::from(DSP_RATE) * 10_000)) as usize;
+        let (i, frac) = ((pos >> 12) as usize, (pos & 0xFFF) as i32);
+        let (a, b) = (i32::from(brr[i]), i32::from(brr[if i + 1 < brr.len() { i + 1 } else { lp }]));
+        let env = if k < n { 256 } else { (256 * (n + RELEASE - 1 - k) / RELEASE) as i32 };
+        out.push((a + ((b - a) * frac >> 12)) * gain / 256 * env / 256);
+        pos += u32::from(pitch[f.min(pitch.len() - 1)]);
+        while (pos >> 12) as usize >= brr.len() {
+            pos -= ((brr.len() - lp) as u32) << 12;
+        }
+    }
+    let at = |k: usize| out.get(k).copied().unwrap_or(0);
+    (0..out.len()).map(|k| ((at(k.wrapping_sub(1)) + 2 * at(k) + at(k + 1)) / 4) as i16).collect()
+}
+
+/// Zero's saber whoosh from a Mega Man X3 (USA) image (checked by
+/// [`extract_x3`]): the SFX X3 plays on Zero's saber swing (the ball it
+/// throws, sample `$0E` swept up and down, voice volume `$30`), at about
+/// X3's output level.
+pub fn extract_x3_sounds(rom: &[u8]) -> Result<ZeroSounds, String> {
+    let at = off(X3_WHOOSH_BRR);
+    let data = rom.get(at..at + 9 * X3_WHOOSH_BLOCKS).ok_or("whoosh sample past the end of the ROM")?;
+    if data[9 * (X3_WHOOSH_BLOCKS - 1)] & 3 != 3 || data.chunks(9).rev().skip(1).any(|b| b[0] & 1 != 0) {
+        return Err("whoosh sample: BRR end/loop flags not where expected".into());
+    }
+    let brr = brr_decode(data);
+    let pcm = render(&brr, 16 * X3_WHOOSH_LOOP_BLOCK, &X3_WHOOSH_PITCH, 80);
+    Ok(ZeroSounds { swing: Sample { pcm, rate: DSP_RATE } })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One block per filter, values worked by hand from the DSP formulas.
+    #[test]
+    fn brr_filters() {
+        // shift 12, filter 0: nibbles 1, -1 -> 1 << 11 = 2048, -2048.
+        let mut b = vec![0xC0, 0x1F, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(&brr_decode(&b)[..3], &[2048, -2048, 0]);
+        // shift 0: n >> 1 (7 -> 3, -8 -> -4).
+        b[0] = 0x00;
+        b[1] = 0x78;
+        assert_eq!(&brr_decode(&b)[..2], &[3, -4]);
+        // Block 1 ends on 2048 (p1) after 0 (p2); block 2 is all-zero nibbles.
+        // Filter 1: p1 - p1/16 = 1920, then 1920 - 120.
+        let mut two = vec![0xC0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0xC4, 0, 0, 0, 0, 0, 0, 0, 0];
+        let d = brr_decode(&two);
+        assert_eq!((d[15], d[16], d[17]), (2048, 1920, 1800));
+        // Filter 2: 2 p1 - 3 p1 / 32 - p2 + p2 / 16 = 4096 - 192.
+        two[9] = 0xC8;
+        assert_eq!(brr_decode(&two)[16], 3904);
+        // Filter 3: 2 p1 - 13 p1 / 64 - p2 + 3 p2 / 16 = 4096 - 416.
+        two[9] = 0xCC;
+        assert_eq!(brr_decode(&two)[16], 3680);
+        // Clamp, then 15 bits: filter 2 on 14336 gives 41664 -> 32767 -> -1.
+        let w = vec![0xC8, 0x77, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(&brr_decode(&w)[..2], &[14336, -1]);
+    }
+
+    /// The whoosh bytes in the ROM are the ones X3's SPC RAM holds under
+    /// DIR entry `$0E` while Zero plays, and they render to ~0.7 s.
+    #[test]
+    fn x3_whoosh_matches_spc_ram() {
+        let Some(path) = std::env::var_os("MMX_X3_ROM") else {
+            eprintln!("MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/x3-zero-stand.state");
+        let Ok(state) = std::fs::read(st) else {
+            eprintln!("{st} missing; skipping");
+            return;
+        };
+        let rom = std::fs::read(path).unwrap();
+        let mut g = crate::Game::from_rom_any(rom.clone()).unwrap();
+        g.load_state(&state).unwrap();
+        g.step(crate::Pads::default());
+        let dir = usize::from(g.dsp_register(0x5D)) << 8;
+        let spc = g.spc_ram();
+        let e = |k: usize| usize::from(u16::from_le_bytes([spc[dir + 0x0E * 4 + k], spc[dir + 0x0E * 4 + k + 1]]));
+        let (start, lp) = (e(0), e(2));
+        let rom = if rom.len() % 0x8000 == 512 { &rom[512..] } else { &rom[..] };
+        let at = off(X3_WHOOSH_BRR);
+        assert_eq!(&spc[start..start + 9 * X3_WHOOSH_BLOCKS], &rom[at..at + 9 * X3_WHOOSH_BLOCKS]);
+        assert_eq!(lp - start, 9 * X3_WHOOSH_LOOP_BLOCK);
+        let s = extract_x3_sounds(rom).unwrap().swing;
+        assert_eq!(s.rate, DSP_RATE);
+        assert!((22_000..23_000).contains(&s.pcm.len()), "{}", s.pcm.len());
+        assert!(s.pcm.iter().any(|&x| x.unsigned_abs() > 3000));
+        assert_eq!(*s.pcm.last().unwrap(), 0);
+    }
 
     #[test]
     fn zero_data_decompress_format() {
