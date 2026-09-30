@@ -17,7 +17,8 @@ The window:
   Each shows its header: title, version, SHA-256 of the image with any 512-byte
   copier header stripped (same hash as `cargo xtask rominfo`).
 * **Options**: window scale 1-8 (`--scale`), `--fullscreen`, Play as Zero
-  (`--zero`, needs the X3 ROM), Local co-op (`--coop-local`, ignored online).
+  (`--zero`, needs the X3 ROM; a game built before `--zero` landed
+  rejects it as an unknown argument), Local co-op (`--coop-local`, ignored online).
 * **Play online**: Host/Join (`--coop-host`/`--coop-join ROOM`), room with a
   random 8-char button, signal URL (default `wss://signal.z2rs.com`), mode,
   delay (auto = the mode's default; rollback 0-3, lockstep 0-8), ICE (empty =
