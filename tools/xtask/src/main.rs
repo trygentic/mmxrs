@@ -13,8 +13,10 @@ const USAGE: &str = "usage: cargo xtask <command>
   dump --frames N --out DIR [--at F,F,...] [--movie F] [--tap F,F,...] [--hold HEX] [--p2-hold HEX] [--coop]
        [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..]  start from / write a save state (P2 re-anchors after a load)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
+       --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
   ledger
   rominfo
+  zerosheet --out DIR   X1 Zero's frames (mmx_core::zero_data) -> DIR/NN_name.png + DIR/sheet.png
 env: MMX_ROM=path/to/Mega Man X (USA).sfc";
 
 fn main() {
@@ -26,6 +28,7 @@ fn main() {
         Some("cooptrace") => cooptrace(&args[1..]),
         Some("ledger") => ledger(),
         Some("rominfo") => rominfo(),
+        Some("zerosheet") => zerosheet(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             2
@@ -108,10 +111,21 @@ fn scripted(args: &[String]) -> impl Fn(usize, Pads) -> Pads {
         flag(args, k)
             .map(|s| {
                 s.split(',')
-                    .map(|t| {
+                    .flat_map(|t| {
                         let (m, f) = t.split_once('@').unwrap_or_else(|| die(&format!("{k}: want HEX@FRAME, got {t}")));
                         let (f, n) = f.split_once(':').unwrap_or((f, "4"));
-                        (u16::from_str_radix(m.trim().trim_start_matches("0x"), 16).unwrap_or_else(|_| die(k)), f.trim().parse().unwrap_or_else(|_| die(k)), n.trim().parse().unwrap_or_else(|_| die(k)))
+                        let m = u16::from_str_radix(m.trim().trim_start_matches("0x"), 16).unwrap_or_else(|_| die(k));
+                        let n: usize = n.trim().parse().unwrap_or_else(|_| die(k));
+                        let p = |v: &str| -> usize { v.trim().parse().unwrap_or_else(|_| die(k)) };
+                        // `HEX@A-B/S`: every S frames from A to B.
+                        let frames: Vec<usize> = match f.split_once('-') {
+                            Some((a, bs)) => {
+                                let (b, st) = bs.split_once('/').unwrap_or((bs, "60"));
+                                (p(a)..=p(b)).step_by(p(st).max(1)).collect()
+                            }
+                            None => vec![p(f)],
+                        };
+                        frames.into_iter().map(move |f| (m, f, n))
                     })
                     .collect()
             })
@@ -178,7 +192,14 @@ fn verify(args: &[String]) -> i32 {
 fn dump(args: &[String]) -> i32 {
     let frames = num(args, "--frames").unwrap_or_else(|| die("dump needs --frames N"));
     let out = PathBuf::from(flag(args, "--out").unwrap_or_else(|| die("dump needs --out DIR")));
+    // `--at F,F,..` or `--at A-B/S`.
     let at: Vec<usize> = match flag(args, "--at") {
+        Some(s) if s.contains('-') => {
+            let (a, bs) = s.split_once('-').unwrap();
+            let (b, st) = bs.split_once('/').unwrap_or((bs, "100"));
+            let p = |v: &str| -> usize { v.parse().unwrap_or_else(|_| die("--at")) };
+            (p(a)..=p(b)).step_by(p(st).max(1)).collect()
+        }
         Some(s) => s.split(',').map(|f| f.trim().parse().unwrap_or_else(|_| die(&format!("--at: bad frame {f}")))).collect(),
         None => vec![frames],
     };
@@ -217,6 +238,14 @@ fn dump(args: &[String]) -> i32 {
             let w = g.wram();
             if args.iter().any(|a| a == "--wram") {
                 let _ = std::fs::write(out.join(format!("frame_{f:06}.wram")), &w[..]);
+            }
+            if args.iter().any(|a| a == "--vram") {
+                // VRAM (64 KiB, little-endian words), OAM (544 B), CGRAM (512 B LE).
+                let v: Vec<u8> = g.vram().iter().flat_map(|w| w.to_le_bytes()).collect();
+                let c: Vec<u8> = g.cgram().iter().flat_map(|w| w.to_le_bytes()).collect();
+                let _ = std::fs::write(out.join(format!("frame_{f:06}.vram")), v);
+                let _ = std::fs::write(out.join(format!("frame_{f:06}.oam")), g.oam());
+                let _ = std::fs::write(out.join(format!("frame_{f:06}.cgram")), c);
             }
             let b = |a: u32| w[mmx_core::ram::wram_index(a)];
             let w16 = |a: u32| u16::from_le_bytes([b(a), b(a + 1)]);
@@ -346,6 +375,88 @@ fn cooptrace(args: &[String]) -> i32 {
     }
     if n == 0 {
         println!("identical");
+    }
+    0
+}
+
+/// `zerosheet --out DIR`: every frame of `zero_data::extract_x1` on a 64x64
+/// cell (origin 32,44), one PNG each, plus a contact sheet (8 per row, 2x,
+/// index in the corner).
+fn zerosheet(args: &[String]) -> i32 {
+    use mmx_core::zero_data;
+    const C: usize = 64;
+    // 3x5 digits for the index.
+    const DIG: [u16; 10] = [0x7B6F, 0x2C97, 0x73E7, 0x73CF, 0x5BC9, 0x79CF, 0x79EF, 0x7249, 0x7BEF, 0x7BCF];
+    let out = PathBuf::from(flag(args, "--out").unwrap_or_else(|| die("zerosheet needs --out DIR")));
+    std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("{}: {e}", out.display())));
+    let g = game(rom());
+    let z = zero_data::extract_x1(g.rom_bytes()).unwrap_or_else(|e| die(&e));
+    let rgb = |c: u16| -> u32 {
+        let ch = |v: u16| u32::from(v & 31) << 3 | u32::from(v & 31) >> 2;
+        ch(c) << 16 | ch(c >> 5) << 8 | ch(c >> 10)
+    };
+    let cells: Vec<Vec<u32>> = z
+        .frames
+        .iter()
+        .map(|f| {
+            let mut px = vec![0x303048u32; C * C];
+            // Last OAM entry first, so the first ends on top.
+            for s in f.sprites.iter().rev() {
+                let n = if s.big { 16 } else { 8 };
+                for yy in 0..n {
+                    for xx in 0..n {
+                        let sx = if s.hflip { n - 1 - xx } else { xx };
+                        let sy = if s.vflip { n - 1 - yy } else { yy };
+                        let slot = usize::from(s.tile) + sx / 8 + 16 * (sy / 8);
+                        let t = f.tiles_used.get(slot).copied().unwrap_or(zero_data::NO_TILE);
+                        if t == zero_data::NO_TILE {
+                            continue;
+                        }
+                        let b = &z.tiles[usize::from(t) * 32..][..32];
+                        let (r, bit) = (sy % 8, 7 - sx % 8);
+                        let v = (b[2 * r] >> bit & 1)
+                            | (b[2 * r + 1] >> bit & 1) << 1
+                            | (b[16 + 2 * r] >> bit & 1) << 2
+                            | (b[17 + 2 * r] >> bit & 1) << 3;
+                        let (x, y) = (32 + i32::from(s.x) + xx as i32, 44 + i32::from(s.y) + yy as i32);
+                        if v != 0 && (0..C as i32).contains(&x) && (0..C as i32).contains(&y) {
+                            px[y as usize * C + x as usize] = rgb(z.palette[usize::from(v)]);
+                        }
+                    }
+                }
+            }
+            px
+        })
+        .collect();
+    for (i, (f, px)) in z.frames.iter().zip(&cells).enumerate() {
+        let path = out.join(format!("{i:02}_{}.png", f.name.replace(' ', "_")));
+        write_png(&path, px, C, C).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+    }
+    let cols = 8;
+    let (w, h) = (cols * C * 2, cells.len().div_ceil(cols) * C * 2);
+    let mut sheet = vec![0u32; w * h];
+    for (i, px) in cells.iter().enumerate() {
+        let (ox, oy) = ((i % cols) * C * 2, (i / cols) * C * 2);
+        let mut cell = px.clone();
+        for (k, ch) in i.to_string().bytes().enumerate() {
+            let d = DIG[usize::from(ch - b'0')];
+            for b in 0..15 {
+                if d >> (14 - b) & 1 != 0 {
+                    cell[(1 + b / 3) * C + 1 + 4 * k + b % 3] = 0xFFFF00;
+                }
+            }
+        }
+        for y in 1..C * 2 {
+            for x in 1..C * 2 {
+                sheet[(oy + y) * w + ox + x] = cell[(y / 2) * C + x / 2];
+            }
+        }
+    }
+    let path = out.join("sheet.png");
+    write_png(&path, &sheet, w, h).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+    println!("{} frames, {} tiles -> {}", z.frames.len(), z.tiles.len() / 32, path.display());
+    for (i, f) in z.frames.iter().enumerate() {
+        println!("  {i:2} {:14} {:2} sprites", f.name, f.sprites.len());
     }
     0
 }

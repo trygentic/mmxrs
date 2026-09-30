@@ -414,6 +414,10 @@ impl Game {
 
     /// Byte of the (header-stripped) ROM at a 24-bit LoROM address:
     /// `(bank & $7F) << 15 | (addr & $7FFF)`, mirrored over the image size.
+    pub fn rom_bytes(&self) -> &[u8] {
+        &self.rom
+    }
+
     pub fn rom_read(&self, addr: u32) -> u8 {
         let off = (((addr >> 16) & 0x7F) << 15 | (addr & 0x7FFF)) as usize;
         self.rom[off % self.rom.len()]
