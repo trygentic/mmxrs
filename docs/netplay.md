@@ -2,7 +2,9 @@
 
 mmxrs runs two-player co-op with a deterministic **rollback** session
 ([Rollback mode](#rollback-mode)), the default on the desktop app and in the
-browser, or **input-delay lockstep**, which both frontends keep selectable.
+browser, or **input-delay lockstep**, which both frontends keep selectable
+(`--mode lockstep`, the web page's mode menu; see
+[Frontend wiring](#frontend-wiring) for which to pick).
 Both peers run the same game from power-on,
 feed it the same `(pad1, pad2)` for each frame, and compare state hashes
 regularly. No late join, no spectators. Netplay is opt-in and never touches the verification path
@@ -238,10 +240,34 @@ message loop on its own thread. On the web, call it from the
 
 ## Frontend wiring
 
-Both frontends run **rollback** (no lockstep option yet) through one driver,
-`mmx_core::netgame::NetPlay` (`crates/mmx-core/src/netgame.rs`):
+Both frontends run either mode through one driver,
+`mmx_core::netgame::NetPlay` (`crates/mmx-core/src/netgame.rs`), picked by
+`netgame::Mode`:
 
-- `NetPlay::config(rom, host, delay, x3)` builds the Hello: ROM CRC32
+| | `Mode::Rollback` (default) | `Mode::Lockstep` |
+|---|---|---|
+| session | `RollbackSession` | `Session` (input-delay lockstep) |
+| input delay | 0-3 frames, default 2 | 0-8 frames, default 3 (50 ms) |
+| late remote pad | predicted (last pad repeated); corrected by re-simulating | the game waits; status shows `waiting for peer` |
+| what you see | never waits, but the remote player **snaps** when a prediction was wrong (measured up to 15 px horizontally / 31 px vertically, see `rollback_invisible_to_p2`) | smooth: every frame shown is final |
+| pick it for | lossy or long-distance links (RTT well above 50 ms) | same-region links (RTT under ~2x the delay) |
+
+**Recommended for playtests on a good link: `--mode lockstep --delay 3`** on
+both sides (web: mode *lockstep*, delay *3* or *auto*, or `?mode=lockstep`).
+With lockstep a frame steps only once both pads are known, so on a link whose
+round trip stays under the delay (3 frames = 50 ms) nothing ever waits or
+snaps; a lost packet costs a short stall instead of a visible correction.
+Switch to rollback when the link is lossy or far away and those stalls get
+frequent.
+
+The mode is **not negotiated**: both players must pick the same one. The two
+sessions announce different protocol versions in their Hello (`PROTO_VERSION`
+vs `ROLLBACK_PROTO_VERSION`), so a mismatch refuses to start and the status
+reads `closed (mismatch: NetMode)` on the side that noticed (the other side
+may show `mismatch: Proto`). Within a mode the host's delay wins. No protocol
+change was needed for this.
+
+- `NetPlay::config(rom, host, mode, delay, x3)` builds the Hello: ROM CRC32
   (`rom_info().crc32`), trap-set id (FNV over the sorted trap addresses of a
   session game, co-op traps included, plus a revision constant and a byte
   "X3 Zero set loaded": peers where only one loaded the X3 ROM refuse to
@@ -249,13 +275,19 @@ Both frontends run **rollback** (no lockstep option yet) through one driver,
   `COOP_TWO_PLAYERS`, input delay. No WRAM is sent (MMX has no SRAM; both
   peers start from power-on).
 - `tick(game, pad, now_ms)` once per 60 Hz frontend tick: pumps the network;
-  once live, adds the local pad, advances, and runs the requests. Save states
+  once live, **lockstep** latches the local pad and steps the next frame if
+  both pads are known (one frame per tick, 0 while waiting; hashes every 60
+  frames), **rollback** adds the local pad, advances, and runs the requests. Rollback save states
   are `Game::save_state` **plus the co-op state** (`CoopState`, bincode),
   because `save_state` alone would not rewind P2. Checksums are FNV-1a over
   WRAM `$7E:0000..$2000` and P2's shadow block. Replayed frames' audio is
-  dropped. On `Running` it replaces the game with a power-on game with the
+  dropped. On `Running` / `Started` it replaces the game with a power-on game with the
   co-op traps registered and `coop.enabled` set from the flags.
-- `status()` is the one-line status both frontends show.
+- `status()` is the one-line status both frontends show, prefixed with the
+  mode (`rollback host: ...`, `lockstep guest: ...`).
+- `pump(now_ms)` pumps the network only (flushing a goodbye), `settled_frames()`,
+  `checks_ok()`, `closed()`, `transport()` work in both modes; `rollback()` /
+  `lockstep()` expose the underlying session.
 - **Wire pad**: the full SNES `u16` pad travels as-is (X, L, R and Select
   included).
 
@@ -269,14 +301,22 @@ session exists. The game keeps running locally while connecting.
 cargo run --release -p mmx-signal                     # once, anywhere reachable
 mmxrs --rom mmx.sfc --coop-host myroom                 # player 1
 mmxrs --rom mmx.sfc --coop-join myroom                 # player 2
-      [--signal ws://HOST:3536] [--ice none|'stun:.. turn:.. username=U credential=C'] [--delay 0-3]
+      [--signal ws://HOST:3536] [--ice none|'stun:.. turn:.. username=U credential=C']
+      [--mode rollback|lockstep] [--delay N]
+
+# playtest on a good link (both sides):
+mmxrs --rom mmx.sfc --coop-host myroom --mode lockstep --delay 3
+mmxrs --rom mmx.sfc --coop-join myroom --mode lockstep --delay 3
 ```
 
 `--signal` defaults to `ws://127.0.0.1:3536`, `--ice` to the Google STUN pair,
-`--delay` to 2 (host's value wins). The window title shows
+`--mode` to rollback, `--delay` to the mode's default (rollback 2, range 0-3;
+lockstep 3, range 0-8; host's value wins). The window title shows
 `[NET rollback host: 2/4 waiting for the other player in myroom]`, then
 `[NET rollback host: f=.. d=.. rtt=..ms rollbacks=.. pred=cur/max]`
-(` INTERRUPTED` when the peer goes quiet), or `closed (reason)`; each connect
+(` INTERRUPTED` when the peer goes quiet) or
+`[NET lockstep host: f=.. d=.. rtt=..ms]` (` waiting for peer (1.2s)` while
+stalled), or `closed (reason)`; each connect
 stage is printed to stderr once. `Esc` / closing the window sends a goodbye
 and waits 200 ms. The transport is cargo feature `netplay` (default on; it
 pulls webrtc-rs + ring, which need a C compiler); `--no-default-features`
@@ -286,10 +326,12 @@ builds without it and `--coop-host/--coop-join` then fail with a message.
 
 Build the bundle with `--features netplay` (e.g. `wasm-pack build
 crates/mmx-web --target web --release --out-dir site/pkg -- --features netplay`).
-The panel above the screen has the signal URL, room, ICE text, delay and
+The panel above the screen has the signal URL, room, ICE text, mode
+(rollback / lockstep), delay (*auto* = the mode's default) and
 *Host* / *Join* / *Leave*; the status line under it shows the same text as the
-desktop title. `?signal=`, `?room=`, `?ice=`, `?delay=` prefill it. The `Emu`
-API: `net_connect(signal, room, host, delay, ice)`, `net_tick(pad, now_ms)`
+desktop title. `?signal=`, `?room=`, `?ice=`, `?mode=`, `?delay=` prefill it. The `Emu`
+API: `net_connect(signal, room, host, mode, delay, ice)` (`mode` is
+`"rollback"` or `"lockstep"`, `delay < 0` = default), `net_tick(pad, now_ms)`
 (frames simulated; present when > 0), `net_live()`, `net_active()`,
 `net_status()`, `net_leave()` then `net_drop()` ~200 ms later,
 `Emu.net_default_ice()`. A bundle without the feature has none of these and
@@ -301,12 +343,19 @@ the panel says so.
   (a 32 KiB LoROM whose loop sums both pads into WRAM,
   `netgame::synthetic_rom`), and two `Game`s through `NetPlay` over a lossy
   (15 %), jittery loopback link with delay 0 for 300 settled frames: no
-  desync, >= 25 checksum matches, real rollbacks.
+  desync, >= 25 checksum matches, real rollbacks
+  (`rollback_pair_over_lossy_loopback_stays_in_sync`). The lockstep twin
+  (`lockstep_pair_over_lossy_loopback_stays_in_sync`, delay 3, same link)
+  steps 300 frames, >= 25 hash matches, and both games must equal a plain run
+  fed the scripted full-width pads shifted by the delay.
+  `mode_mismatch_refuses_to_start`: a rollback host and a lockstep guest both
+  close without starting (`NetMode`).
 - `cargo test -p mmx-native netplay`: in-process mmx-signal, two
-  `NetPlay<MatchboxTransport>` over 127.0.0.1 (ICE `none`, delay 0), 300
-  settled frames on the synthetic ROM, then a quit the guest must see. With
+  `NetPlay<MatchboxTransport>` over 127.0.0.1 (ICE `none`), 300
+  settled frames on the synthetic ROM, then a quit the guest must see, once
+  per mode (rollback at delay 0, lockstep at delay 3). With
   `MMX_ROM` set the same runs on the real ROM with co-op on (120 frames in
-  debug, 600 in release).
+  debug, 600 in release), both modes.
 
 ## Connecting: stages, ICE servers and timeouts
 

@@ -15,19 +15,25 @@ device (~50 ms buffered); without an output device a 60.0988 Hz timer drives it.
 
 P1 L/R are Q/E; pause is F6. The P1, P2 and hotkey tables never share a key.
 
-Online co-op (rollback over WebRTC, see `docs/netplay.md` "Frontend wiring"):
+Online co-op (rollback or lockstep over WebRTC, see `docs/netplay.md` "Frontend wiring"):
 
 ```
 mmxrs --rom mmx.sfc (--coop-host ROOM | --coop-join ROOM)
-      [--signal ws://HOST:3536] [--ice none|'stun:.. turn:.. username=U credential=C'] [--delay 0-3]
+      [--signal ws://HOST:3536] [--ice none|'stun:.. turn:.. username=U credential=C']
+      [--mode rollback|lockstep] [--delay N]
 ```
+
+Both players pass the same `--mode` (default rollback; a mismatch refuses to
+start). `--delay`: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
+same-region link `--mode lockstep --delay 3` plays smoothest: the remote player
+never snaps, at the cost of short stalls when a packet is lost.
 
 Host is player 1, guest player 2; both play with the P1 keys / first pad.
 Needs `mmx-signal` running (`cargo run --release -p mmx-signal`). The title
-shows the connect stage, then `f= d= rtt= rollbacks= pred=`, or why it closed.
+shows the mode and connect stage, then `f= d= rtt= rollbacks= pred=` (rollback)
+or `f= d= rtt=` plus `waiting for peer` while stalled (lockstep), or why it closed.
 Pause, fast-forward, frame-step and save states are off during a session; Esc
-sends a goodbye. Online, only B/Y/A/Start/d-pad travel (X, L, R, Select are
-dropped: 8-bit wire pads). Cargo feature `netplay` (default) carries the
+sends a goodbye. The full SNES pad travels. Cargo feature `netplay` (default) carries the
 WebRTC transport; `--no-default-features` builds without it.
 
 Hotkeys: Tab hold fast-forward (8 frames per present, muted), F5 save state,
