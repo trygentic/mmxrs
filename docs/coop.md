@@ -228,17 +228,7 @@ Other v1 limits:
 - P2's sprites use X's graphics with palette 7. The palette is a placeholder:
   nobody has checked what it holds per stage, and Zero's colours are not
   written.
-- **Player tiles are shared.** P2's update rewrites X's VRAM upload queue
-  (`$0503..$050F`, seen with `MMX_COOP_DIFF`) after P1's, so both players
-  show P2's animation frame's tiles through their own OAM layouts (P1
-  standing is drawn with P2's running tiles). Needs a second VRAM tile area
-  for P2 (part of the real-Zero-sprites work).
-- P2 charging rewrites X's sprite palette in the CGRAM buffer
-  (`$0422..$043F`) and `$A1`, so P1 flashes when P2 charges.
-- Sound requests are shared (capped, see "Sound").
-- P2 advances the shared RNG.
-- P2 writes to the SRAM probes `$70:0800` and `$70:0804`. The anti-piracy
-  counter is at `+$83` inside the block.
+- **Player tiles** (was: shared): P2's streamer entries are diverted from the `$0500` queue into the PPU's shadow tile page and P2's OAM slots read from it (p2tiles.rs, docs/zero.md), so P1 and P2 draw their own poses on every stage.
 
 ## v2 plan
 
@@ -414,7 +404,7 @@ Still open:
   the earlier work.
 - [ ] Enemy shots / hazards through `$84:9F2A` hit only P1.
 - [ ] Enemies that die on contact die only on P1.
-- [ ] Shared player tiles (`$0500` upload queue) and charge palette (`$0422..`).
+- [x] Shared player tiles: fixed by the PPU shadow tile page (docs/zero.md route A'); P2 no longer writes VRAM. Still open: P2 charging rewrites X's sprite palette `$0422..`/`$A1` (P1 flashes).
 - [ ] Spikes not seen (no spikes on Highway).
 - [ ] Restoring `$1E48..$1E89` on every scroll type (only horizontal seen).
 - [ ] Other stages, bosses, the weapon menu and the stage-select flow.
