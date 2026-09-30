@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mmxrs</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #111; color: #ccc; font: 14px/1.4 system-ui, sans-serif;
+         display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px; }
+  canvas { width: min(100vw - 24px, 768px); aspect-ratio: 8 / 7; background: #000;
+           image-rendering: pixelated; image-rendering: crisp-edges; }
+  body.drag canvas { outline: 2px dashed #4af; }
+  #status { white-space: pre; font-family: ui-monospace, monospace; font-size: 12px; }
+  kbd { font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+  <div>
+    <input type="file" id="rom" accept=".sfc,.smc,.bin">
+    <label><input type="checkbox" id="coop"> local co-op</label>
+  </div>
+  <canvas id="screen" width="256" height="224"></canvas>
+  <div id="status">Drop your Mega Man X (USA) ROM here, or pick it above. Nothing is uploaded.</div>
+  <small>
+    P1 <kbd>arrows</kbd> <kbd>Z</kbd>B <kbd>X</kbd>Y <kbd>C</kbd>A <kbd>V</kbd>X <kbd>A</kbd>/<kbd>B</kbd>L <kbd>S</kbd>/<kbd>N</kbd>R <kbd>Enter</kbd>Start <kbd>Shift</kbd>Select ·
+    P2 <kbd>WASD</kbd> <kbd>G</kbd>B <kbd>F</kbd>Y <kbd>H</kbd>A <kbd>T</kbd>X <kbd>R</kbd>L <kbd>Y</kbd>R <kbd>P</kbd>Start <kbd>O</kbd>Select ·
+    <kbd>F5</kbd> save <kbd>F7</kbd> load <kbd>Tab</kbd> fast-forward
+  </small>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
