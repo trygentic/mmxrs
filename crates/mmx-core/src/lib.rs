@@ -7,6 +7,7 @@ pub mod coop;
 pub mod coop_stages;
 mod game;
 pub mod netgame;
+pub mod p2tiles;
 pub mod ram;
 pub mod traps;
 pub mod zero;

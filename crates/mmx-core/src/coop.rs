@@ -127,8 +127,6 @@ pub const P2_DOWN_FRAMES: u16 = 120;
 /// unverified: sprite palette for "Zero red". Placeholder; nobody checked
 /// what palette 7 holds in each stage, nor wrote Zero's colours into it.
 pub const ZERO_PALETTE: u8 = 3;
-/// P2's VRAM tile base (`+$18`), see `respawn_anchor`.
-pub const P2_TILE_BASE: u8 = 0x40; // free on every stage measured (docs/zero.md); 7 belongs to enemies
 /// Skip the P2 display pass when fewer OAM slots than this are left: the
 /// emitter's overflow exit (`$80:D77B`: `PLX; PLX; JMP $D5E2`) would unwind
 /// through `call_isolated`'s sentinel frame. unverified: X's max sprite count.
@@ -230,12 +228,8 @@ pub fn respawn_anchor(wram: &[u8; 0x20000]) -> [u8; X_BLOCK_LEN] {
     p2[OFF_POS_X..OFF_POS_X + 2].copy_from_slice(&x.saturating_add(P2_X_OFFSET).to_le_bytes());
     p2[OFF_VEL_X..OFF_VEL_X + 4].fill(0);
     p2[OFF_HP] = wram[ix(ram::MAX_HP)] & 0x7F;
-    // Own VRAM tile window: `+$18` is the tile base (x16 words) the ROM's
-    // streamer loads X's per-frame tiles into and the emitter adds to every
-    // tile number; `+$17` bit 7 asks for a reload. Sharing X's window drew
-    // P2 in X's pose. `$40` (tiles $40-$7F) is free on the Highway only;
-    // ponytail: docs/zero.md route A' replaces this with a shadow tile page.
-    p2[0x18] = P2_TILE_BASE;
+    // `+$18` stays X's tile window; P2's streamed tiles go to the PPU's
+    // shadow page instead of VRAM (p2tiles.rs). `+$17` bit 7 asks for a reload.
     p2[0x17] |= 0x80;
     // The emitter keeps bits 0-5 of `+$11`, so it writes P2's palette itself.
     p2[0x11] = (p2[0x11] & !0x0E) | (ZERO_PALETTE << 1);
@@ -445,6 +439,7 @@ fn p2_display(game: &mut Game) {
     }
     game.coop.p2_oam_base = usize::from(first);
     game.coop.p2_oam_count = usize::from(last.max(first) - first);
+    crate::p2tiles::mark_p2_slots(game);
 }
 
 /// `$84:9B03` entry, `D` = the enemy: run the same contact routine once more

@@ -96,12 +96,11 @@ the trap puts its full colours back.
   wall slide, `22`/`44` teleport-in, `1A` stage exit, `2E`/`30`/`32` Vile
   capture. Each has shooting variants.
 
-**Current bug (coop v1).** P2's block is a copy of X's with `+$18 = 0`, so P2
-streams into X's window. Whichever player changed frame last owns tiles
-`$00-$1F`, and when their poses differ the other player is drawn with the wrong
-pose (`p2_shared_tiles_garbled_x4.png`). Setting P2's `+$18 = $40` and `+$17 |=
-$80` at anchor time makes the ROM stream P2 into `$6400`, and both players then
-draw correctly (`p2_own_tilebase_40_x4.png`, Highway).
+**History.** coop v1 gave P2 a copy of X's block with the same `+$18`, so both
+players streamed into tiles `$00-$1F` and whoever changed frame last owned them
+(`p2_shared_tiles_garbled_x4.png`). v2 set P2's `+$18 = $40` at anchor, which
+drew both correctly on the Highway (`p2_own_tilebase_40_x4.png`) but overwrote
+enemy tiles elsewhere (see the table below). Route A' (next section) replaced it.
 
 **VRAM is not free per stage.** Tiles that were all zero in every sample (`.`),
 per 16-tile row:
@@ -113,6 +112,59 @@ per 16-tile row:
 | Octopus | none: `$020-$1FF` all used |
 
 So a fixed window works on the Highway's walking part only.
+
+## Route A' (implemented): P2's tiles in a shadow page
+
+Code: `crates/mmx-core/src/p2tiles.rs`, PPU patch in
+`vendor/jgenesis/snes-core/src/ppu.rs` (`P2Tiles`) and `ppu/sprites.rs`.
+
+- **PPU.** `Ppu::p2_tiles: P2TilesSlot(P2Tiles)`. `P2Tiles` holds `page`
+  (`[u16; 512]`, 32 4bpp tiles laid out as two name-table rows of 16, the same
+  shape as X's window, so a 16x16 sprite's `n, n+1, n+16, n+17` stay inside)
+  and `slots: u128` (bit n = OAM slot n), plus `next_page`/`next_slots` and a
+  `pending` flag. The host writes the `next_*` copies. They go live on the next
+  OAMDATA write, which is the game's NMI OAM upload, so page and mask switch in
+  the same vblank as the OAM they describe (no mid-frame tearing, and a lag
+  frame keeps the old pair). In `fetch_sprite_tiles` a sprite whose slot bit
+  is set reads `page[(tile & 0x1F) * 16..]` instead of VRAM. That is one shift
+  and test per sprite, and with `slots == 0` the renderer is unchanged (the
+  `verify --coop-off` parity run stays identical).
+- **Save state.** The page is inside the PPU, so `to_save_state` clones it.
+  Its bincode encoding inside `SnesEmulator` is empty (`P2TilesSlot`), and
+  `Game::save_state` appends the `P2Tiles` after `(emu, frame_count,
+  fired_at)`. States written before the patch (the `states/*.state` files) have
+  no tail and load with an empty page. Netplay rollback states wrap
+  `Game::save_state`, so they carry the page.
+- **Filling the page.** P2 keeps X's `+$18` (anchor copies X's block and only
+  sets `+$17 |= $80` to force a reload), so the emitter writes X's tile numbers
+  for P2. Two `Observe` traps on the streamer: at `$84:8FCA`, if the call runs
+  inside `call_isolated` (`Game::isolated_depth > 0`) with `D = $0BA8`, i.e.
+  P2's update, record `$A3` and `$1F25`. At its common exit `$84:9083`
+  (`PLB; PLP; RTL`, reached from both the queued and the empty path) decode
+  the entries P2 appended (`p2tiles::decode_entry`), copy each one's ROM
+  source into the page at `dest - (OBSEL base + +$18 * 16)` words
+  (`page_offset`), and put `$A3` and `$1F25` back. P2's tiles never enter the
+  DMA queue: no VRAM writes and no vblank DMA time.
+- **Mask.** The OAM build hook `$80:D544` clears the mask each frame. The co-op
+  display slice ends with `p2tiles::mark_p2_slots`: every P2 slot whose tile is
+  one of the 32 window tiles gets its bit (armour-part slots with other tiles
+  keep reading VRAM).
+- **Checked on the real ROM.** Highway start (P2 walks, P1 stands): pixel-identical
+  to the v2 `+$18 = $40` build at frames 30-120. Vile fight: P2 next to Vile,
+  both intact. Launch Octopus, both players running right for 2400 frames: the
+  v2 build draws P2's head over the sea enemies' heads (frames 250-2300 differ),
+  and A' draws both correctly.
+- **Limits.** The page assumes X's window is 32-tile aligned (`+$18 = 0` on
+  every stage seen). The armour parts (`$0C38`) are not streamed through the
+  page. If they stream, P1's and P2's share VRAM.
+
+**Zero art hook.** `p2tiles::fill_page(game, word_offset, bytes)` is the only
+writer of the page. A Zero art pack replaces the ROM copy in
+`stream_exit`: for P2's current frame (`+$17`, `+$31` in P2's block) write
+Zero's 4bpp tiles for the same slots, or write whole Zero frames with Zero's own
+layouts (then the emitter's tile numbers must index the Zero tiles, which is
+fine as long as they stay within 32 tiles in the two-row layout). Nothing else
+changes: same page, same mask, same save state.
 
 ## Real Zero sprites: routes
 
@@ -147,14 +199,14 @@ frontends (native and web) to composite and `mmx-core` to export P2's slots and
 frame per frame. Sprite priority against BG has to be re-derived, and any pose
 without art shows X's (currently garbled) tiles.
 
-**Recommendation: A'.** It fixes today's garbled-pose bug on every stage and
+**Recommendation: A'** (now implemented, see above). It fixes today's garbled-pose bug on every stage and
 works at native resolution everywhere (native, web, netplay). The Zero art then
 drops in as tiles and layouts. B can come later on top for HD art.
-Estimate: PPU page and queue interception, 1 day. Zero importer (`xtask`: PNG
+Done: PPU page and queue interception. Remaining: Zero importer (`xtask`: PNG
 sheet -> 4bpp tiles + layouts + per-frame tile lists), 1 day. Art: 85 layouts,
 or about 40 poses with shared bodies. That is days for someone repainting X3
-Zero frames into X1's poses, and far more from scratch. Short term, with no art,
-set P2 `+$18 = $40` on the Highway (a one-line coop change).
+Zero frames into X1's poses, and far more from scratch. Until then P2 shows X's
+tiles in Zero's colours on every stage.
 
 **Where the user can get Zero art (do not commit it).** Rip Zero from your own
 Mega Man X3 cartridge, where he is playable with walk, jump, dash, wall and

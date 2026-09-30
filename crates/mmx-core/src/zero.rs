@@ -55,7 +55,14 @@ pub fn sprite_palette_offset(pal: u8) -> usize {
 }
 
 pub fn register_zero_traps(game: &mut Game) {
-    game.traps.register(HOOK_OAM_BUILD, "zero_palette", TrapReturn::Observe, write_palette);
+    game.traps.register(HOOK_OAM_BUILD, "zero_oam_build", TrapReturn::Observe, oam_build);
+    crate::p2tiles::register(game);
+}
+
+/// [`HOOK_OAM_BUILD`]: P2's palette, and a fresh P2 slot mask for this frame.
+fn oam_build(game: &mut Game) {
+    crate::p2tiles::clear_slots(game);
+    write_palette(game);
 }
 
 /// Trap body: keep P2's sprite palette = `palette_for(X's)` in the mirror;

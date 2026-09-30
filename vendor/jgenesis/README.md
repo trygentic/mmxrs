@@ -53,3 +53,12 @@ between `SnesEmulator::tick` calls (see `docs/traps.md`).
 - `snes-core/src/api.rs` `run_cpu_isolated`: after each CPU tick the DMA unit
   is ticked until idle, so a GP-DMA started by the isolated routine completes
   before its next instruction (2026-09-30).
+
+- `snes-core/src/ppu.rs`, `ppu/sprites.rs`, `api.rs`: player 2's shadow sprite
+  tile page for mmx-core (`P2Tiles`: 512-word page + 128-bit OAM slot mask,
+  with pending copies that go live on the next OAMDATA write). A sprite whose
+  slot bit is set reads its tiles from the page (`tile & 0x1F`) instead of
+  VRAM. `SnesEmulator::p2_tile_page_mut`, `set_p2_tile_slots`, `p2_tiles`,
+  `set_p2_tiles`. Encoded as nothing inside the emulator state
+  (`P2TilesSlot`), so old save states still decode; mmx-core appends it to its
+  save state (2026-09-30).
