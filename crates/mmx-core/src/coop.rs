@@ -449,9 +449,14 @@ fn shot_slot(game: &mut Game) {
     }
 }
 
-/// The slot's update is done (or it was inactive): P1's block back.
+/// The slot's update is done (or it was inactive): Zero's muzzle, then P1's
+/// block back.
 fn shot_slot_done(game: &mut Game) {
-    if game.coop.enabled && p2_shot_slot(game) {
+    let p2 = game.coop.enabled && p2_shot_slot(game);
+    if (p2 && game.zero_set.is_some()) || (!p2 && game.p1_zero()) {
+        zero_muzzle(game);
+    }
+    if p2 {
         let mut p2 = game.coop.p2;
         swap_block(game.wram_mut(), &mut p2);
         // A P2 that respawned (`+$35 = 0`) with shots still out: no wrap.
@@ -461,6 +466,34 @@ fn shot_slot_done(game: &mut Game) {
             }
         }
         game.coop.p2 = p2;
+    }
+}
+
+/// Shot slot `D` of a Zero player (whose block is live): if the shot sits
+/// at X's muzzle (the block's `+05` + `$86:BDDD[+3C]`, mirrored by the
+/// shot's facing), the ROM just placed it (first update, or a charging shot
+/// re-anchoring): move it to Zero's cannon ([`crate::zero_data::ZERO_MUZZLE`]).
+fn zero_muzzle(game: &mut Game) {
+    let k = u32::from(game.regs().d.wrapping_sub(X_SHOTS as u16) / 0x40);
+    let a = X_SHOTS + k * 0x40;
+    if k >= 8 || game.wram()[ix(a)] == 0 {
+        return;
+    }
+    let m = game.wram()[ix(a) + 0x3C];
+    let Some(&(zx, zy)) = crate::zero_data::ZERO_MUZZLE.get(usize::from(m / 2)) else { return };
+    let t = crate::zero_data::X1_MUZZLE + u32::from(m);
+    let (xx, xy) = (i16::from(game.rom_read(t)), i16::from(game.rom_read(t + 1) as i8));
+    let w = game.wram_mut();
+    let s: i16 = if w[ix(a) + 0x11] & 0x40 != 0 { 1 } else { -1 };
+    let (px, py) = (word(w, ram::X_BASE + OFF_POS_X as u32), word(w, ram::X_BASE + OFF_POS_Y as u32));
+    let at = |dx: i16, dy: i16| (px.wrapping_add((s * dx) as u16), py.wrapping_add(dy as u16));
+    // x decides: the half charge (`+0A = 1`) re-anchors x only (`$81:A57B`).
+    let ((x0, y0), (x, y)) = (at(xx, xy), at(zx, zy));
+    if word(w, a + 5) == x0 {
+        w[ix(a) + 5..ix(a) + 7].copy_from_slice(&x.to_le_bytes());
+        if word(w, a + 8) == y0 {
+            w[ix(a) + 8..ix(a) + 10].copy_from_slice(&y.to_le_bytes());
+        }
     }
 }
 
@@ -796,6 +829,8 @@ mod tests {
 
     /// hw-spiky: P2 walks 40 px left of X and fires, X fires right. Each
     /// shot starts at its own shooter, flies its way, and both counts end at 0.
+    /// With the X3 set (`MMX_X3_ROM`) P2 is Zero and its shot leaves Zero's
+    /// cannon (stand: 27 px out, 7 up; X's: 16, 3), then P1 as Zero too.
     #[test]
     fn coop_p2_shot_from_p2() {
         let Some(rom) = std::env::var_os("MMX_ROM") else {
@@ -807,33 +842,46 @@ mod tests {
             eprintln!("{st} missing; skipping");
             return;
         };
-        let mut g = crate::Game::from_rom(std::fs::read(rom).unwrap()).unwrap();
-        g.load_state(&state).unwrap();
-        g.coop.enabled = true;
-        register_coop_traps(&mut g);
-        let shot = |g: &crate::Game, k: usize| {
-            let o = ix(X_SHOTS) + k * 0x40;
-            let w = g.wram();
-            (w[o] != 0, u16::from_le_bytes([w[o + 5], w[o + 6]]), w[o + 0x11] & 0x40 != 0)
-        };
-        for f in 1..=80 {
-            let p2 = match f {
-                ..=40 => crate::BTN_LEFT,
-                46 => crate::BTN_Y,
-                _ => 0,
+        let x3 = std::env::var_os("MMX_X3_ROM").map(|p| std::fs::read(p).unwrap());
+        let (x_muzzle, zero_muzzle) = ((16, -3), crate::zero_data::ZERO_MUZZLE[0]);
+        let runs: &[(bool, bool)] = if x3.is_some() { &[(false, false), (true, false), (true, true)] } else { &[(false, false)] };
+        for &(p2_zero, p1_zero) in runs {
+            let mut g = crate::Game::from_rom(std::fs::read(&rom).unwrap()).unwrap();
+            g.load_state(&state).unwrap();
+            if p2_zero {
+                g.set_x3_rom(x3.as_deref().unwrap()).unwrap();
+            }
+            g.set_p1_zero(p1_zero).unwrap();
+            g.coop.enabled = true;
+            register_coop_traps(&mut g);
+            let shot = |g: &crate::Game, k: usize| {
+                let o = ix(X_SHOTS) + k * 0x40;
+                let w = g.wram();
+                let w16 = |o: usize| u16::from_le_bytes([w[o], w[o + 1]]);
+                (w[o] != 0, w16(o + 5), w16(o + 8), w[o + 0x11] & 0x40 != 0)
             };
-            g.step(crate::Pads { p1: if f == 50 { crate::BTN_Y } else { 0 }, p2 });
-            let px = u16::from_le_bytes([g.coop.p2[OFF_POS_X], g.coop.p2[OFF_POS_X + 1]]);
-            if f == 46 {
-                assert_eq!(shot(&g, 0), (true, px - 16, false), "P2's shot");
-                assert_eq!(g.coop.p2[OFF_SHOTS], 1);
+            let (p2m, p1m) = (if p2_zero { zero_muzzle } else { x_muzzle }, if p1_zero { zero_muzzle } else { x_muzzle });
+            for f in 1..=80 {
+                let p2 = match f {
+                    ..=40 => crate::BTN_LEFT,
+                    46 => crate::BTN_Y,
+                    _ => 0,
+                };
+                g.step(crate::Pads { p1: if f == 50 { crate::BTN_Y } else { 0 }, p2 });
+                let p = |o: usize| u16::from_le_bytes([g.coop.p2[o], g.coop.p2[o + 1]]);
+                if f == 46 {
+                    let want = (true, p(OFF_POS_X) - p2m.0 as u16, p(OFF_POS_Y).wrapping_add(p2m.1 as u16), false);
+                    assert_eq!(shot(&g, 0), want, "P2's shot, zero {p2_zero}");
+                    assert_eq!(g.coop.p2[OFF_SHOTS], 1);
+                }
+                if f == 50 {
+                    let w = |a: u32| u16::from_le_bytes([g.wram()[ix(a)], g.wram()[ix(a) + 1]]);
+                    let want = (true, w(ram::X_POS_X) + p1m.0 as u16, w(ram::X_POS_Y).wrapping_add(p1m.1 as u16), true);
+                    assert_eq!(shot(&g, 1), want, "P1's shot, zero {p1_zero}");
+                }
             }
-            if f == 50 {
-                let x = u16::from_le_bytes([g.wram()[ix(ram::X_POS_X)], g.wram()[ix(ram::X_POS_X) + 1]]);
-                assert_eq!(shot(&g, 1), (true, x + 16, true), "P1's shot");
-            }
+            assert!(!shot(&g, 0).0 && !shot(&g, 1).0);
+            assert_eq!((g.coop.p2[OFF_SHOTS], g.wram()[ix(ram::X_BASE) + OFF_SHOTS], g.coop.p2_shots), (0, 0, 0));
         }
-        assert!(!shot(&g, 0).0 && !shot(&g, 1).0);
-        assert_eq!((g.coop.p2[OFF_SHOTS], g.wram()[ix(ram::X_BASE) + OFF_SHOTS], g.coop.p2_shots), (0, 0, 0));
     }
 }
