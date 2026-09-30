@@ -243,12 +243,241 @@ message loop on its own thread. On the web, call it from the
 | link | mode | flags | why |
 |---|---|---|---|
 | same region (round trip under ~80 ms) | lockstep | `--mode lockstep --delay 3` | no snapping; the 50 ms delay hides the round trip |
-| across continents (round trip 250-350 ms, 15-20 frames) | rollback | `--mode rollback --delay 3 --prediction 20` | lockstep's max delay (8 frames) cannot cover it and the game waits every frame; rollback keeps running, the remote player snaps after corrections |
+| across continents (round trip 250-350 ms, 15-20 frames) | rollback | `--mode rollback --delay 3 --prediction 20` | lockstep's max delay (8 frames) cannot cover it: at 300 ms RTT it runs 43 of 50 fps at delay 8 and a third of full speed at delay 3 (see [Testing the netcode](#testing-the-netcode)); rollback keeps running, the remote player snaps after corrections |
 
 `--prediction` is rollback's window (frames it will run ahead of confirmed
 remote input; default 8, max 30). It is local policy, not negotiated, so each
 side may set its own. A window smaller than the round trip makes the session
 stall until inputs arrive, which looks like a low frame rate.
+
+## Testing the netcode
+
+Two tools reproduce and explain what players see on a bad link:
+`cargo xtask netsim` runs a whole session offline under chosen network
+conditions, and session logs (`mmxrs --net-record`, the web page's *Log*
+button) capture what really happened online, for `cargo xtask netreplay`.
+
+### `xtask netsim`: a session over a simulated link
+
+Two real-ROM session games, each driven by `NetPlay` exactly like a frontend
+(same `tick_audio` pacing: a fake audio device per peer, 48 kHz host / 44.1 kHz
+guest, topped up to 50 ms at most 4 ticks per 2 ms wake-up, 200 ms cap), over
+`loopback_pair` with 1 ms of virtual time per loopback tick: a minute of play
+at 300 ms RTT costs about a minute of CPU in release and no waiting.
+
+```sh
+export MMX_ROM=roms/mega-man-x.smc
+cargo build --release -p xtask
+# intercontinental: 300 ms round trip, 40 ms jitter, 3 % loss;
+# P1 (host) walks right and jumps every 40 frames, P2 (guest) walks right/left
+target/release/xtask netsim --load states/hw-spiky.state \
+  --rtt 300 --jitter 40 --loss 3 --mode rollback --delay 3 --prediction 20 --frames 3600 \
+  --hold 0100 --p1tap 8000@1-3600/40:12 --p2tap 0100@1-3600/120:60,0200@61-3600/120:60 \
+  --report rb.json --record rb
+```
+
+Flags: `--mode rollback|lockstep`, `--delay N` (default: the mode's),
+`--prediction N` (rollback window, default 8), `--rtt MS` (the link adds
+RTT/2 each way), `--jitter MS` (extra 0..=MS per packet, reorders),
+`--loss PCT` (unreliable packets), `--frames N` (settled frames to run),
+`--seed N` (link RNG), `--load STATE` (loaded into both session games right
+after `Running`, before frame 0), `--x3 PATH` / `$MMX_X3_ROM`, `--zero`,
+`--timing ntsc|pal` / `$MMX_TIMING`. The pads come from the usual input
+script (`--hold`, `--tap`, `--p1tap` for pad 1 = the host; `--p2-hold`,
+`--p2tap` for pad 2 = the guest; frame numbers count from the session
+start, 1-based, and name the tick where that frame is next, so the pad lands
+`delay` frames later). `--report F.json` writes the numbers below as JSON,
+`--record PREFIX` writes both peers' session logs (`PREFIX-host.log`,
+`PREFIX-guest.log`). Exit status 1 on a desync, a session that closed, or any
+settled frame that differs from the plain run.
+
+Result of the command above (PAL ROM, 50.007 fps):
+
+```
+netsim: rollback delay 3 prediction 20, RTT 300 ms, jitter 40 ms, loss 3%, 3600 frames, 72.8 s virtual, 298 packets dropped
+desync: no
+host : 3605 frames, 3600 settled, 49.67 fps of 50.01 (0.2% ticks stalled), 61 checks ok
+       rollbacks 60 (max depth 15, 348 frames replayed), prediction window full 0 times, 2 wait recommendations
+       remote player first drawn vs settled: max 21 px, mean 0.35 px, 3.0% of frames > 4 px
+       audio: queue max 70 ms, dropped 0 ms, starved 2 ms
+guest: 3605 frames, 3600 settled, 49.77 fps of 50.01 (0.0% ticks stalled), 61 checks ok
+       rollbacks 176 (max depth 8, 1131 frames replayed), prediction window full 0 times, 0 wait recommendations
+       remote player first drawn vs settled: max 31 px, mean 2.38 px, 17.8% of frames > 4 px
+       audio: queue max 70 ms, dropped 0 ms, starved 2 ms
+plain single-Game run: identical for all 3600 settled frames on both peers
+recommendation: at 300 ms RTT (+40 ms jitter) lockstep needs delay >= 11 (max 8): use rollback with --prediction >= 16
+```
+
+The same link and script in lockstep at its largest delay
+(`--mode lockstep --delay 8`, no `--prediction`):
+
+```
+netsim: lockstep delay 8 prediction 0, RTT 300 ms, jitter 40 ms, loss 3%, 3600 frames, 84.3 s virtual, 556 packets dropped
+desync: no
+host : 3601 frames, 3601 settled, 42.83 fps of 50.01 (14.0% ticks stalled), 60 checks ok
+       remote player first drawn vs settled: max 0 px, mean 0.00 px, 0.0% of frames > 4 px
+       audio: queue max 70 ms, dropped 0 ms, starved 2 ms
+guest: 3600 frames, 3600 settled, 42.90 fps of 50.01 (13.9% ticks stalled), 60 checks ok
+       remote player first drawn vs settled: max 0 px, mean 0.00 px, 0.0% of frames > 4 px
+       audio: queue max 70 ms, dropped 0 ms, starved 2 ms
+plain single-Game run: identical for all 3600 settled frames on both peers
+recommendation: this run stalled 14% of ticks; at 300 ms RTT (+40 ms jitter) lockstep needs delay >= 11 (max 8): use rollback with --prediction >= 17
+```
+
+So across the world lockstep is smooth (nothing snaps) but runs 43 of 50
+fps even at delay 8, and at the default delay 3 about a third of full speed
+(the synthetic-ROM test measures 20 of 60 fps at 300 ms RTT). Rollback keeps
+full speed; the guest sees P1 (who jumps) drawn up to 31 px from where it
+settles on 18 % of frames, the host sees P2 (who only walks) snap much less.
+
+What each line means:
+
+- **desync**: a peer's checksum check failed (`desync at frame N`, the frame
+  whose state was compared), or the session closed for another reason.
+- **frames / settled**: frames simulated for the first time / frames that
+  can no longer change (rollback: final on both peers; lockstep: all).
+- **fps of F (% ticks stalled)**: new frames per second of virtual time
+  since the session started, against the ROM's rate. A stalled tick produced
+  no new frame (lockstep waiting for the remote pad, rollback's prediction
+  window full, or a wait recommendation being honoured) and plays a frame of
+  silence, so the stall percentage is the slowdown players feel.
+- **checks ok**: checksum comparisons that matched.
+- **rollbacks (max depth, frames replayed)**: corrections of a wrong
+  prediction and how many frames they re-simulated. **prediction window
+  full** counts ticks where rollback refused to run further ahead of the
+  confirmed remote input (`RollbackStats::stalled_advances`; raise
+  `--prediction`). **wait recommendations**: times this peer was told to skip
+  ticks because it ran ahead of the other.
+- **remote player first drawn vs settled**: for every frame, where the other
+  player (P2 on the host, P1 on the guest) was on screen the first time the
+  frame was drawn, against where it ended up once the frame settled, as
+  max(|dx|, |dy|) in pixels. That is the bouncing / clipping players report.
+  Always 0 in lockstep.
+- **audio**: the fake device's deepest queue, audio dropped at the 200 ms
+  cap (dropping is what sped the music up before `tick_audio`), and audio the
+  device found missing.
+- **plain single-Game run**: every settled frame on both peers (WRAM, P2's
+  block and OAM, hashed per frame) equals one `Game` fed the host's settled
+  pads, and both peers settled the same pads: the invariant
+  `rollback_invisible_to_p2_*` checks, for any link.
+- **recommendation**: lockstep runs at most `2 * delay` frames per round
+  trip (each peer waits for the other's pad, which was sent `delay` frames
+  ahead; measured: delay 3 at 300 ms RTT gives 20 fps), so full speed needs a
+  delay of the one-way trip plus jitter in frames, plus one. Rollback's
+  window should cover a round trip plus jitter minus the input delay (the
+  peers drift apart until wait recommendations pull them back). Prefixed
+  with what went wrong in this run, if anything.
+
+The JSON (`--report`) holds the same numbers: `desync`, `desync_frame`,
+`closed`, `plain_frames`, `plain_mismatch_frame`, `ok`, `recommendation`
+and per peer `fps`, `game_fps`, `stall_pct`, `checks_ok`, `rollbacks`,
+`max_rollback_depth`, `replayed_frames`, `prediction_full`,
+`wait_recommendations`, `remote_err_max_px`, `remote_err_mean_px`,
+`remote_err_over4_pct`, `audio_queue_max_ms`, `audio_dropped_ms`,
+`audio_starved_ms`.
+
+### Session logs: recording a real session
+
+```sh
+mmxrs --coop-host myroom --mode rollback --delay 3 --prediction 20 --net-record host.log
+mmxrs --coop-join myroom --mode rollback --delay 3 --prediction 20 --net-record guest.log
+```
+
+In the browser every session records; the *Log* button next to *Leave*
+downloads the current (or last) session's log (`Emu.net_record()`). The log
+starts at `Running` (both peers at power-on, frame 0); mmxrs appends to the
+file every second, so a crash loses at most a second. Size: a few hundred KB
+per hour (the 72 s netsim run above wrote 7.5 KB per peer).
+
+Format (`mmx_core::netlog`): text, one record per line. A header of
+`key value` lines ending with `---`:
+
+```
+mmxnetlog 1
+rom_crc 41965122            ROM CRC32
+trapset da97cf921293f9da    handshake trap-set id (build + X3/Zero flags)
+mode rollback               rollback | lockstep
+role guest                  host (P1) | guest (P2)
+delay 3                     effective (host's) input delay
+prediction 20               rollback window (0 in lockstep)
+interval 60                 checksum interval in frames
+timing auto                 auto | ntsc | pal
+x3 0                        X3 Zero set loaded
+zero 0                      P1 plays as Zero
+load states/hw-spiky.state  (netsim only) state loaded at frame 0
+---
+```
+
+then the body. `MS` is wall-clock milliseconds since `Running`, `F` the next
+frame to simulate at that moment, `N` a frame count: the state after `N`
+frames (rollback checks the state before frame `N`, lockstep after frame
+`N - 1`; the log normalises both). Pads and checksums are hex.
+
+| line | meaning |
+|---|---|
+| `p N P1 P2` | the next `N` confirmed frames used pads `P1`, `P2` (run-length; frames are implicit, counting from 0) |
+| `t MS F` | time mark, once a second |
+| `c MS N LOCAL REMOTE` | checksum of the state after `N` frames here, and as reported by the peer (equal unless desynced) |
+| `r F D` | rollback of `D` frames while `F` was next |
+| `s MS F DUR` | stall: from `MS`, `DUR` ms without a new frame while `F` was next (wait recommendations not counted) |
+| `w MS F SKIP` | wait recommendation: skip `SKIP` ticks |
+| `i MS F` / `j MS F` | network interrupted (peer silent) / resumed |
+| `d MS N LOCAL REMOTE` | desync detected on the state after `N` frames |
+| `x MS REASON` | session closed (`local quit`, `peer quit`, `desync`, ...) |
+
+### `xtask netreplay`: what really happened
+
+```sh
+cargo xtask netreplay host.log                  # one peer's log
+cargo xtask netreplay host.log guest.log        # both: also compared with each other
+      [--load STATE] [--x3 PATH] [--rom PATH]   # --load only for netsim logs made with --load
+```
+
+It rebuilds the session game the way the peers did
+(`netgame::session_game`, co-op on, the X3 set and `--zero` per the header;
+it refuses when the ROM CRC or the trap-set id differ, i.e. another ROM,
+build or flags), steps the confirmed pad track and compares the checksum
+after every logged interval with the log's local and remote values. For the
+netsim run above:
+
+```
+rollback host: delay 3, prediction 20, check every 60 frames, timing auto, x3 0, zero 0; 3600 confirmed frames over 1:12
+stalls: none
+rollbacks by depth: 5-8: 58, 9-16: 2
+60 checksum matches, 2 wait recommendations, 0 network interruptions
+replay of 3600 frames matches all 60 checksums in the log
+...
+input tracks identical for 3600 frames (3600 / 3600 recorded)
+checksums agree at all 60 common intervals
+```
+
+On a desync it prints `host and guest disagreed at frame N (state after N
+frames); the replay matches host` (or `guest`, or `neither`): the peer the
+replay matches simulated correctly, so the other one diverged at or before
+frame N (since the previous matching check). `both peers agreed at frame N
+... but the replay has X` means the replay is not the session's game (ROM,
+build or flags differ). With two logs it also checks that the input tracks
+are identical (they must be; a difference is a netcode bug) and compares the
+two local checksums per interval. The summary turns "my cofounder saw X at
+minute 3" into frames: time marks map minutes to frames, stalls and
+rollbacks show where the link hurt. Exit status 1 when a checksum or the
+input tracks differ.
+
+### Tests
+
+- `cargo test -p xtask net`: `netsim_synthetic_reports` (both modes on the
+  synthetic ROM at 300 ms RTT: no desync, plain run identical, report and
+  JSON fields present, rollback rolls back, lockstep stalls),
+  `netsim_detects_forced_desync` (the guest's WRAM is corrupted from frame
+  150: both modes report `desync: YES` within a few check intervals),
+  `netreplay_on_netsim_logs` (netsim `--record` logs replay cleanly and agree
+  with each other; a tampered checksum is pinned to its frame and to the peer
+  that was right).
+- `cargo test -p mmx-core netlog`: `log_round_trips` (header, run-length
+  pads settled out of order, every event kind), `stalls_and_time_marks`.
+- `cargo test -p mmx-native netplay`: the localhost matchbox pairs record
+  both peers with `--net-record`; the logs must hold the same input track and
+  matching checksums.
 
 ## Frontend wiring
 
@@ -319,7 +548,7 @@ cargo run --release -p mmx-signal                     # once, anywhere reachable
 mmxrs --rom mmx.sfc --coop-host myroom                 # player 1
 mmxrs --rom mmx.sfc --coop-join myroom                 # player 2
       [--signal ws://HOST:3536] [--ice none|'stun:.. turn:.. username=U credential=C']
-      [--mode rollback|lockstep] [--delay N]
+      [--mode rollback|lockstep] [--delay N] [--prediction N] [--net-record LOG]
 
 # playtest on a good link (both sides):
 mmxrs --rom mmx.sfc --coop-host myroom --mode lockstep --delay 3
@@ -351,7 +580,9 @@ API: `net_connect(signal, room, host, mode, delay, ice)` (`mode` is
 `"rollback"` or `"lockstep"`, `delay < 0` = default), `net_tick(pad, now_ms)`
 (frames simulated; present when > 0), `net_live()`, `net_active()`,
 `net_status()`, `net_leave()` then `net_drop()` ~200 ms later,
-`Emu.net_default_ice()`. A bundle without the feature has none of these and
+`Emu.net_default_ice()`, `net_record()` (the session log, see
+[Session logs](#session-logs-recording-a-real-session); the *Log* button
+downloads it). A bundle without the feature has none of these and
 the panel says so.
 
 ### Tests
