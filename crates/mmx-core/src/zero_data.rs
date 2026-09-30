@@ -676,7 +676,7 @@ fn render(brr: &[i16], lp: usize, pitch: &[u16], gain: i32) -> Vec<i16> {
         let f = (k as u64 * 600_988 / (u64::from(DSP_RATE) * 10_000)) as usize;
         let (i, frac) = ((pos >> 12) as usize, (pos & 0xFFF) as i32);
         let (a, b) = (i32::from(brr[i]), i32::from(brr[if i + 1 < brr.len() { i + 1 } else { lp }]));
-        let env = if k < n { 256 } else { (256 * (n + RELEASE - 1 - k) / RELEASE) as i32 };
+        let env = if k < n { 256 } else { (256 * (n + RELEASE).saturating_sub(k + 2) / RELEASE) as i32 };
         out.push((a + ((b - a) * frac >> 12)) * gain / 256 * env / 256);
         pos += u32::from(pitch[f.min(pitch.len() - 1)]);
         while (pos >> 12) as usize >= brr.len() {
