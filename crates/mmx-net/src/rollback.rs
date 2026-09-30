@@ -450,6 +450,8 @@ pub struct RollbackSession<T: Transport> {
     next_recommendation_frame: u32,
     outbox: Vec<(Channel, Vec<u8>)>,
     events: Vec<RollbackEvent>,
+    /// Compared checksums `(frame, local, remote)` not yet taken.
+    checks: Vec<(u32, u64, u64)>,
     stats: RollbackStats,
 }
 
@@ -508,6 +510,7 @@ impl<T: Transport> RollbackSession<T> {
             next_recommendation_frame: 0,
             outbox: Vec::new(),
             events: Vec::new(),
+            checks: Vec::new(),
             stats: RollbackStats::default(),
             cfg,
         })
@@ -592,6 +595,13 @@ impl<T: Transport> RollbackSession<T> {
     /// Drain pending events.
     pub fn events(&mut self) -> Vec<RollbackEvent> {
         std::mem::take(&mut self.events)
+    }
+
+    /// Drain the checksum comparisons made so far as `(frame, local,
+    /// remote)`, matches and mismatches alike (for session logs). Grows by
+    /// one per check interval until taken.
+    pub fn take_checks(&mut self) -> Vec<(u32, u64, u64)> {
+        std::mem::take(&mut self.checks)
     }
 
     /// Record this tick's local pad for frame `frame() + input_delay()`.
@@ -1055,6 +1065,7 @@ impl<T: Transport> RollbackSession<T> {
         };
         self.sent_checksums.remove(&frame);
         self.remote_checksums.remove(&frame);
+        self.checks.push((frame, local, remote));
         if local == remote {
             self.stats.checksums_ok += 1;
         } else {
