@@ -1,0 +1,309 @@
+# ram-map.toml: WRAM map, Mega Man X (USA) v1.0, bank $7E. Mirrors docs/PLAN.md
+# "RAM map"; names match crates/mmx-core/src/ram.rs constants where they exist.
+# size is in bytes (hex in the plan converted to decimal).
+
+[[ram]]
+name = "TASK_SLOTS"
+addr = "7E:0030"
+size = 112
+note = "scheduler: 7 task slots, stride $10"
+
+[[ram]]
+name = "TASK_CURRENT"
+addr = "7E:00A0"
+size = 1
+note = "current scheduler slot"
+
+[[ram]]
+name = "PAD1_HELD"
+addr = "7E:00A7"
+size = 2
+note = "P1 held"
+
+[[ram]]
+name = "PAD1_PREV"
+addr = "7E:00A9"
+size = 2
+note = "P1 previous"
+
+[[ram]]
+name = "PAD1_PRESSED"
+addr = "7E:00AB"
+size = 2
+note = "P1 newly pressed"
+
+[[ram]]
+name = "PAD2_HELD"
+addr = "7E:00AD"
+size = 2
+note = "P2 held"
+
+[[ram]]
+name = "PAD2_PREV"
+addr = "7E:00AF"
+size = 2
+note = "P2 previous"
+
+[[ram]]
+name = "PAD2_PRESSED"
+addr = "7E:00B1"
+size = 2
+note = "P2 newly pressed"
+
+[[ram]]
+name = "MODE_D1"
+addr = "7E:00D1"
+size = 1
+note = "0 new-game init, 2 running"
+
+[[ram]]
+name = "MODE_D2"
+addr = "7E:00D2"
+size = 1
+note = "0 intro, 2 stage select, 4 in stage, $0A game over"
+
+[[ram]]
+name = "STAGE_PHASE"
+addr = "7E:00D3"
+size = 1
+note = "0 load, 2 ready, 4 gameplay, 6 dying, 8 clear"
+
+[[ram]]
+name = "MODE_D4"
+addr = "7E:00D4"
+size = 1
+note = "sub-mode, meaning unknown"
+
+[[ram]]
+name = "CGRAM_BUF"
+addr = "7E:0300"
+size = 512
+note = "CGRAM shadow buffer"
+
+[[ram]]
+name = "OAM_BUF"
+addr = "7E:0700"
+size = 544
+note = "OAM shadow buffer"
+
+[[ram]]
+name = "SOUND_QUEUE"
+addr = "7E:0B72"
+size = 32
+note = "ring of 16 {cmd,param}; enqueue $80:888F"
+
+[[ram]]
+name = "FRAME_MAIN"
+addr = "7E:0B9B"
+size = 1
+note = "main loop frame counter"
+
+[[ram]]
+name = "FRAME_STAGE"
+addr = "7E:0B9C"
+size = 1
+note = "in-stage frame counter"
+
+[[ram]]
+name = "NMI_DONE"
+addr = "7E:0B9D"
+size = 1
+note = "NMI-done flag"
+
+[[ram]]
+name = "FRAME_NMI"
+addr = "7E:0B9E"
+size = 1
+note = "NMI frame counter"
+
+[[ram]]
+name = "RNG"
+addr = "7E:0BA6"
+size = 2
+note = "RNG state, advanced by $84:9086"
+
+[[ram]]
+name = "X_BASE"
+addr = "7E:0BA8"
+size = 144
+note = "X object block; player code runs with D=$0BA8"
+
+[[ram]]
+name = "X_ACTION"
+addr = "7E:0BAA"
+size = 1
+note = "+02 action ($0C death, $0E hurt)"
+
+[[ram]]
+name = "X_SUBPIX_X"
+addr = "7E:0BAC"
+size = 1
+note = "+04 X subpixel"
+
+[[ram]]
+name = "X_POS_X"
+addr = "7E:0BAD"
+size = 2
+note = "+05 X position"
+
+[[ram]]
+name = "X_SUBPIX_Y"
+addr = "7E:0BAF"
+size = 1
+note = "+07 Y subpixel"
+
+[[ram]]
+name = "X_POS_Y"
+addr = "7E:0BB0"
+size = 2
+note = "+08 Y position"
+
+[[ram]]
+name = "X_FACING"
+addr = "7E:0BB9"
+size = 1
+note = "+11 facing in bit 6"
+
+[[ram]]
+name = "X_VEL_X"
+addr = "7E:0BC2"
+size = 2
+note = "+1A X velocity"
+
+[[ram]]
+name = "X_VEL_Y"
+addr = "7E:0BC4"
+size = 2
+note = "+1C Y velocity"
+
+[[ram]]
+name = "X_HP"
+addr = "7E:0BCF"
+size = 1
+note = "+27 HP, bit 7 = HUD redraw"
+
+[[ram]]
+name = "X_WEAPON"
+addr = "7E:0BDB"
+size = 1
+note = "+33 current weapon"
+
+[[ram]]
+name = "X_INPUT_HELD"
+addr = "7E:0BDE"
+size = 2
+note = "X remapped input held (built by $80:E559)"
+
+[[ram]]
+name = "X_INPUT_PREV"
+addr = "7E:0BE0"
+size = 2
+note = "X remapped input previous"
+
+[[ram]]
+name = "X_INPUT_PRESSED"
+addr = "7E:0BE2"
+size = 2
+note = "X remapped input pressed"
+
+[[ram]]
+name = "X_IFRAMES"
+addr = "7E:0C13"
+size = 1
+note = "+6B invincibility frames"
+
+[[ram]]
+name = "SHOTS_BASE"
+addr = "7E:0C98"
+size = 384
+note = "player shots, $20 x 12"
+
+[[ram]]
+name = "ENEMIES_BASE"
+addr = "7E:0E68"
+size = 960
+note = "enemies, $40 x 15 (+00 active, +0A id, +05/+08 pos, +26 contact dmg, +27 HP)"
+
+[[ram]]
+name = "ITEMS_BASE"
+addr = "7E:1228"
+size = 512
+note = "items / enemy shots, $40 x 8"
+
+[[ram]]
+name = "EFFECTS_BASE"
+addr = "7E:1928"
+size = 992
+note = "effects, $20 x 31"
+
+[[ram]]
+name = "CAMERA_X"
+addr = "7E:1E4D"
+size = 2
+note = "BG1 camera X"
+
+[[ram]]
+name = "CAMERA_Y"
+addr = "7E:1E50"
+size = 2
+note = "BG1 camera Y"
+
+[[ram]]
+name = "BOSS_PTR"
+addr = "7E:1F0E"
+size = 2
+note = "boss object pointer"
+
+[[ram]]
+name = "PAUSE"
+addr = "7E:1F24"
+size = 1
+note = "pause flag"
+
+[[ram]]
+name = "LEVEL_ID"
+addr = "7E:1F7A"
+size = 1
+note = "current level"
+
+[[ram]]
+name = "LIVES"
+addr = "7E:1F80"
+size = 1
+note = "lives"
+
+[[ram]]
+name = "SUB_TANKS"
+addr = "7E:1F83"
+size = 4
+note = "sub-tanks x 4"
+
+[[ram]]
+name = "WEAPON_ENERGY"
+addr = "7E:1F88"
+size = 16
+note = "weapon energy, word per weapon at $1F88+2i (8 weapons assumed)"
+
+[[ram]]
+name = "ARMOR"
+addr = "7E:1F99"
+size = 1
+note = "armor parts"
+
+[[ram]]
+name = "MAX_HP"
+addr = "7E:1F9A"
+size = 1
+note = "max HP"
+
+[[ram]]
+name = "HEART_TANKS"
+addr = "7E:1F9C"
+size = 1
+note = "heart tanks collected"
+
+[[ram]]
+name = "ANTI_PIRACY"
+addr = "7E:1F9F"
+size = 1
+note = "anti-piracy counter (SRAM probes at $70:xxxx; unmapped = pass)"
