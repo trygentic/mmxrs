@@ -602,6 +602,40 @@ pub fn zero_x3_frame_for(x_action: u8, x_frame: u8) -> Option<usize> {
     })
 }
 
+/// X1's buster muzzle table `$86:BDDD` (listing `$86:BE39`): 2 bytes per
+/// entry (`dx` unsigned toward the facing, `dy` signed), indexed by the
+/// shot's `+3C` = 2 * (pose base + the player's `+0F & $0F`), set by the
+/// fire routines `$81:93B2` / `$81:9435`.
+pub const X1_MUZZLE: u32 = 0x86BDDD;
+
+/// Zero's muzzle per X1 muzzle entry (`+3C / 2`), from Zero's origin in our
+/// drawn frame (X3's spawn offset + [`crate::zero::X3_Y_OFFSET`]), x toward
+/// the facing. Measured in X3 (Zero, first frame of `$10D8` lemons):
+/// stand (27,1), air (24,-4), land (24,-1), walk (24,0 +-1), dash (41,12),
+/// wall slide (30,-1) then (26,3), wall kick (22,-3). Entries 22 and 28-33
+/// (X1 poses not identified: act `$20`, `$02`, `$2A`, ...) keep X's own.
+pub const ZERO_MUZZLE: [(i16, i16); 34] = {
+    const Y: i16 = crate::zero::X3_Y_OFFSET;
+    const STAND: (i16, i16) = (27, 1 + Y);
+    const AIR: (i16, i16) = (24, -4 + Y);
+    const LAND: (i16, i16) = (24, -1 + Y);
+    const WALK: (i16, i16) = (24, Y);
+    const DASH: (i16, i16) = (41, 12 + Y);
+    const SLIDE: (i16, i16) = (26, 3 + Y);
+    const KICK: (i16, i16) = (22, -3 + Y);
+    [
+        STAND, // 0 stand
+        AIR, AIR, AIR, AIR, AIR, AIR, // 1-3 jump, 4-6 fall
+        LAND, LAND, // 7-8
+        WALK, WALK, WALK, WALK, WALK, WALK, WALK, WALK, WALK, WALK, // 9-18
+        DASH, DASH, DASH, // 19-21
+        (30, -3), // 22: X's
+        (30, -1 + Y), SLIDE, SLIDE, // 23-25 wall slide
+        KICK, KICK, // 26-27 wall kick
+        (14, -3), (14, -3), (16, -6), (16, -6), (16, -6), (16, -6), // 28-33: X's
+    ]
+};
+
 // ------------------------------------------------------------ X3 sounds
 
 /// Mono PCM (`rate` Hz), envelope and pitch already applied.
