@@ -1,0 +1,18 @@
+[package]
+name = "mmx-web"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Mega Man X browser frontend: wasm-bindgen Emu + static site/ (see docs/web.md)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mmx-core = { path = "../mmx-core" }
+wasm-bindgen = "0.2"
+
+# rand (via vendored jgenesis-common) pulls getrandom; on wasm32 it needs the
+# JS backend or the final link has no entropy source.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
