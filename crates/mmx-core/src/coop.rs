@@ -186,8 +186,12 @@ pub struct CoopState {
     pub down_frames: u16,
     /// Hits P2 took from enemy contact (diagnostic).
     pub contact_hits: u32,
-    /// Inside P2's contact pass (the isolated call re-enters [`HOOK_CONTACT`]).
+    /// Inside P2's contact pass (the isolated call re-enters [`HOOK_CONTACT`]),
+    /// or one of `coop_objects`' passes.
     pub in_contact: bool,
+    /// Objects P2 stood on last frame (their `+$2C` for P2), bit n = slot
+    /// `$0E68 + n * $40`. See `coop_objects`.
+    pub p2_on_obj: u64,
     /// Slots of the shot table ([`X_SHOTS`]) holding P2's shots (bit n = slot n).
     pub p2_shots: u8,
     /// X3 Zero frame whose tiles are in the PPU's P2 page (`u16::MAX`: none
@@ -211,6 +215,7 @@ impl Default for CoopState {
             down_frames: 0,
             contact_hits: 0,
             in_contact: false,
+            p2_on_obj: 0,
             p2_shots: 0,
             zero_frame: u16::MAX,
             saber: crate::saber::Saber { slot: 0xFF, ..Default::default() },
@@ -288,6 +293,7 @@ pub fn register_coop_traps(game: &mut Game) {
     game.traps.register(HOOK_OAM_HIDE, "coop_p2_oam_hide", TrapReturn::Observe, oam_hide);
     game.traps.register(HOOK_DISPLAY, "coop_p2_display", TrapReturn::Observe, p2_display);
     game.traps.register(HOOK_CONTACT, "coop_contact", TrapReturn::Observe, contact);
+    crate::coop_objects::register(game);
     game.traps.register(crate::saber::HOOK_SHOTS_DONE, "coop_saber_shot", TrapReturn::Observe, crate::saber::shots_done);
 }
 
@@ -434,7 +440,7 @@ fn p2_physics(game: &mut Game) {
 
 /// Swap P2's block and scratch in, run `f`, swap out, and put back every
 /// P1-owned byte the slice may have touched (camera requests, freeze flags).
-fn with_p2_swapped(game: &mut Game, f: impl FnOnce(&mut Game)) {
+pub(crate) fn with_p2_swapped(game: &mut Game, f: impl FnOnce(&mut Game)) {
     // Debug: `MMX_COOP_DIFF=1` prints every byte a P2 slice leaves changed
     // outside the block (after the P1-owned restore), i.e. P2's global side effects.
     static DIFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
