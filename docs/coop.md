@@ -364,7 +364,7 @@ the car `$81:D551` and its driver `$81:DCD0` (from the dispatch at
 terrain code; `$84:AB81`/`$84:AB56`: 0 hits (`trace --calls --find`), and
 the listing around them only reads `$0BAD`/`$0BB0` (aiming). Nothing in
 the ROM carries X on a car, so there is nothing to rerun for P2. The trucks
-are level terrain, which P2's own physics already stands on.
+are not in the enemy or `$1428` tables on `highway-start`/`hw-a` (level art).
 
 P2's pass: an `Observe` trap on both entries reruns the routine isolated
 with P2's block swapped in (`with_p2_swapped`), the guard `in_contact` set.
