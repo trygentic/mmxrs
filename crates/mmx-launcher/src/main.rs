@@ -100,7 +100,13 @@ fn rom_row(ui: &mut egui::Ui, label: &str, path: &mut String, check: &mut RomChe
             false
         }
         Some(Ok(i)) => {
-            ui.label(format!("{}  v1.{}  sha256 {}…", i.title, i.version, &i.sha256[..16]))
+            ui.label(format!(
+                            "{}  v1.{}  {}  sha256 {}…",
+                            i.title,
+                            i.version,
+                            if i.region >= 2 { "PAL" } else { "NTSC" },
+                            &i.sha256[..16]
+                        ))
                 .on_hover_text(&i.sha256);
             true
         }

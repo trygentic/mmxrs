@@ -16,7 +16,7 @@ use mmx_net::{
 };
 
 use crate::zero_data::ZeroSet;
-use crate::{coop, Game, Pads, RomError};
+use crate::{Timing, coop, Game, Pads, RomError};
 
 /// Bump when anything that changes simulation between two builds changes
 /// outside the trap addresses (mixed into [`trapset_id`]).
@@ -62,13 +62,17 @@ pub fn trapset_id(game: &Game) -> u64 {
     let mut addrs: Vec<u32> = game.traps.addrs().collect();
     addrs.sort_unstable();
     let bytes: Vec<u8> = addrs.iter().flat_map(|a| a.to_le_bytes()).collect();
-    hash_state(&[&NET_REVISION.to_le_bytes(), &bytes, &[u8::from(game.zero_set().is_some()), u8::from(game.p1_zero())]])
+    hash_state(&[
+        &NET_REVISION.to_le_bytes(),
+        &bytes,
+        &[u8::from(game.zero_set().is_some()), u8::from(game.p1_zero()), game.timing() as u8],
+    ])
 }
 
 /// The game a session plays: power-on, co-op traps registered, co-op on when
 /// the session's flags say so. Both peers build exactly this on `Running`.
-pub fn session_game(rom: &[u8], coop_flags: u32) -> Result<Game, RomError> {
-    let mut g = Game::from_rom(rom.to_vec())?;
+pub fn session_game(rom: &[u8], coop_flags: u32, timing: Timing) -> Result<Game, RomError> {
+    let mut g = Game::from_rom_timing(rom.to_vec(), timing)?;
     g.coop.enabled = coop_flags & COOP_TWO_PLAYERS != 0;
     coop::register_coop_traps(&mut g);
     Ok(g)
@@ -221,11 +225,12 @@ impl<T: Transport> NetPlay<T> {
         delay: u8,
         x3: Option<&ZeroSet>,
         p1_zero: bool,
+        timing: Timing,
     ) -> Result<NetConfig, String> {
         if delay > mode.max_delay() {
             return Err(format!("{} input delay must be 0-{}", mode.name(), mode.max_delay()));
         }
-        let mut g = session_game(rom, COOP_TWO_PLAYERS).map_err(|e| e.to_string())?;
+        let mut g = session_game(rom, COOP_TWO_PLAYERS, timing).map_err(|e| e.to_string())?;
         g.set_zero_set(x3.cloned());
         g.set_p1_zero(p1_zero)?;
         let (crc, traps) = (g.rom_info().crc32, trapset_id(&g));
@@ -572,7 +577,7 @@ fn start_game(
     audio_rate: Option<u32>,
     game: &mut Game,
 ) -> Result<(), String> {
-    let mut g = session_game(rom, coop_flags).map_err(|e| e.to_string())?;
+    let mut g = session_game(rom, coop_flags, game.timing()).map_err(|e| e.to_string())?;
     if let Some(hz) = audio_rate {
         g.set_audio_rate(hz);
     }
@@ -663,7 +668,7 @@ mod tests {
         let rom = synthetic_rom();
         let (link, ta, tb) = loopback_pair(LoopbackConfig::default(), 1);
         let mk = |host: bool, t| {
-            let cfg = NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Rollback, 0, None, false);
+            let cfg = NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Rollback, 0, None, false, Timing::Auto);
             let Ok(NetConfig::Rollback(cfg)) = cfg else { panic!("{cfg:?}") };
             RollbackSession::new(cfg, t).unwrap()
         };
@@ -689,8 +694,8 @@ mod tests {
 
     #[test]
     fn synthetic_rom_reads_the_pads() {
-        let mut a = session_game(&synthetic_rom(), 0).unwrap();
-        let mut b = session_game(&synthetic_rom(), 0).unwrap();
+        let mut a = session_game(&synthetic_rom(), 0, Timing::Auto).unwrap();
+        let mut b = session_game(&synthetic_rom(), 0, Timing::Auto).unwrap();
         for _ in 0..3 {
             a.step(Pads::default());
             b.step(Pads { p1: BTN_B, p2: BTN_A });
@@ -700,7 +705,7 @@ mod tests {
 
     #[test]
     fn trapset_id_includes_x3() {
-        let mut g = session_game(&synthetic_rom(), COOP_TWO_PLAYERS).unwrap();
+        let mut g = session_game(&synthetic_rom(), COOP_TWO_PLAYERS, Timing::Auto).unwrap();
         let plain = trapset_id(&g);
         g.set_zero_set(Some(ZeroSet::default()));
         assert_ne!(trapset_id(&g), plain);
@@ -708,7 +713,7 @@ mod tests {
 
     #[test]
     fn net_state_carries_coop() {
-        let mut g = session_game(&synthetic_rom(), COOP_TWO_PLAYERS).unwrap();
+        let mut g = session_game(&synthetic_rom(), COOP_TWO_PLAYERS, Timing::Auto).unwrap();
         g.step(Pads::default());
         g.coop.p2[5] = 0x42;
         g.coop.p2_hidden = false;
@@ -725,7 +730,7 @@ mod tests {
 
     #[test]
     fn sync_test_finds_no_nondeterminism() {
-        let mut g = session_game(&synthetic_rom(), COOP_TWO_PLAYERS).unwrap();
+        let mut g = session_game(&synthetic_rom(), COOP_TWO_PLAYERS, Timing::Auto).unwrap();
         let mut s = SyncTestSession::new(4);
         let mut ring = StateRing::new(6);
         for f in 0..60u32 {
@@ -790,7 +795,7 @@ mod tests {
         let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/highway-start.state");
         let Ok(state) = std::fs::read(st) else { return eprintln!("{st} missing; skipping") };
         let fresh = || {
-            let mut g = session_game(&rom, COOP_TWO_PLAYERS).unwrap();
+            let mut g = session_game(&rom, COOP_TWO_PLAYERS, Timing::Auto).unwrap();
             if let Some(r) = &x3rom {
                 g.set_x3_rom(r).unwrap();
             }
@@ -931,13 +936,13 @@ mod tests {
         let (link, ta, tb) = loopback_pair(link_cfg, 7);
         let mk = |host: bool, t| {
             let mut cfg =
-                NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Rollback, 0, None, false).unwrap();
+                NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Rollback, 0, None, false, Timing::Auto).unwrap();
             cfg.set_check_interval(10);
             NetPlay::new(cfg, rom.clone(), t, "test").unwrap()
         };
         let mut peers = [
-            (mk(true, ta), session_game(&rom, 0).unwrap(), 0x1111u32),
-            (mk(false, tb), session_game(&rom, 0).unwrap(), 0x7777u32),
+            (mk(true, ta), session_game(&rom, 0, Timing::Auto).unwrap(), 0x1111u32),
+            (mk(false, tb), session_game(&rom, 0, Timing::Auto).unwrap(), 0x7777u32),
         ];
         let mut tick = 0u64;
         while peers.iter().any(|(p, ..)| p.settled_frames() < 300) {
@@ -977,15 +982,15 @@ mod tests {
         let (link, ta, tb) = loopback_pair(link_cfg, 7);
         let mk = |host: bool, t| {
             let mut cfg =
-                NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Lockstep, DELAY, None, false).unwrap();
+                NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Lockstep, DELAY, None, false, Timing::Auto).unwrap();
             cfg.set_check_interval(10);
             NetPlay::new(cfg, rom.clone(), t, "test").unwrap()
         };
         // The pad latched while frame `f` is next belongs to frame `f + DELAY`.
         let script = |seed: u32, f: u32| ((f / 9).wrapping_mul(2_654_435_761).wrapping_add(seed) >> 11) as u16 & 0xFFF0;
         let mut peers = [
-            (mk(true, ta), session_game(&rom, 0).unwrap(), 0x1111u32),
-            (mk(false, tb), session_game(&rom, 0).unwrap(), 0x7777u32),
+            (mk(true, ta), session_game(&rom, 0, Timing::Auto).unwrap(), 0x1111u32),
+            (mk(false, tb), session_game(&rom, 0, Timing::Auto).unwrap(), 0x7777u32),
         ];
         let mut tick = 0u64;
         let mut waited = 0u32;
@@ -1006,7 +1011,7 @@ mod tests {
             tick += 1;
         }
         assert!(link.dropped() > 0, "the link dropped nothing");
-        let mut want = session_game(&rom, COOP_TWO_PLAYERS).unwrap();
+        let mut want = session_game(&rom, COOP_TWO_PLAYERS, Timing::Auto).unwrap();
         for f in 0..FRAMES {
             let pad = |seed| if f < u32::from(DELAY) { 0 } else { script(seed, f - u32::from(DELAY)) };
             want.step(Pads { p1: pad(0x1111), p2: pad(0x7777) });
@@ -1027,10 +1032,10 @@ mod tests {
     fn mode_mismatch_refuses_to_start() {
         let rom = synthetic_rom();
         let (link, ta, tb) = loopback_pair(LoopbackConfig::default(), 3);
-        let cfg = |host, mode| NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, mode, 2, None, false).unwrap();
+        let cfg = |host, mode| NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, mode, 2, None, false, Timing::Auto).unwrap();
         let mut h = NetPlay::new(cfg(true, Mode::Rollback), rom.clone(), ta, "t").unwrap();
         let mut g = NetPlay::new(cfg(false, Mode::Lockstep), rom.clone(), tb, "t").unwrap();
-        let (mut gh, mut gg) = (session_game(&rom, 0).unwrap(), session_game(&rom, 0).unwrap());
+        let (mut gh, mut gg) = (session_game(&rom, 0, Timing::Auto).unwrap(), session_game(&rom, 0, Timing::Auto).unwrap());
         for tick in 0..200u64 {
             link.advance(1);
             h.tick(&mut gh, 0, tick * 16);
@@ -1067,6 +1072,7 @@ mod tests {
                 mode.default_delay(),
                 None,
                 false,
+                Timing::Auto,
             )
             .unwrap();
             if let NetConfig::Rollback(c) = &mut cfg {
@@ -1106,8 +1112,8 @@ mod tests {
             ),
         ];
         let mut games = [
-            session_game(&rom, 0).unwrap(),
-            session_game(&rom, 0).unwrap(),
+            session_game(&rom, 0, Timing::Auto).unwrap(),
+            session_game(&rom, 0, Timing::Auto).unwrap(),
         ];
         let mut live_at = [None; 2];
         for ms in 0..(SECS + 2) * 1000 {
@@ -1200,7 +1206,7 @@ mod tests {
         };
         let rom = std::fs::read(path).unwrap();
         for hz in [44_100u32, 48_000] {
-            let mut g = session_game(&rom, 0).unwrap();
+            let mut g = session_game(&rom, 0, Timing::Auto).unwrap();
             g.set_audio_rate(hz);
             for _ in 0..60 {
                 g.step(Pads::default());

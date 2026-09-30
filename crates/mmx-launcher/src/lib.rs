@@ -83,6 +83,9 @@ pub struct Settings {
     /// Rollback prediction window in frames (None = the game's default 8).
     #[serde(default)]
     pub prediction: Option<u8>,
+    /// Video timing: "auto" (header region), "ntsc" or "pal".
+    #[serde(default)]
+    pub timing: String,
     /// Empty = the game's default ICE servers; `none` = no ICE servers.
     pub ice: String,
 }
@@ -103,6 +106,7 @@ impl Default for Settings {
             mode: Mode::Rollback,
             delay: None,
             prediction: None,
+            timing: String::new(),
             ice: String::new(),
         }
     }
@@ -172,6 +176,11 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
             }
             push(&["--delay", &d.to_string()]);
         }
+        match s.timing.as_str() {
+            "" | "auto" => {}
+            "ntsc" | "pal" => push(&["--timing", &s.timing]),
+            other => return Err(format!("bad timing {other:?}")),
+        }
         if let Some(p) = s.prediction {
             if s.mode != Mode::Rollback {
                 return Err("prediction window applies to rollback only".into());
@@ -207,6 +216,8 @@ pub fn format_command(program: &str, args: &[String]) -> String {
 pub struct RomInfo {
     pub title: String,
     pub version: u8,
+    /// `$FFD9`: 0/1 NTSC (Japan/USA), 2+ PAL.
+    pub region: u8,
     pub sha256: String,
 }
 
@@ -220,6 +231,7 @@ pub fn rom_info(bytes: &[u8]) -> Result<RomInfo, String> {
     Ok(RomInfo {
         title: String::from_utf8_lossy(&rom[0x7FC0..0x7FD5]).trim_end().to_string(),
         version: rom[0x7FDB],
+        region: rom[0x7FD9],
         sha256: sha256(rom).iter().map(|b| format!("{b:02x}")).collect(),
     })
 }

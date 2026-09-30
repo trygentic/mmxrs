@@ -94,7 +94,8 @@ fn saves(args: &[String]) -> Vec<(usize, String)> {
 }
 
 fn game(rom: Vec<u8>) -> Game {
-    Game::from_rom(rom).unwrap_or_else(|e| die(&format!("ROM rejected: {e}")))
+    let timing = std::env::var("MMX_TIMING").ok().and_then(|v| mmx_core::Timing::parse(&v)).unwrap_or_default();
+    Game::from_rom_timing(rom, timing).unwrap_or_else(|e| die(&format!("ROM rejected: {e}")))
 }
 
 fn movie(args: &[String]) -> Vec<Pads> {
@@ -552,7 +553,10 @@ fn rominfo() -> i32 {
         1 => "v1.1 (addresses unchecked)",
         _ => "unknown",
     };
-    println!("title   {}\nversion {} {ver}\nsha256  {hex}\ncrc32   {:08x}\ncopier header stripped: {}", i.title, i.version, i.crc32, i.had_copier_header);
+    println!(
+        "title   {}\nregion  {} (${:02X}; MMX_TIMING=ntsc|pal overrides)\nversion {} {ver}\nsha256  {hex}\ncrc32   {:08x}\ncopier header stripped: {}",
+        i.title, i.region_name(), i.region, i.version, i.crc32, i.had_copier_header
+    );
     0
 }
 

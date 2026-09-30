@@ -38,8 +38,9 @@ pub fn connect(
     prediction: Option<u8>,
     x3: Option<&mmx_core::zero_data::ZeroSet>,
     zero: bool,
+    timing: mmx_core::Timing,
 ) -> Result<Net, String> {
-    let mut cfg = NetPlay::<NetTransport>::config(rom, host, mode, delay, x3, zero)?;
+    let mut cfg = NetPlay::<NetTransport>::config(rom, host, mode, delay, x3, zero, timing)?;
     if let (NetConfig::Rollback(c), Some(p)) = (&mut cfg, prediction) {
         c.max_prediction = p; // local policy, not negotiated
     }
@@ -157,10 +158,10 @@ mod tests {
             Mode::Rollback => 0,
             Mode::Lockstep => mode.default_delay(),
         };
-        let mk = |host| connect(rom, host, room, &url, Some("none"), mode, delay, None, None, false).expect("connect");
+        let mk = |host| connect(rom, host, room, &url, Some("none"), mode, delay, None, None, false, mmx_core::Timing::Auto).expect("connect");
         let mut peers = [
-            (mk(true), session_game(rom, 0).unwrap(), 0x1111u32),
-            (mk(false), session_game(rom, 0).unwrap(), 0x7777u32),
+            (mk(true), session_game(rom, 0, mmx_core::Timing::Auto).unwrap(), 0x1111u32),
+            (mk(false), session_game(rom, 0, mmx_core::Timing::Auto).unwrap(), 0x7777u32),
         ];
         let clock = Instant::now();
         let mut next = Duration::ZERO;

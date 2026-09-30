@@ -69,10 +69,54 @@ pub struct RomInfo {
     pub title: String,
     /// `$FFDB`: 0 = v1.0 (the disassembly), 1 = v1.1 (mstan's recomp target).
     pub version: u8,
+    /// `$FFD9` destination code: 0 Japan, 1 USA (NTSC); 2 and up Europe etc. (PAL).
+    pub region: u8,
     pub sha256: [u8; 32],
     pub crc32: u32,
     /// True when a 512-byte copier header was stripped.
     pub had_copier_header: bool,
+}
+
+impl RomInfo {
+    pub fn region_name(&self) -> &'static str {
+        match self.region {
+            0 => "Japan (NTSC)",
+            1 => "USA (NTSC)",
+            2 => "Europe (PAL)",
+            _ => "other (PAL)",
+        }
+    }
+    pub fn is_pal(&self) -> bool {
+        self.region >= 2
+    }
+}
+
+/// Video timing the emulator runs the cartridge at. `Auto` follows the header
+/// region byte (a PAL dump runs at 50.007 fps, as on a PAL console).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Timing {
+    #[default]
+    Auto,
+    Ntsc,
+    Pal,
+}
+
+impl Timing {
+    pub fn parse(s: &str) -> Option<Timing> {
+        match s {
+            "auto" => Some(Timing::Auto),
+            "ntsc" => Some(Timing::Ntsc),
+            "pal" => Some(Timing::Pal),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Timing::Auto => "auto",
+            Timing::Ntsc => "ntsc",
+            Timing::Pal => "pal",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

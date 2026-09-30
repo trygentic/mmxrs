@@ -61,3 +61,11 @@ Holds the pad masks (SNES auto-read layout, `0x8000` B ... `0x0010` R; hex or
 decimal) every frame, writes RGB PNGs of `Game::frame()` after the listed
 frames, and prints `frames N wram_sha256 <hex>`. `--movie F.bk2` is parsed but
 rejected until `mmx-verify`'s bk2 parser exists (TODO).
+
+## Timing (PAL dumps)
+
+The emulator follows the cartridge header's region byte: a European dump runs
+at 50.007 fps like a PAL console, with slower music. `--timing ntsc` forces
+60.0988 fps (the code is the same as USA v1.0); `--timing pal` forces 50. The
+choice is part of the netplay handshake, so both players must use the same.
+`cargo xtask rominfo` prints the region.

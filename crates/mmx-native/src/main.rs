@@ -43,13 +43,13 @@ fn main() {
         std::process::exit(2);
     }
     let net = args.net.as_ref().map(|(host, room)| {
-        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.mode, args.net_delay(), args.prediction, x3.as_ref(), args.zero)
+        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.mode, args.net_delay(), args.prediction, x3.as_ref(), args.zero, args.timing)
             .unwrap_or_else(|e| {
                 eprintln!("netplay: {e}");
                 std::process::exit(2);
             })
     });
-    let mut game = Game::from_rom(rom).unwrap_or_else(|e| {
+    let mut game = Game::from_rom_timing(rom, args.timing).unwrap_or_else(|e| {
         eprintln!("{rom_path}: {e}");
         std::process::exit(1);
     });

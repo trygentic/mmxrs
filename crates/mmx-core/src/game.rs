@@ -3,7 +3,7 @@
 
 use std::convert::Infallible;
 
-use jgenesis_common::frontend::{
+use jgenesis_common::frontend::{TimingMode, 
     AudioOutput, Color, ConstantInputPoller, EmulatorTrait, FrameSize, RenderFrameOptions,
     Renderer, SaveWriter, TickEffect,
 };
@@ -13,7 +13,7 @@ use snes_core::api::{CoprocessorRoms, P2Tiles, SnesEmulator, SnesEmulatorConfig,
 use snes_core::input::{SnesController, SnesInputs};
 
 use crate::traps::{TrapRecord, TrapReturn};
-use crate::{coop, Pads, Registers, RomError, RomInfo, TrapLog, TrapTable};
+use crate::{coop, Pads, Registers, RomError, RomInfo, Timing, TrapLog, TrapTable};
 
 /// Where `call_isolated` returns to: `$FFFF` in the callee's own bank. In
 /// LoROM that is the high byte of the emulation-mode IRQ/BRK vector, so no
@@ -31,6 +31,7 @@ const P2_TILES_MAGIC_V3: &[u8; 4] = b"P2T3";
 const P2_TILES_MAGIC_V2: &[u8; 4] = b"P2T2";
 
 pub struct Game {
+    timing: Timing,
     pub traps: TrapTable,
     pub traplog: TrapLog,
     pub coop: coop::CoopState,
@@ -152,6 +153,7 @@ fn parse_header(mut rom: Vec<u8>, strict: bool) -> Result<(Vec<u8>, RomInfo), Ro
     let info = RomInfo {
         title,
         version: rom[0x7FDB],
+        region: rom[0x7FD9],
         sha256: Sha256::digest(&rom).into(),
         crc32: crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC).checksum(&rom),
         had_copier_header,
@@ -161,19 +163,38 @@ fn parse_header(mut rom: Vec<u8>, strict: bool) -> Result<(Vec<u8>, RomInfo), Ro
 
 impl Game {
     pub fn from_rom(rom: Vec<u8>) -> Result<Game, RomError> {
-        Self::load(parse_header(rom, true)?)
+        Self::load(parse_header(rom, true)?, Timing::Auto)
+    }
+
+    /// Like [`Game::from_rom`] with a forced video timing. `Timing::Ntsc` runs a
+    /// PAL dump at 60.0988 fps (the game code is the same as USA v1.0).
+    pub fn from_rom_timing(rom: Vec<u8>, timing: Timing) -> Result<Game, RomError> {
+        Self::load(parse_header(rom, true)?, timing)
+    }
+
+    /// The timing this game was created with (netplay rebuilds with the same).
+    pub fn timing(&self) -> Timing {
+        self.timing
     }
 
     /// Research boot (X3 etc.): size check and copier-header strip only, no
     /// title or coprocessor check. The co-op traps assume X1; don't register them.
     pub fn from_rom_any(rom: Vec<u8>) -> Result<Game, RomError> {
-        Self::load(parse_header(rom, false)?)
+        Self::load(parse_header(rom, false)?, Timing::Auto)
     }
 
-    fn load((rom, info): (Vec<u8>, RomInfo)) -> Result<Game, RomError> {
+    fn load((rom, info): (Vec<u8>, RomInfo), timing: Timing) -> Result<Game, RomError> {
+        let config = SnesEmulatorConfig {
+            forced_timing_mode: match timing {
+                Timing::Auto => None,
+                Timing::Ntsc => Some(TimingMode::Ntsc),
+                Timing::Pal => Some(TimingMode::Pal),
+            },
+            ..SnesEmulatorConfig::default()
+        };
         let emu = SnesEmulator::create(
             rom.clone(),
-            SnesEmulatorConfig::default(),
+            config,
             CoprocessorRoms::none(),
             &mut NoSave,
         )
@@ -185,6 +206,7 @@ impl Game {
             emu,
             rom,
             info,
+            timing,
             video: Video {
                 pixels: vec![0; 256 * 224],
                 width: 256,

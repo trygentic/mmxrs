@@ -46,6 +46,8 @@ pub struct Args {
     /// `--prediction`: rollback's prediction window in frames (1-30; default 8).
     /// Long links (intercontinental, ~15-20 frame round trip) need ~20.
     pub prediction: Option<u8>,
+    /// `--timing auto|ntsc|pal`: video timing; auto follows the header region.
+    pub timing: mmx_core::Timing,
 }
 
 impl Args {
@@ -76,6 +78,7 @@ impl Default for Args {
             mode: Mode::Rollback,
             delay: None,
             prediction: None,
+            timing: mmx_core::Timing::Auto,
         }
     }
 }
@@ -146,6 +149,10 @@ pub fn parse<I: IntoIterator<Item = String>>(
             "--delay" => {
                 let v = val("--delay")?;
                 a.delay = Some(v.parse().map_err(|_| format!("bad --delay {v:?}"))?);
+            }
+            "--timing" => {
+                let v = val("--timing")?;
+                a.timing = mmx_core::Timing::parse(&v).ok_or_else(|| format!("bad --timing {v:?}: auto, ntsc or pal"))?;
             }
             "--prediction" => {
                 let v = val("--prediction")?;
