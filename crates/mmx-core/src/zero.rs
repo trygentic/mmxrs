@@ -95,7 +95,7 @@ pub fn oam_entry(s: &Sprite, (ox, oy): (i16, i16), right: bool, attr: u8) -> Opt
     Some(([x as u8, y as u8, s.tile, a], (x >> 8) as u8 & 1 | u8::from(s.big) << 1))
 }
 
-/// P2 as X3 Zero, from OAM slot `first` (4-aligned): its wave (on top)
+/// P2 as X3 Zero, from OAM slot `first` (4-aligned): its slash arc (on top)
 /// and its frame into `$0700` and the high table `$0900`, their pages into
 /// shadow pages 2 and 0 (when the frame changed), their slots into the
 /// PPU's mask. Returns the slot past P2's last one.
@@ -103,8 +103,11 @@ pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
     let p2 = game.coop.p2;
     let attr = p2[0x11] & 0x30 | (pal & 7) << 1;
     let saber = game.coop.saber;
-    let mut e = wave_entries(game, set, &saber, 0, attr);
-    let n_wave = e.len();
+    let mut e = match x3_frame(&p2, &saber) {
+        Some(_) => slash_entries(game, set, &p2, &saber, 0, attr),
+        None => Vec::new(),
+    };
+    let n_fx = e.len();
     if let Some(f) = x3_frame(&p2, &saber) {
         if game.coop.zero_frame != f as u16 {
             crate::p2tiles::fill_page(game, 0, &set.page(f));
@@ -115,7 +118,7 @@ pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
     let e = &e[..e.len().min(128 - usize::from(first))];
     let last = write_entries(game, first, e);
     let mask = |a: usize, b: usize| (a..b).fold(0u128, |m, s| m | 1 << s);
-    let (f, w) = (usize::from(first), n_wave.min(e.len()));
+    let (f, w) = (usize::from(first), n_fx.min(e.len()));
     game.add_p2_tile_slots(mask(f, f + w), 2);
     game.add_p2_tile_slots(mask(f + w, usize::from(last)), 0);
     last
@@ -131,24 +134,29 @@ fn frame_entries(game: &Game, set: &ZeroSet, obj: &[u8], f: usize, attr: u8) -> 
     set.frames[f].sprites.iter().filter_map(|s| oam_entry(s, (ox, oy + X3_Y_OFFSET), right, attr)).collect()
 }
 
-/// The wave's colours on Zero's palette (`$8C:B580`, which every Zero
-/// wears): the wave draws with 1 (white) and 6-9 (greens `5394 338C 2308
-/// 2288`); Zero's has white 4 (`639C`) and greens 12 (`2388`) and 1
-/// (`1284`). No sprite palette is free with co-op on (docs/zero.md).
-pub const WAVE_ON_ZERO: [u8; 16] = [0, 4, 0, 0, 0, 0, 12, 12, 1, 1, 0, 0, 0, 0, 0, 0];
+/// The slash arc's colours on Zero's palette (`$8C:B580`, which every
+/// Zero wears): the arc draws with 1-5 (`$8C:A460`: white `73BC`, greens
+/// `5394 3B8E 2308 1284`) and 15 (`18C6`); Zero's has white 4 (`639C`),
+/// greens 12 (`2388`) and 1 (`1284`, the same) and dark 15 (`1084`). No
+/// sprite palette is free with co-op on (docs/zero.md).
+pub const SLASH_ON_ZERO: [u8; 16] = [0, 4, 12, 12, 12, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 15];
 
-/// Sprites the wave of `saber` draws now (upper bound for slot planning).
+/// Sprites the slash arc of `saber` draws now (upper bound for slot
+/// planning; the name is from the wave it replaced).
 pub fn wave_len(set: &ZeroSet, saber: &Saber) -> usize {
-    saber.wave.at().and_then(|(_, _, f, _)| set.wave.frames.get(f)).map_or(0, |f| f.sprites.len())
+    crate::saber::slash_frame(saber).zip(set.slash.as_ref()).and_then(|(f, s)| s.frames.get(f)).map_or(0, |f| f.sprites.len())
 }
 
-/// `saber`'s wave as OAM entries; its tiles go into shadow page 2 at
-/// columns `8 * which` (P2 0, P1 1) when its frame changed.
-fn wave_entries(game: &mut Game, set: &ZeroSet, saber: &Saber, which: usize, attr: u8) -> Vec<([u8; 4], u8)> {
-    let Some((x, y, f, _)) = saber.wave.at().filter(|w| w.2 < set.wave.frames.len()) else { return Vec::new() };
+/// `saber`'s slash arc on `obj` (its wearer) as OAM entries, mirrored by
+/// the wearer's facing; its tiles go into shadow page 2 at columns
+/// `8 * which` (P2 0, P1 1) when its frame changed.
+fn slash_entries(game: &mut Game, set: &ZeroSet, obj: &[u8], saber: &Saber, which: usize, attr: u8) -> Vec<([u8; 4], u8)> {
+    let Some((sl, f)) = set.slash.as_ref().zip(crate::saber::slash_frame(saber)).filter(|(s, f)| *f < s.frames.len()) else {
+        return Vec::new();
+    };
     let col = 8 * which;
     if game.coop.wave_frames[which] != f as u16 {
-        let page = set.wave.page(f, &WAVE_ON_ZERO);
+        let page = sl.page(f, &SLASH_ON_ZERO);
         for (slot, t) in page.chunks_exact(32).enumerate().filter(|(s, _)| s % 16 < 8) {
             crate::p2tiles::fill_page(game, 2 * crate::p2tiles::SHADOW_WORDS + (slot + col) * 16, t);
         }
@@ -156,11 +164,12 @@ fn wave_entries(game: &mut Game, set: &ZeroSet, saber: &Saber, which: usize, att
     }
     let w = game.wram();
     let cam = |a: u32| u16::from_le_bytes([w[ix(a)], w[ix(a) + 1]]);
-    let origin = (x.wrapping_sub(cam(ram::CAMERA_X)) as i16, y.wrapping_sub(cam(ram::CAMERA_Y)) as i16);
-    set.wave.frames[f]
+    let (ox, oy) = screen_origin(obj, cam(ram::CAMERA_X), cam(ram::CAMERA_Y));
+    let right = obj[0x11] & 0x40 != 0;
+    sl.frames[f]
         .sprites
         .iter()
-        .filter_map(|s| oam_entry(&Sprite { tile: s.tile + col as u8, ..*s }, origin, saber.wave.right, attr))
+        .filter_map(|s| oam_entry(&Sprite { tile: s.tile + col as u8, ..*s }, (ox, oy + X3_Y_OFFSET), right, attr))
         .collect()
 }
 
@@ -254,8 +263,11 @@ pub fn emit_p1(game: &mut Game) {
     let obj: [u8; ram::X_BLOCK_LEN] = game.wram()[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
     let saber = game.coop.p1.saber;
     let attr = obj[0x11] & 0x3E;
-    let mut e = wave_entries(game, &set, &saber, 1, attr);
-    let n_wave = e.len();
+    let mut e = match x3_frame(&obj, &saber) {
+        Some(_) => slash_entries(game, &set, &obj, &saber, 1, attr),
+        None => Vec::new(),
+    };
+    let n_fx = e.len();
     if let Some(f) = x3_frame(&obj, &saber) {
         if game.coop.p1.frame != f as u16 {
             crate::p2tiles::fill_page(game, crate::p2tiles::SHADOW_WORDS, &set.page(f));
@@ -264,14 +276,14 @@ pub fn emit_p1(game: &mut Game) {
         e.extend(frame_entries(game, &set, &obj, f, attr));
     }
     let w = game.wram_mut();
-    let (mut body, mut wave) = (0u128, 0u128);
+    let (mut body, mut fx) = (0u128, 0u128);
     for (k, (e, h)) in e.iter().enumerate() {
         let slot = usize::from(w[OAM_CURSOR] & 0x7F);
         if slot >= 127 {
             break;
         }
         w[ix(ram::OAM_BUF) + slot * 4..][..4].copy_from_slice(e);
-        *if k < n_wave { &mut wave } else { &mut body } |= 1 << slot;
+        *if k < n_fx { &mut fx } else { &mut body } |= 1 << slot;
         w[OAM_HI_ACC] = w[OAM_HI_ACC] >> 2 | h << 6;
         w[OAM_CURSOR] += 1;
         if w[OAM_CURSOR] & 3 == 0 {
@@ -280,7 +292,7 @@ pub fn emit_p1(game: &mut Game) {
         }
     }
     game.add_p2_tile_slots(body, 1);
-    game.add_p2_tile_slots(wave, 2);
+    game.add_p2_tile_slots(fx, 2);
 }
 
 /// The OAM build's direct-page cursor (`$E4`), high-table byte index (`$E5`)

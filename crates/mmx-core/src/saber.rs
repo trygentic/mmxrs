@@ -62,15 +62,35 @@ fn pose_len(i: usize) -> u8 {
 
 /// Pose index for swing frame `t` (1-based), `None` past the end.
 fn pose_index(t: u8, air: bool) -> Option<usize> {
-    let mut left = u16::from(t);
+    pose_at(t, air).map(|p| p.0)
+}
+
+/// (pose index, frame within the pose from 0) for swing frame `t`.
+fn pose_at(t: u8, air: bool) -> Option<(usize, u8)> {
+    let mut left = t.checked_sub(1)?;
     for i in 0..poses(air).len() {
-        let n = u16::from(pose_len(i));
-        if left <= n {
-            return Some(i);
+        if left < pose_len(i) {
+            return Some((i, left));
         }
-        left -= n;
+        left -= pose_len(i);
     }
     None
+}
+
+/// The green slash arc's frame (`zero_data::X3_SLASH_SET`; air + 6) while
+/// swinging: the arc pose shows the rising arc (2) for 2 frames, then the
+/// full crescent (3); the pose after it the tail (4, 5; 2 frames each).
+/// Zero's own swing has no arc in X3, so this timing is ours. Pure.
+pub fn slash_frame(s: &Saber) -> Option<usize> {
+    let (i, k) = pose_at(s.t, s.air)?;
+    let f = match (i, k) {
+        (ARC, 0 | 1) => 2,
+        (ARC, _) => 3,
+        (3, 0 | 1) => 4,
+        (3, 2 | 3) => 5,
+        _ => return None,
+    };
+    Some(if s.air { f + 6 } else { f })
 }
 
 /// The wave's life in frames: X3's died after 31 (both runs, about 197 px
