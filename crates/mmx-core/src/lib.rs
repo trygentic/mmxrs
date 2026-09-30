@@ -5,6 +5,7 @@
 
 pub mod coop;
 pub mod coop_hud;
+pub mod coop_objects;
 pub mod coop_stages;
 mod game;
 pub mod netgame;
