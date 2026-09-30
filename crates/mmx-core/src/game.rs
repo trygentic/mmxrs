@@ -30,6 +30,10 @@ pub struct Game {
     /// Debug: when `Some`, every opcode fetched inside `call_isolated*` is
     /// appended as `PBR:PC`.
     pub isolated_trace: Option<Vec<u32>>,
+    /// `call_isolated*` nesting (P2's slices run isolated; `p2tiles` keys on it).
+    pub(crate) isolated_depth: u32,
+    /// `p2tiles`: `($A3, $1F25)` at the entry of P2's streamer call.
+    pub(crate) p2_stream: Option<(u8, u16)>,
     emu: SnesEmulator,
     // ponytail: own copy of the ROM for rom_read (~1.5 MiB); jgenesis only
     // exposes cartridge reads through &mut (open-bus side effect).
@@ -171,6 +175,8 @@ impl Game {
             frame_count: 0,
             fired_at: None,
             isolated_trace: None,
+            isolated_depth: 0,
+            p2_stream: None,
         })
     }
 
@@ -319,6 +325,23 @@ impl Game {
         self.emu.obsel()
     }
 
+    /// P2's shadow sprite tile page (pending; live on the next OAM upload).
+    /// See `p2tiles.rs`. Part of the save state.
+    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; 512] {
+        self.emu.p2_tile_page_mut()
+    }
+
+    /// OAM slots (bit n = slot n) that read the P2 page instead of VRAM.
+    pub fn set_p2_tile_slots(&mut self, mask: u128) {
+        self.emu.set_p2_tile_slots(mask);
+    }
+
+    /// Live P2 page and slot mask (what the renderer uses now).
+    pub fn p2_tiles(&self) -> (&[u16; 512], u128) {
+        let t = self.emu.p2_tiles();
+        (&t.page, t.slots)
+    }
+
     pub fn regs(&self) -> Registers {
         let r = self.emu.cpu_registers();
         Registers {
@@ -388,6 +411,7 @@ impl Game {
         r.pbr = bank;
         r.pc = addr as u16;
         self.set_regs(r);
+        self.isolated_depth += 1;
         let mut budget = CALL_ISOLATED_BUDGET;
         loop {
             self.dispatch_traps();
@@ -408,6 +432,7 @@ impl Game {
             // One CPU tick (the sentinel check inside is the same as ours).
             self.emu.run_cpu_isolated(sentinel, 1);
         }
+        self.isolated_depth -= 1;
         self.set_regs(saved);
         self.fired_at = saved_fired;
     }
@@ -419,16 +444,25 @@ impl Game {
         self.rom[off % self.rom.len()]
     }
 
+    /// `(emulator, frame_count, fired_at)`, then the PPU's P2 tile page
+    /// (appended, so states from before the page load with an empty one).
     pub fn save_state(&self) -> Vec<u8> {
+        let cfg = bincode::config::standard();
         let state = (self.emu.to_save_state(), self.frame_count, self.fired_at);
-        bincode::encode_to_vec(state, bincode::config::standard()).expect("save state encodes")
+        let mut v = bincode::encode_to_vec(state, cfg).expect("save state encodes");
+        v.extend(bincode::encode_to_vec(self.emu.p2_tiles(), cfg).expect("p2 tiles encode"));
+        v
     }
 
     pub fn load_state(&mut self, s: &[u8]) -> Result<(), String> {
-        let ((state, frame_count, fired_at), _): ((SnesEmulator, u64, Option<u32>), _) =
-            bincode::decode_from_slice(s, bincode::config::standard())
-                .map_err(|e| e.to_string())?;
+        let cfg = bincode::config::standard();
+        let ((state, frame_count, fired_at), n): ((SnesEmulator, u64, Option<u32>), _) =
+            bincode::decode_from_slice(s, cfg).map_err(|e| e.to_string())?;
         self.emu.load_state(state);
+        if n < s.len() {
+            let (t, _) = bincode::decode_from_slice(&s[n..], cfg).map_err(|e| e.to_string())?;
+            self.emu.set_p2_tiles(t);
+        }
         self.frame_count = frame_count;
         self.fired_at = fired_at;
         Ok(())

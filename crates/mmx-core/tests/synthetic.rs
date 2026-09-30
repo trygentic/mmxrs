@@ -220,6 +220,21 @@ fn save_state_round_trip() {
 }
 
 #[test]
+fn save_state_carries_p2_tile_page() {
+    let mut g = game();
+    step(&mut g, 2);
+    g.p2_tile_page_mut()[5] = 0xBEEF;
+    g.set_p2_tile_slots(1 << 3);
+    let s = g.save_state();
+    g.p2_tile_page_mut()[5] = 0;
+    g.set_p2_tile_slots(0);
+    g.load_state(&s).unwrap();
+    assert_eq!(g.p2_tile_page_mut()[5], 0xBEEF);
+    // Not live until the game's next OAM upload.
+    assert_eq!(g.p2_tiles().1, 0);
+}
+
+#[test]
 fn rom_header_checks() {
     let mut headered = vec![0u8; 512];
     headered.extend(rom_with("MEGAMAN X", 0, 0));
