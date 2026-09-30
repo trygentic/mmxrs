@@ -33,6 +33,7 @@ The disassembly's bank-`$80` PCs drift from this cartridge by up to `0x41`
 | `$80:D545` | second instruction of the OAM build `$80:D544` (`PHB`; `$D544` is Zero's palette trap) | hide last frame's P2 slots (Y = `$E0`) |
 | `$80:9A86` | instruction after `JSR $80:D544` at `$80:9A83` in the per-frame stage code: the whole OAM build (and its hide loop) is done, the camera is final | display slice: clamp X into `[cam+8, cam+248]`, `$80:D640` + `$80:D671` on P2's block into the slots past the game's, Zero palette, direct page put back; with the X3 set, the Rust emitter `zero::emit_x3` instead (docs/zero.md "Drawing P2 as X3 Zero") |
 | `$80:D1FF` | instruction after the object master's `JSR $80:D3B2` (the shot loop; the enemy loops follow) | saber (X3 set only): the arc's shot into a free `$1228` slot, taken out at `$80:D241` (docs/zero.md "The saber") |
+| `$80:9A94` | `LDA $1F30`, where both paths after `$9A86` meet (every gameplay frame, after the display slice) | P2's HP bar and down marker (`coop_hud.rs`, "P2 HP bar and revive") |
 | `$84:9B03` | entry of the enemy-vs-X contact routine; every enemy's AI `JSL`s it with `D` = the enemy (154 call sites) | contact pass: the same routine again, isolated, with P2's block swapped in |
 
 Per-frame order in the object master `$80:D1C2`: player phase 1 (`$81:812E`)
@@ -103,6 +104,89 @@ Per-player state swapped around every P2 slice besides the block
 (`P2_SWAPPED`): landing scratch `$1F31..$1F37`, `$1FA1..$1FB0`, and X's three
 companion objects `$0C38..$0C98` (see "Armour parts" below).
 
+## P2 HP bar and revive
+
+Code: `crates/mmx-core/src/coop_hud.rs`. Playtest: "Zero seemed to have
+unlimited HP": nothing showed P2's HP and it came back after 2 s at full HP.
+
+**How X's bar is drawn.** Sprites, not BG/HDMA: seven 16x16 OAM entries in
+slots 0..6 (`$0700..$071B`). `$80:D7A3` (listing `$80:D7E4`) jumps on
+`$1F11`: state 0 writes X = 8, Y = `$E0`, attr `$34` into all seven once
+(slot 0 = the icon, Y `$50`, tile `$86`) and high-table bytes `$0900..` =
+`$AA` (large); state 2 = redraw `$80:D801`: only when `$0BCF` bit 7 is set,
+clamp HP to `$1F9A`, then for slots 1.. from Y `$40` upwards in 16 px steps
+tile `$80` (8 HP full), a partial piece shifted by `2 * rest` px, tile `$82`
+(8 HP empty) up to max HP, tile `$84` (cap); clear bit 7. X is never
+rewritten, so the bar's position is the init constant, not a table. The
+weapon bar (`$80:D8CA`, `$1F12`) is slots 7..15 at X 24 (attr `$36`), the
+boss bar (`$80:D9E3`, `$1F0E` = boss) slots 16..23 at X 232; the OAM build's
+cursor starts at `$E4 = $10` (`$18` with a boss) so it never touches them.
+
+**P2's bar.** `HOOK_HUD` (`$80:9A94`): when `$1F11 = 2` and P2 may exist,
+save direct page and slots 0..6, swap a copy of P2's block in with
+`$0BCF = hp | $80` (hp 0 while P2 is down or hidden), `call_isolated_ret(
+$80:D801)` with M=1, X=0, D=0, DB=`$80`, take the seven entries it wrote,
+put slots 0..6, the block and direct page back. The entries go into 8 slots
+(bar + down marker, `HUD_SLOTS`) right after P2's sprites (4-aligned, whole
+high-table bytes set to `$AA`), with X = 232 (216 when the boss bar is up)
+and palette 3 (`zero_palette`). `p2_oam_base/count` grow to cover them, so
+`oam_hide` clears them at the next build like P2's sprites. P2's display
+slice leaves `HUD_SLOTS` slots free below 128 (`room`); with P2 hidden and
+the game at 128 slots the bar takes the game's last 8. The bar is rebuilt
+every frame from P2's block, so there is no cache to carry. ponytail: P2's
+bar reuses X's "X" icon, recoloured.
+
+**Down and revive.** `go_down` (HP 0, pit, left behind) hides P2 for
+`P2_DOWN_FRAMES` (600 = 10 s) and records the fall spot (`Revive::spot`,
+P2's position) if it was on screen; a pit or a vertical "lost" is below or
+above the window, so `spot = None` and only the timeout applies. While down
+(`coop_hud::still_down`, from `p2_update`): the timer counts down; P1 within
+24 px (X) of the spot, with the spot on screen, counts `Revive::touch`
+(reset when P1 steps away); 60 frames in a row end the wait. Either way P2
+re-anchors next to P1 as before (`p2_anchor_ok`) with half of max HP
+(`respawn_hp`, `Revive::half_hp`). Leaving gameplay (P1 dies, stage
+change) clears `half_hp`: P2 comes back at full HP there. The marker is
+slot 8 of the HUD block: the bar's icon (tile `$86`, palette 3) centred on
+the spot, blinking every 8 frames of the timer, only while the spot is on
+screen. All of it (`CoopState::revive`, `down_frames`) is in `CoopState`,
+so netplay rollback carries it. ponytail: P2 is hidden while down; the X3
+set's lying frame (135) is not used.
+
+Verified (dump lines shortened; `P2 down N spot S touch T` is a new dump line):
+
+```
+MMX_COOP_P2_HP=6 dump --load states/hw-spiky.state --frames 200 --at 30,34,60,100 --coop --p2-hold 0100
+frame 30  X hp 16 / P2 hp 6    frame 34  X hp 16 / P2 act 0E hp 4
+```
+
+`frame_000030.png` / `frame_000060.png`: P2's bar (right edge, red) drops
+from 6 to 4 HP; X's bar stays full; P1's line identical to a solo run.
+
+```
+MMX_COOP_P2_HP=2 dump --load states/hw-spiky.state --frames 320 --coop --p2tap 0100@1:34 \
+  --p1tap 4000@40:2,4000@55:2,4000@70:2,4000@85:2,4000@100:2,4000@115:2,0100@150:30
+frame 33  X=(488,367) / P2 act 0C hp 0 hidden; P2 down 600 spot Some((550, 367)) touch 0
+frame 180 X=(528,367) / P2 down 453 spot Some((550, 367)) touch 3
+frame 230 X=(528,367) / P2 down 403 spot Some((550, 367)) touch 53
+frame 239 X=(528,367) / P2 pos=(544,367) act 00 hp 8
+```
+
+Touch revive: P1 shoots the Spiky, walks to X 528 (22 px from the spot),
+60 frames later P2 is back at 8 of 16. PNGs: f33 empty bar, f200 marker at
+the spot, f240 P2 next to P1 with a half bar.
+
+```
+dump --load states/hw-pit.state --frames 720 --coop --p2tap 0100@1:100
+frame 89  X=(790,367) / P2 pos=(856,513) act 0C hp 0; P2 down 594 spot None touch 0
+frame 689 X=(790,367) / P2 pos=(806,367) act 00 hp 8
+```
+
+Timeout: the pit spot is below the screen, no marker; P2 back after 600
+frames at half HP. Heavy frames (M3, `hw-a`, 300 frames, `--wram`): the bar
+is in the rendered PNG on every frame; the 7 WRAM snapshots without it were
+taken mid-build on lag frames (last trap `coop_p2_oam_hide`), where the
+previous frame's OAM is what is on screen.
+
 ## Enemy contact (P2 takes damage)
 
 Found by `cargo xtask trace --find` on the frame P1's HP dropped in a solo
@@ -137,7 +221,8 @@ e.g. `$81:B091`, `$82:A611`); these still hit only P1.
 - **HP 0** (contact, or anything that runs `$81:96CB`): action `$0C`, HP
   `$80`. `p2_is_down` sees it at the next slice; P2's update never runs the
   death action, so the stage-wide death flow (`$D3=6`, lives) can't start.
-  P2 hides for `P2_DOWN_FRAMES` (120) and re-anchors next to P1 at max HP.
+  P2 hides for `P2_DOWN_FRAMES` (was 120, now 600 or a revive, see "P2 HP
+  bar and revive") and re-anchors next to P1 (now at half HP).
 - **Pits** are not decided by the player code: the camera code (`$80:E14A`,
   listing PC, run on P1 only) kills X when `Y - $20 >= camera Y + $E0` (by
   `$84:9F2A` with `$0BCE=$7F`). P2 never ran that, and fell to the floor
@@ -217,12 +302,12 @@ P2 can:
 - Switch weapons. The energy pool is shared.
 - Take enemy contact damage (knockback, i-frames, death at HP 0).
 - Die in pits, or be taken out when the camera scrolls away vertically;
-  respawn next to P1 after 120 frames at max HP, no life lost.
+  be revived by P1 (or come back after 10 s) at half HP, no life lost;
+  its own HP bar on the right edge (see "P2 HP bar and revive").
 
 P2 can't:
 - Take damage from enemy shots or hazards that go through `$84:9F2A`.
 - Move the camera, trigger freezes, doors or boss rooms, or pause.
-- Get its own HUD bar.
 
 Other v1 limits:
 - Enemy AI tracks P1.
@@ -234,8 +319,6 @@ Other v1 limits:
 ## v2 plan
 
 - **Shots / hazards.** Route `$84:9F2A` hits to the player they touched.
-- **Separate HP bar.** Run `$80:D7E4` again with P2's HP at another OAM
-  position. Add a revive (touch the downed P2) in place of the timer.
 - **Real Zero sprites.** Extract X2/X3 sprites or use HD-pack art as a new
   sprite set (object `+16`) and frame table (`+17`) in `$8D:8000`. Write
   Zero's red into a free CGRAM sprite palette through the `$0300` buffer.

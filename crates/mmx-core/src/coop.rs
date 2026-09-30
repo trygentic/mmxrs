@@ -149,8 +149,9 @@ const ACTION_DEATH: u8 = 0x0C;
 
 /// P2 spawns this many pixels right of P1.
 pub const P2_X_OFFSET: u16 = 16;
-/// Frames P2 stays down before respawning next to P1 (no life cost).
-pub const P2_DOWN_FRAMES: u16 = 120;
+/// Frames P2 stays down before respawning next to P1 at half HP (no life
+/// cost), unless P1 revives it sooner (`coop_hud::still_down`).
+pub const P2_DOWN_FRAMES: u16 = 600;
 /// unverified: sprite palette for "Zero red". Placeholder; nobody checked
 /// what palette 7 holds in each stage, nor wrote Zero's colours into it.
 pub const ZERO_PALETTE: u8 = 3;
@@ -302,6 +303,7 @@ fn word(w: &[u8; 0x20000], addr: u32) -> u16 {
 fn go_down(game: &mut Game) {
     game.coop.p2_hidden = true;
     game.coop.down_frames = P2_DOWN_FRAMES;
+    crate::coop_hud::mark_down(game);
 }
 
 /// [`HOOK_UPDATE`]: P2 update slice.
@@ -318,11 +320,11 @@ fn p2_update(game: &mut Game) {
         if w[ix(ram::PAUSE)] == 0 {
             game.coop.p2_hidden = true;
             game.coop.down_frames = 0;
+            game.coop.revive.half_hp = false;
         }
         return;
     }
-    if game.coop.down_frames > 0 {
-        game.coop.down_frames -= 1;
+    if crate::coop_hud::still_down(game) {
         return;
     }
     if game.coop.p2_hidden {
@@ -337,6 +339,7 @@ fn p2_update(game: &mut Game) {
         if let Some(hp) = std::env::var("MMX_COOP_P2_HP").ok().and_then(|v| v.parse().ok()) {
             game.coop.p2[OFF_HP] = hp;
         }
+        crate::coop_hud::respawn_hp(game);
         // Scratch starts as a copy of P1's (grounded) state.
         let mut copy = [0u8; P2_SWAPPED_LEN];
         let w = game.wram();
