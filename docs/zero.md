@@ -553,9 +553,15 @@ carries it). Only with the X3 set; without it X does nothing (buster-only Zero).
 - **Damage: a shot that only the enemy loop sees.** On the arc pose (88/97),
   after the shot loop (`$80:D1FF`, the instruction after `JSR $80:D3B2`;
   new trap `coop_saber_shot`) a shot is written into a free `$1228` slot:
-  `+00 = 1`, id `+0A = 2`, position `+05/+08` = P2 + (16 in front, -16),
-  `+11` = P2's, box `+20 = $BF56` (bank `$86`: `00 00 14 14`, 40 x 40 px),
-  `+30 = 0`. Enemies test it in their AI with the ROM's enemy-vs-shot
+  `+00 = 1`, id `+0A = 2`, position `+05/+08` = P2 + (7 toward Zero's
+  facing, -19; air -22), `+11` = P2's, box `+20 = $BFC4` (bank `$86`, `x y
+  half-w half-h` = `00 01 13 0A`, 38 x 20 px), `+30 = 0`. That box is the
+  blade as drawn: on screen (hw-spiky, frame 88 facing right) the arc runs
+  from 13 px behind to 26 px in front of `+05`, 29 to 8 px above `+08`;
+  frame 97's 3 px higher (the blue/white crescent; the layouts have no
+  palette bits, the blade uses Zero's palette like the body). The
+  first version (16 in front, `$BF56` = 40 x 40) reached 10 px past the tip
+  and 12 px below it. Enemies test it in their AI with the ROM's enemy-vs-shot
   routine `$84:9B43` (shot active, `+30 = 0`, box test `$84:9C0E`), and
   `$84:9E15` applies the damage: the enemy's row `$86:EEDB[+28]` at the shot
   id. Id 2 is X's full charge (Highway row 3: lemon 1, half charge 2, full
@@ -566,10 +572,23 @@ carries it). Only with the X3 set; without it X does nothing (buster-only Zero).
   routine does `INC +30` on the shot: that ends the swing's damage (one hit
   per swing).
 - **Checked.** `hw-spiky`, P2 walks right 20 frames, X at 22: the arc (frame
-  30) takes the Spiky from 2 HP to dead (test `saber_kills_spiky`, P1's
-  `$0BDD` stays 0). `hw-bee2`, P2 jumps every 40 frames and taps X 8 frames
-  into the jump: Bee Blader (`$0E68+$27`) 29 -> 25 -> 21 -> 17 -> 13 -> ... -> 5,
-  4 per connecting swing, until it drifts out of reach (x 3363, P2 at 3452).
+  31) hits the Spiky with the tip, 2 HP -> 1 (test `saber_hits_spiky`, P1's
+  `$0BDD` stays 0; id 2 does 1 to it, `$86:F049`). The old reach hit it on
+  two frames in a row: that hit left the shot at `+01 = 6`, `+30 = 0`, so
+  `hit` stayed false. unverified: which hits set `+30`; "one hit per
+  swing" only holds for those.
+  `hw-bee2`, P2 jumps every 40 frames and taps X 8 frames into the jump:
+  Bee Blader (`$0E68+$27`) 29 -> 25 -> 21 -> 17 -> 13 -> 9, 4 per connecting
+  swing, until it drifts out of reach.
+- **The blade on screen.** A playtest said the saber was invisible. Not
+  reproduced: frames 86-90 / 95-98 are selected (`zf`), all 48 page tiles
+  are filled and every P2 slot is masked, the layouts have no palette bits,
+  and the blade shows in 88/97 as on the X3 sheet and as in X3 itself
+  (`xtask dump --rom-any X3 --load states/x3-zero-saber.state`: the same
+  small crescent, 4 frames). A 2-frame rollback every frame draws the same
+  pictures (test `saber_frames_survive_rollback`). It is small and brief:
+  one pose of five, and during i-frames P2 blinks every other frame.
+  Strip: `target/z/saber_strip_4x.png` (ground 86-90, air 95-98).
 
 ```
 xtask dump --load states/hw-spiky.state --frames 40 --out target/z/saber --at 27,32 --p2tap 0100@1:20,0040@22:2 --coop --wram
