@@ -193,6 +193,101 @@ and special weapons use the same count and despawns (same `DEC $0BDD`
 sites); `$84:9DE0` also does `DEC $0C20` (block `+$78`) for weapon `$08`,
 not handled.
 
+## Platforms and items (`coop_objects.rs`)
+
+Both bugs had the same cause as enemy contact: the object's own update tests
+X's box with `LDX #$0BA8; JSL $84:9C0E` and then writes X's block by
+absolute address, so only P1 is ever carried or healed. Found by grepping
+the listing for absolute writes to `$0BAD`/`$0BB0`/`$0BD4`/`$0BCF`, then
+confirmed with a throwaway write watch (log the PC of every write to
+`$0BAD,$0BD4`, D and X) in `trace` and `trace --find`. Bank `$81`/`$82`/`$84`
+PCs drift here too: the cartridge addresses below come from byte-pattern
+searches of the ROM (listing + `$0A` in `$84:AB..`, + `$10` in `$81:DE..E3..`,
++ 7 in `$82:E3..E7..`).
+
+**Platforms.** Listing `$84:AB77` = cartridge **`$84:AB81`**, the generic
+solid-object routine, `JSL`ed by 16 platform objects with `D` = the object.
+If the object's `+$2C` ("X stood on me last frame") is set and X isn't
+already grounded (`$0BD3|$0BD4` bit 2), X moves by the object's delta
+(`+$05 - +$22`, `+$08 - +$24`); then `+$2C = 0`, box test, and X on top ->
+`+$2C = 1`, `$0BD4 |= 4` (the object-ground bit the player's phase 1/2 read);
+from the side -> `$0BAD` pushed out, `$0BD4 |= 1/2`. Companion `$84:AB56`
+(listing `$84:AB4C`): box test only, `$0BD4 |= $80/$40`. On the Highway the
+user is the collapsing road chunk (`$1428` table type 9, `$82:E720`, call
+sites `$82:E7A5`/`$82:E7AE`; states `r2-2`, `r3-0`, `hw-f`). The
+Highway's road-attacker cars (types `$11`/`$12`) are not platforms: X can't
+stand on them, they hurt through `$84:9B03`.
+
+P2's pass: an `Observe` trap on both entries reruns the routine isolated
+with P2's block swapped in (`with_p2_swapped`), the guard `in_contact` set.
+The object's `+$2C` is per player: P2's copy is `CoopState::p2_on_obj` (one
+bit per object slot `$0E68 + n * $40`, n < 43), put in place only for P2's
+pass and P1's put back after, with direct page `$00..$1F`. P2's phase 1 runs
+before the object loops and phase 2 after, as P1's, so the ground bit lands
+in time.
+
+**Items.** They are objects of the `$1428` table, not `$1228` (that one is
+X's shots and enemy shots). Dispatch stubs at cartridge `$80:F325..` (`JSL
+entry; RTS` per type): type 1 weapon energy **`$81:DEB7`**, type 2 health
+**`$82:E342`**, type 4 1-up **`$81:E33A`**. Each entry is `LDX $01; JSR
+(tbl,X); RTL`. Health: the box test hit sets `+$02 = 6`; then HP full ->
+the amount goes to the sub-tanks (shared); else freeze (`$1F13..$1F19`,
+`$0BB6`, X to action `$18` via `$84:9F85`) and one HP every 4 frames by
+`STA $0BCF` (`ORA #$80`, the HUD redraw bit) up to 8 (big) / 2 (small),
+then unfreeze (`$84:9FAD` restores the action). Weapon energy: the same
+into the energy of the weapon in `$0BDB`. 1-up: `$1F80` + 1 at once.
+
+P2's pass (`Observe` on the three entries, `D` = the pickup):
+
+1. Pickup owned by P2 (`CoopState::p2_items`, same slot bits; cleared when
+   the slot's `+$01` is 0, a fresh object): the routine runs isolated with
+   P2's block and the ROM's pass is skipped by setting `PC` to the entry's
+   `RTL` (`entry + 5`). The fill goes to P2's HP; P2 is the one in action
+   `$18`; the world freeze flags are P1_OWNED, so P1 plays on.
+2. Else, only when P2 is within 48 px: from one WRAM snapshot, dry-run the
+   routine for P1 (as is), then for P2 (swapped). Collected = `+$02 == 6`
+   or `$1F80` changed. P1 collecting wins (snapshot back, the ROM's pass
+   does it); P2 collecting keeps P2's run, takes ownership and skips the
+   ROM's pass; neither: snapshot (and P2's block) back.
+
+So a pickup is taken once, P1 first on a tie. P1's `$0BCF` (and its bit 7)
+is never written by P2's passes.
+
+Verified (state: `highway-start`, hold Right, tap Y every 12 frames, saved
+at f270 with `--save 270=states/hw-pellet.state`: a small health pellet dropped by the first
+Spiky at X 599, Y 379):
+
+```
+MMX_COOP_P2_HP=5 dump --load states/hw-pellet.state --frames 160 --at 1-160/8 --coop --p2-hold 0100 --to 60
+f33 X=(516,367) act 00 hp 16 | P2 pos=(579,367) act 04 hp 5
+f41 X=(516,367) act 00 hp 16 | P2 pos=(590,367) act 18 hp 5     # P2 frozen, filling
+f49 X=(516,367) act 00 hp 16 | P2 pos=(590,367) act 04 hp 7
+dump ... --hold 0100 --p2-hold 0100 --to 60 --poke 7E0BCF=05@1 --coop   # both walk in, P2 ahead
+f38 X=(572,367) act 04 hp 5 | P2 pos=(590,367) act 18 hp 5
+f50 X=(590,367) act 04 hp 5 | P2 pos=(594,367) act 04 hp 7     # P1 walks over it: gone
+dump ... --hold 0100 --to 60 --poke 7E0BCF=05@1 [--coop]         # P1 alone, P2 idle
+f50 X=(590,367) act 18 hp 5   f60 X=(590,367) act 00 hp 7        # same lines solo and --coop
+```
+
+Platforms, `r2-2` (P1 and P2 on the chunk; then P1 walks off it first):
+
+```
+dump --load states/r2-2.state --frames 80 --at 1-80/6 --coop --refill
+f31 X=(3978,351) act 00 | P2 pos=(3994,351) act 00
+f49 X=(3978,406) act 00 | P2 pos=(3994,406) act 00   # before: P2 act 08 vy -1472, free fall
+f61 X=(3978,477) act 00 | P2 pos=(3994,477) act 00
+dump ... --p1tap 0200@1:20 --coop     # P1 stands at 3949 on the road, P2 rides down alone
+f49 X=(3949,351) act 00 | P2 pos=(3993,406) act 00
+```
+
+P1's lines in the second run are identical to the solo run.
+
+Not covered: other pickups (heart tanks, sub-tanks, armour capsules: their
+own routines, e.g. listing `$81:E4AB`, `$81:EB2A`), weapon energy and the
+1-up are hooked but were not seen on the Highway; platform code outside
+`$84:AB81` (enemy-specific carriers such as listing `$82:C599`, `$82:A5FE`
+the grabber); the ride armour.
+
 ## Sound
 
 P2's actions enqueue on the shared ring `$0B72` (16 x {cmd, param}, write
