@@ -11,6 +11,9 @@ pub type Ring = Arc<Mutex<VecDeque<(f32, f32)>>>;
 pub struct Audio {
     pub ring: Ring,
     pub rate: u32,
+    /// Samples pushed / dropped at the cap (`MMX_AUDIO_STATS=1` prints them).
+    pub pushed: std::cell::Cell<u64>,
+    pub dropped: std::cell::Cell<u64>,
     _stream: cpal::Stream,
 }
 
@@ -37,6 +40,8 @@ impl Audio {
         Some(Audio {
             ring,
             rate: cfg.sample_rate.0,
+            pushed: Default::default(),
+            dropped: Default::default(),
             _stream: stream,
         })
     }
@@ -48,11 +53,13 @@ impl Audio {
     pub fn push(&self, s: &[(f32, f32)]) {
         let mut r = self.ring.lock().unwrap();
         r.extend(s);
+        self.pushed.set(self.pushed.get() + s.len() as u64);
         // ponytail: hard cap at 200 ms instead of a drift controller.
         let cap = self.rate as usize / 5;
         if r.len() > cap {
             let n = r.len() - cap;
             r.drain(..n);
+            self.dropped.set(self.dropped.get() + n as u64);
         }
     }
 }

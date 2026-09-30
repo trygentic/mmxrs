@@ -1,5 +1,7 @@
 //! Windowed loop: winit 0.30 ApplicationHandler + pixels 0.15, paced by the
-//! cpal ring depth (~50 ms), or by a 60.0988 Hz timer without an audio device.
+//! cpal ring depth (~50 ms), or by a `Game::fps` timer without an audio device.
+//! Online too: the audio clock paces `Net::tick_audio` (one frame of audio per
+//! tick, silence when the session held the frame back).
 
 use crate::audio::Audio;
 use crate::cli::Args;
@@ -15,7 +17,6 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Fullscreen, Window, WindowId};
 
-const NTSC_HZ: f64 = 60.0988;
 const AUDIO_TARGET_SECS: f64 = 0.050;
 const MAX_CATCHUP: u32 = 4;
 const FAST_FORWARD_STEPS: u32 = 8;
@@ -43,6 +44,7 @@ struct App {
     fps_frames: u32,
     fps: f64,
     title: String,
+    audio_stats: bool,
     /// Online co-op session (`--coop-host/--coop-join`).
     net: Option<Net>,
 }
@@ -82,6 +84,7 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         fps_frames: 0,
         fps: 0.0,
         title: String::new(),
+        audio_stats: std::env::var_os("MMX_AUDIO_STATS").is_some_and(|v| v == "1"),
         net,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
@@ -169,6 +172,24 @@ impl App {
         let n = net.tick(&mut self.game, pad);
         self.push_audio();
         n
+    }
+
+    /// Online tick paced by the audio device: always queues one frame of audio.
+    fn net_tick_audio(&mut self) -> u32 {
+        let pad = self.kb[0] | self.pad_bits(self.pad1);
+        let (Some(net), Some(a)) = (self.net.as_mut(), &self.audio) else {
+            return 0;
+        };
+        let (n, pcm) = net.tick_audio(&mut self.game, pad);
+        a.push(&pcm);
+        n
+    }
+
+    /// Ring depth to keep queued, in samples (`None`: no audio device).
+    fn audio_target(&self) -> Option<usize> {
+        self.audio
+            .as_ref()
+            .map(|a| (f64::from(a.rate) * AUDIO_TARGET_SECS) as usize)
     }
 
     fn quit(&mut self, event_loop: &ActiveEventLoop) {
@@ -354,15 +375,26 @@ impl ApplicationHandler for App {
 
         let mut stepped = 0;
         // Online: pump the network every wake-up; once the session is live it
-        // drives the game at 60 Hz (one tick = one advance, timer-paced).
+        // drives the game, one tick per frame of audio the device plays (or
+        // per `Game::fps` tick without audio). A hard-coded 60 Hz timer
+        // overran the ring on the PAL ROM (50 fps): dropped audio, fast music.
         let was_live = self.net.as_ref().is_some_and(|n| n.play.live());
         if self.net.is_some() && !was_live {
             self.net_tick(); // connecting / closed: network only
         }
         let live = self.net.as_ref().is_some_and(|n| n.play.live());
         if live {
-            if was_live {
-                self.acc = (self.acc + dt * NTSC_HZ).min(f64::from(MAX_CATCHUP));
+            if let (true, Some(target)) = (was_live, self.audio_target()) {
+                let mut ticks = 0;
+                while ticks < MAX_CATCHUP && self.audio.as_ref().is_some_and(|a| a.depth() < target)
+                {
+                    let n = self.net_tick_audio();
+                    ticks += 1;
+                    stepped += n;
+                    self.fps_frames += n.min(1);
+                }
+            } else if was_live {
+                self.acc = (self.acc + dt * self.game.fps()).min(f64::from(MAX_CATCHUP));
                 while self.acc >= 1.0 {
                     self.acc -= 1.0;
                     let n = self.net_tick();
@@ -383,18 +415,14 @@ impl ApplicationHandler for App {
                 self.step();
             }
             stepped = FAST_FORWARD_STEPS;
-        } else if let Some(target) = self
-            .audio
-            .as_ref()
-            .map(|a| (f64::from(a.rate) * AUDIO_TARGET_SECS) as usize)
-        {
+        } else if let Some(target) = self.audio_target() {
             // audio clock is the master: top the ring up to ~50 ms
             while stepped < MAX_CATCHUP && self.audio.as_ref().is_some_and(|a| a.depth() < target) {
                 self.step();
                 stepped += 1;
             }
         } else {
-            self.acc = (self.acc + dt * NTSC_HZ).min(f64::from(MAX_CATCHUP));
+            self.acc = (self.acc + dt * self.game.fps()).min(f64::from(MAX_CATCHUP));
             while self.acc >= 1.0 {
                 self.acc -= 1.0;
                 self.step();
@@ -403,7 +431,18 @@ impl ApplicationHandler for App {
         }
 
         if now.duration_since(self.fps_t) >= Duration::from_secs(1) {
-            self.fps = f64::from(self.fps_frames) / now.duration_since(self.fps_t).as_secs_f64();
+            let secs = now.duration_since(self.fps_t).as_secs_f64();
+            self.fps = f64::from(self.fps_frames) / secs;
+            if let (Some(a), true) = (&self.audio, self.audio_stats) {
+                eprintln!(
+                    "audio: {:.0} samples/s (device {} Hz), ring {} ms, dropped {}, {:.2} fps",
+                    a.pushed.take() as f64 / secs,
+                    a.rate,
+                    a.depth() as u64 * 1000 / u64::from(a.rate),
+                    a.dropped.take(),
+                    self.fps
+                );
+            }
             self.fps_frames = 0;
             self.fps_t = now;
         }

@@ -6,7 +6,11 @@ Run: `cargo run -p mmx-native --release -- --rom mmx.sfc [--x3-rom mmx3.sfc [--z
 X swings the saber (docs/zero.md "Playing as Zero"); online, both peers need it.
 `--zero` makes player 1 Zero as well (V swings the saber); it needs the X3 ROM
 (without one mmxrs exits with an error) and, online, both peers must pass it. Pacing follows the audio
-device (~50 ms buffered); without an output device a 60.0988 Hz timer drives it.
+device (~50 ms buffered), online too (one session tick per frame of audio;
+a tick that steps nothing queues a frame of silence); without an output device
+a timer at the ROM's rate drives it (`Game::fps`: 60.0988 NTSC, 50.007 PAL;
+`roms/mega-man-x.smc` is the PAL release). `MMX_AUDIO_STATS=1` prints samples/s,
+ring depth and drops once a second.
 
 | action | P1 keys | P2 keys (`--coop-local` only) | pad |
 |---|---|---|---|

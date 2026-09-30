@@ -1,6 +1,7 @@
 //! Online co-op for the desktop app: open the WebRTC transport and wrap
 //! `mmx_core::netgame::NetPlay` (the per-tick rollback or lockstep driver
-//! shared with the web build). The window loop calls [`Net::tick`] once per 60 Hz tick.
+//! shared with the web build). The window loop calls [`Net::tick_audio`] while the audio queue is
+//! below target ([`Net::tick`] at `Game::fps` without an audio device).
 
 use mmx_core::netgame::{Mode, NetConfig, NetPlay};
 use mmx_core::Game;
@@ -75,6 +76,18 @@ impl Net {
     /// One tick; returns frames simulated. Logs each connect stage once.
     pub fn tick(&mut self, game: &mut Game, pad: u16) -> u32 {
         let n = self.play.tick(game, pad, self.now_ms());
+        self.report();
+        n
+    }
+
+    /// [`NetPlay::tick_audio`]: frames simulated and one frame of audio.
+    pub fn tick_audio(&mut self, game: &mut Game, pad: u16) -> (u32, Vec<(f32, f32)>) {
+        let r = self.play.tick_audio(game, pad, self.now_ms());
+        self.report();
+        r
+    }
+
+    fn report(&mut self) {
         let stage = mmx_net::Transport::stage(self.play.transport());
         if self.reported != Some(stage) {
             self.reported = Some(stage);
@@ -90,7 +103,6 @@ impl Net {
             self.reported_end = true;
             eprintln!("netplay: {}", self.play.status());
         }
-        n
     }
 
     /// Window-title suffix.
