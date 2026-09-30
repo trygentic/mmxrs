@@ -138,9 +138,11 @@ pub const OFF_INPUT: usize = 0x36; // $0BDE held, $0BE0 prev, $0BE2 pressed
 /// `$0BDD`: X's live shot count. The fire routine (`$81:93A8`) refuses when
 /// it is `>=` the cap `+$67` and does `INC $35` (direct page, so P2's own
 /// copy); the shot's despawn does `DEC $0BDD` (absolute, `$81:A2C0`,
-/// `$81:A3FD`, `$81:A4BA`, `$81:A541`) from the shot loop, where P1's block
-/// is live.
+/// `$81:A3FD`, `$81:A4BA`, `$81:A541`) from the shot loop, which runs P2's
+/// shots with P2's block in place ([`HOOK_SHOT_SLOT`]).
 pub const OFF_SHOTS: usize = 0x35;
+/// `$0C0B` (block `+$63`), decremented with `$0BDD` by the despawn at `$81:A541`.
+const OFF_CHARGED_SHOTS: usize = 0x63;
 /// X's shots: 8 slots of `$40` at `$1228` (`ram::ITEMS_BASE`), `+0` = active.
 const X_SHOTS: u32 = 0x7E1228;
 const ACTION_DEATH: u8 = 0x0C;
@@ -288,6 +290,8 @@ pub fn register_coop_traps(game: &mut Game) {
     game.traps.register(HOOK_OAM_HIDE, "coop_p2_oam_hide", TrapReturn::Observe, oam_hide);
     game.traps.register(HOOK_DISPLAY, "coop_p2_display", TrapReturn::Observe, p2_display);
     game.traps.register(HOOK_CONTACT, "coop_contact", TrapReturn::Observe, contact);
+    game.traps.register(HOOK_SHOT_SLOT, "coop_shot_slot", TrapReturn::Observe, shot_slot);
+    game.traps.register(HOOK_SHOT_SLOT_DONE, "coop_shot_slot_done", TrapReturn::Observe, shot_slot_done);
     game.traps.register(crate::saber::HOOK_SHOTS_DONE, "coop_saber_shot", TrapReturn::Observe, crate::saber::shots_done);
 }
 
@@ -379,23 +383,51 @@ fn shots_live(w: &[u8; 0x20000]) -> u8 {
     (0..8).filter(|&k| w[ix(X_SHOTS) + k * 0x40] != 0).fold(0, |m, k| m | 1 << k)
 }
 
-/// B3: a P2 shot that despawned in this frame's shot loop did `DEC $0BDD` on
-/// P1's count (P1's block is live there) and never on P2's. Left alone, P2
-/// hits the cap after a couple of shots and P1's count wraps to `$FF`, so
-/// neither can fire again (Bee Blader 2 took one hit from P2, and never died
-/// with both shooting). Give the count back to P1 and take it off P2.
-/// Runs at [`HOOK_PHYSICS`], after the shot loop and before anyone can fire
-/// into a freed slot again (firing is in the player update).
-fn shot_books(game: &mut Game) {
-    let gone = game.coop.p2_shots & !shots_live(game.wram());
-    if gone == 0 {
-        return;
+/// Shot loop `$80:D3B2` (listing `$80:D3F3`, drift `-$41`), per slot: `$D3B8`
+/// (`SEP #$30`, `D` = the slot, before `LDA $00; BEQ; JSR $D3F8`) and
+/// `$D3C1` (`REP #$21`, the loop step, reached active or not).
+pub const HOOK_SHOT_SLOT: u32 = 0x80D3B8;
+pub const HOOK_SHOT_SLOT_DONE: u32 = 0x80D3C1;
+
+/// P2's shot slot `D` is about to update: put P2's block in place. A shot
+/// reads its owner's block with absolute addresses: its first update
+/// (`$81:A54C`) takes position `$0BAD/$0BB0` + the muzzle offset and facing
+/// `$0BB9`, a charging shot re-anchors to it every frame (`$81:A56E`), and
+/// the despawn does `DEC $0BDD` / `DEC $0C0B` (the shot counts). Run with
+/// P1's block, P2's shots came out of X, flew X's way, and took from P1's
+/// count (B3 had patched only the count).
+fn shot_slot(game: &mut Game) {
+    if game.coop.enabled && p2_shot_slot(game) {
+        let mut p2 = game.coop.p2;
+        swap_block(game.wram_mut(), &mut p2);
+        game.coop.p2 = p2;
     }
-    game.coop.p2_shots &= !gone;
-    let n = gone.count_ones() as u8;
-    let i = ix(ram::X_BASE) + OFF_SHOTS;
-    game.wram_mut()[i] = game.wram()[i].wrapping_add(n);
-    game.coop.p2[OFF_SHOTS] = game.coop.p2[OFF_SHOTS].saturating_sub(n);
+}
+
+/// The slot's update is done (or it was inactive): P1's block back.
+fn shot_slot_done(game: &mut Game) {
+    if game.coop.enabled && p2_shot_slot(game) {
+        let mut p2 = game.coop.p2;
+        swap_block(game.wram_mut(), &mut p2);
+        // A P2 that respawned (`+$35 = 0`) with shots still out: no wrap.
+        for o in [OFF_SHOTS, OFF_CHARGED_SHOTS] {
+            if p2[o] == 0xFF {
+                p2[o] = 0;
+            }
+        }
+        game.coop.p2 = p2;
+    }
+}
+
+fn p2_shot_slot(game: &Game) -> bool {
+    let k = game.regs().d.wrapping_sub(X_SHOTS as u16) / 0x40;
+    k < 8 && game.coop.p2_shots >> k & 1 != 0
+}
+
+/// Forget P2's slots the shot loop freed (at [`HOOK_PHYSICS`], before anyone
+/// can fire into them again: firing is in the player update).
+fn shot_books(game: &mut Game) {
+    game.coop.p2_shots &= shots_live(game.wram());
 }
 
 /// `$80:D241` (after the object master's `JSL $81:9D67`): P2's terrain /
@@ -711,5 +743,48 @@ mod tests {
         let mut dead = p2;
         dead[OFF_HP] = 0x80;
         assert!(p2_is_down(&dead));
+    }
+
+    /// hw-spiky: P2 walks 40 px left of X and fires, X fires right. Each
+    /// shot starts at its own shooter, flies its way, and both counts end at 0.
+    #[test]
+    fn coop_p2_shot_from_p2() {
+        let Some(rom) = std::env::var_os("MMX_ROM") else {
+            eprintln!("MMX_ROM not set; skipping");
+            return;
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/hw-spiky.state");
+        let Ok(state) = std::fs::read(st) else {
+            eprintln!("{st} missing; skipping");
+            return;
+        };
+        let mut g = crate::Game::from_rom(std::fs::read(rom).unwrap()).unwrap();
+        g.load_state(&state).unwrap();
+        g.coop.enabled = true;
+        register_coop_traps(&mut g);
+        let shot = |g: &crate::Game, k: usize| {
+            let o = ix(X_SHOTS) + k * 0x40;
+            let w = g.wram();
+            (w[o] != 0, u16::from_le_bytes([w[o + 5], w[o + 6]]), w[o + 0x11] & 0x40 != 0)
+        };
+        for f in 1..=80 {
+            let p2 = match f {
+                ..=40 => crate::BTN_LEFT,
+                46 => crate::BTN_Y,
+                _ => 0,
+            };
+            g.step(crate::Pads { p1: if f == 50 { crate::BTN_Y } else { 0 }, p2 });
+            let px = u16::from_le_bytes([g.coop.p2[OFF_POS_X], g.coop.p2[OFF_POS_X + 1]]);
+            if f == 46 {
+                assert_eq!(shot(&g, 0), (true, px - 16, false), "P2's shot");
+                assert_eq!(g.coop.p2[OFF_SHOTS], 1);
+            }
+            if f == 50 {
+                let x = u16::from_le_bytes([g.wram()[ix(ram::X_POS_X)], g.wram()[ix(ram::X_POS_X) + 1]]);
+                assert_eq!(shot(&g, 1), (true, x + 16, true), "P1's shot");
+            }
+        }
+        assert!(!shot(&g, 0).0 && !shot(&g, 1).0);
+        assert_eq!((g.coop.p2[OFF_SHOTS], g.wram()[ix(ram::X_BASE) + OFF_SHOTS], g.coop.p2_shots), (0, 0, 0));
     }
 }

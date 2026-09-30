@@ -32,6 +32,7 @@ The disassembly's bank-`$80` PCs drift from this cartridge by up to `0x41`
 | `$80:D241` | instruction after `JSL $81:9D67` (P1's terrain/physics phase, run after the enemy and shot loops) | physics slice: shot bookkeeping (B3), `$81:9D67`, `$80:D292`, then `coop_stages::p2_lost` (pit / left behind) |
 | `$80:D545` | second instruction of the OAM build `$80:D544` (`PHB`; `$D544` is Zero's palette trap) | hide last frame's P2 slots (Y = `$E0`) |
 | `$80:9A86` | instruction after `JSR $80:D544` at `$80:9A83` in the per-frame stage code: the whole OAM build (and its hide loop) is done, the camera is final | display slice: clamp X into `[cam+8, cam+248]`, `$80:D640` + `$80:D671` on P2's block into the slots past the game's, Zero palette, direct page put back; with the X3 set, the Rust emitter `zero::emit_x3` instead (docs/zero.md "Drawing P2 as X3 Zero") |
+| `$80:D3B8` / `$80:D3C1` | shot loop, before / after each `$1228` slot (`D` = the slot) | P2's shots (B3): P2's block swapped in around their update |
 | `$80:D1FF` | instruction after the object master's `JSR $80:D3B2` (the shot loop; the enemy loops follow) | saber (X3 set only): the arc's shot into a free `$1228` slot, taken out at `$80:D241` (docs/zero.md "The saber") |
 | `$84:9B03` | entry of the enemy-vs-X contact routine; every enemy's AI `JSL`s it with `D` = the enemy (154 call sites) | contact pass: the same routine again, isolated, with P2's block swapped in |
 
@@ -184,14 +185,25 @@ Y presses spawned nothing, `MMX_COOP_DIFF` shows no `$1228` write) and P1's
 count wrapped to `$FF` (`>=` the cap, so P1 couldn't fire either; "both
 shooting, never dies"). The boss itself has no player-keyed state.
 
+The same shot loop also placed P2's shots: a shot's first update
+(`$81:A54C`) takes its position from `$0BAD/$0BB0` (+ the muzzle offset
+`$86:BE39[+3C]`) and its facing from `$0BB9`, and a charging shot
+re-anchors to them every frame (`$81:A56E`). With P1's block live, P2's
+shots came out of X and flew X's way (hw-spiky, P2 at 447 facing left: the
+new slot at 504 facing right, X at 488).
+
 Fix: `p2_update` records the `$1228` slots that became active during P2's
-slice when P2's `+$35` went up (`CoopState::p2_shots`); the physics hook
-(after the shot loop, before anyone can fire into a freed slot) gives each
-P2 slot that went inactive back to P1's `$0BDD` and takes it off P2's
-`+$35`. A (re)spawned P2 starts with `+$35 = 0`. unverified: charged shots
-and special weapons use the same count and despawns (same `DEC $0BDD`
-sites); `$84:9DE0` also does `DEC $0C20` (block `+$78`) for weapon `$08`,
-not handled.
+slice when P2's `+$35` went up (`CoopState::p2_shots`). Two hooks in the
+shot loop (`$80:D3B2`, listing `$80:D3F3`) swap P2's block in around each
+P2 slot's update: `$80:D3B8` (`SEP #$30`, `D` = the slot) and `$80:D3C1`
+(`REP #$21`, the loop step, reached whether the slot ran or not). So the
+shot reads P2's position and facing, and its despawn's `DEC $0BDD` /
+`DEC $0C0B` hit P2's copy. The physics hook drops the freed slots from
+`p2_shots`. A P2 that respawned (`+$35 = 0`) with shots still out would
+wrap: `$FF` is put back to 0. Test `coop_p2_shot_from_p2`; lemon and
+charged shots checked (`target/z/shot_strip.png`, highway-start charge:
+the half charge sits on Zero, then flies left). unverified: special
+weapons; `$84:9DE0` also does `DEC $0C20` (block `+$78`) for weapon `$08`.
 
 ## Sound
 
