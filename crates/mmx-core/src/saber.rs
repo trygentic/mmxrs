@@ -32,13 +32,17 @@ const SHOT_LEN: usize = 0x40;
 /// shot (`$86:EEDB` row 3, the Highway enemies and Bee Blader: lemon 1,
 /// half charge 2, full charge 4).
 pub const DAMAGE_ID: u8 = 2;
-/// Hit box `+20` (bank `$86`): `$BF56` = `00 00 14 14`, 40 x 40 px around
-/// the shot's position.
-pub const BOX: u16 = 0xBF56;
-/// Box centre relative to P2's `+05/+08`: in front of Zero, head high (the
-/// arc of frames 88/97 on the sheet).
-pub const REACH_X: i16 = 16;
-pub const REACH_Y: i16 = -16;
+/// Hit box `+20` (bank `$86`, `x, y, half w, half h`; the enemy-vs-shot
+/// test `$84:9C0E` mirrors `x` by the shot's facing): `$BFC4` = `00 01 13 0A`,
+/// 38 x 20 px, centred 1 px below the shot's position.
+pub const BOX: u16 = 0xBFC4;
+/// Shot position relative to P2's `+05/+08` (x toward Zero's facing), so the
+/// box covers the blade as drawn: frame 88 on screen (`hw-spiky`, docs/zero.md)
+/// runs from 13 px behind to 26 px in front, 29 to 8 px above `+08`; frame
+/// 97's sits 3 px higher.
+pub const REACH_X: i16 = 7;
+pub const REACH_Y: i16 = -19;
+pub const REACH_Y_AIR: i16 = -22;
 pub const FRAMES_PER_POSE: u8 = 4;
 const GROUND: [usize; 5] = [86, 87, 88, 89, 90];
 const AIR: [usize; 4] = [95, 96, 97, 98];
@@ -107,11 +111,11 @@ fn arc(s: &Saber) -> bool {
 }
 
 /// The shot the arc puts into the table (`+05/+08` = the box centre). Pure.
-pub fn shot_bytes(p2: &[u8]) -> [u8; SHOT_LEN] {
+pub fn shot_bytes(p2: &[u8], air: bool) -> [u8; SHOT_LEN] {
     let w = |o: usize| i16::from_le_bytes([p2[o], p2[o + 1]]);
     let right = p2[0x11] & 0x40 != 0;
     let x = w(OFF_POS_X).wrapping_add(if right { REACH_X } else { -REACH_X });
-    let y = w(OFF_POS_Y).wrapping_add(REACH_Y);
+    let y = w(OFF_POS_Y).wrapping_add(if air { REACH_Y_AIR } else { REACH_Y });
     let mut s = [0u8; SHOT_LEN];
     s[0x00] = 1;
     s[0x0A] = DAMAGE_ID;
@@ -128,7 +132,7 @@ pub fn shots_done(game: &mut Game) {
     if !c.enabled || c.p2_hidden || game.zero_set.is_none() || !arc(&c.saber) {
         return;
     }
-    let shot = shot_bytes(&c.p2);
+    let shot = shot_bytes(&c.p2, c.saber.air);
     let w = game.wram_mut();
     let Some(k) = (0..8).find(|&k| w[ix(SHOTS) + k * SHOT_LEN] == 0) else { return };
     w[ix(SHOTS) + k * SHOT_LEN..][..SHOT_LEN].copy_from_slice(&shot);
@@ -188,17 +192,19 @@ mod tests {
         p2[OFF_POS_X..OFF_POS_X + 2].copy_from_slice(&500u16.to_le_bytes());
         p2[OFF_POS_Y..OFF_POS_Y + 2].copy_from_slice(&367u16.to_le_bytes());
         p2[0x11] = 0x62; // facing right
-        let s = shot_bytes(&p2);
-        assert_eq!((u16::from_le_bytes([s[5], s[6]]), u16::from_le_bytes([s[8], s[9]])), (516, 351));
+        let s = shot_bytes(&p2, false);
+        assert_eq!((u16::from_le_bytes([s[5], s[6]]), u16::from_le_bytes([s[8], s[9]])), (507, 348));
         assert_eq!((s[0], s[0x0A], s[0x30]), (1, DAMAGE_ID, 0));
         p2[0x11] = 0x22;
-        assert_eq!(u16::from_le_bytes([shot_bytes(&p2)[5], shot_bytes(&p2)[6]]), 484);
+        let s = shot_bytes(&p2, true);
+        assert_eq!((u16::from_le_bytes([s[5], s[6]]), u16::from_le_bytes([s[8], s[9]])), (493, 345));
     }
 
     /// hw-spiky (docs/coop.md): P2 walks right 20 frames, X at 22; the
-    /// Spiky (enemy slot 0, 2 HP) dies on the arc. Needs both ROMs and the state.
+    /// Spiky (enemy slot 0, 2 HP, 1 per hit of id 2) is hit on the arc, at the
+    /// blade's tip (its box edge 26 px in front). Needs both ROMs and the state.
     #[test]
-    fn saber_kills_spiky() {
+    fn saber_hits_spiky() {
         let (Some(x1), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
             eprintln!("MMX_ROM / MMX_X3_ROM not set; skipping");
             return;
@@ -225,8 +231,47 @@ mod tests {
             seen.push((g.coop.zero_frame, hp(&g)));
         }
         assert_eq!(seen[25].1, 2, "alive before the arc: {seen:?}");
-        assert!(seen[28..33].iter().any(|&(zf, hp)| zf == 88 && hp == 0), "{seen:?}");
+        assert!(seen[28..33].iter().any(|&(zf, hp)| zf == 88 && hp == 1), "{seen:?}");
         assert_eq!(g.wram()[0x0BDD], 0, "P1's shot count untouched");
+    }
+
+    /// Netplay: a 2-frame rollback every frame through the swing draws the
+    /// same pictures as the straight run (page, mask and `zero_frame` travel
+    /// together in `net_save`).
+    #[test]
+    fn saber_frames_survive_rollback() {
+        let (Some(x1), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
+            eprintln!("MMX_ROM / MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/hw-spiky.state");
+        let Ok(state) = std::fs::read(st) else {
+            eprintln!("{st} missing; skipping");
+            return;
+        };
+        let new = || {
+            let mut g = crate::Game::from_rom(std::fs::read(&x1).unwrap()).unwrap();
+            g.set_x3_rom(&std::fs::read(&x3).unwrap()).unwrap();
+            g.load_state(&state).unwrap();
+            g.coop.enabled = true;
+            crate::coop::register_coop_traps(&mut g);
+            g
+        };
+        let pad = |f: usize| crate::Pads { p1: 0, p2: if f <= 20 { BTN_RIGHT } else if f == 22 { BTN_X } else { 0 } };
+        let (mut a, mut b) = (new(), new());
+        let mut saves = Vec::new();
+        for f in 1..=40 {
+            a.step(pad(f));
+            saves.push(crate::netgame::net_save(&b));
+            b.step(pad(f));
+            if f > 2 {
+                crate::netgame::net_load(&mut b, &saves[f - 3]).unwrap();
+                for r in f - 2..=f {
+                    b.step(pad(r));
+                }
+            }
+            assert_eq!(a.frame().0, b.frame().0, "frame {f} (zf {})", a.coop.zero_frame);
+        }
     }
 }
 
