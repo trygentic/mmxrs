@@ -156,3 +156,22 @@ fall, `$0A` land, `$0C` death, `$0E` hurt, `$10` wall kick, `$12` wall slide,
 - Not done: a password past the intro stage (needs the stage cleared, or the
   decoder at the END handler). Stage select, the Chill Penguin run and `$1F7A`
   for other stages are still open.
+
+## Results on the merged tree (2026-09-30)
+
+`scripts/coop-qa.sh check` from the regenerated milestone states:
+
+| milestone | idle | mirror |
+|---|---|---|
+| m0-walk | yes | yes |
+| m1-pitdeath | yes | yes |
+| m2-pause | yes | yes |
+| m3-pit2 | yes (B4b closed by the shadow tile page) | no: P2's shots/contacts change the fight |
+| m4-bee1 | yes | no: same |
+| m5-climb | yes | yes |
+| m6-bee2 | yes | yes |
+| m7-end | yes | no: same |
+| m8-gameover | yes | yes |
+
+Every idle run keeps P1 byte-identical to solo; every mirror "no" is a gameplay
+difference P2 causes on purpose, not a leak.
