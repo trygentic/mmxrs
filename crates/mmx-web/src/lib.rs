@@ -73,6 +73,9 @@ pub struct Emu {
     rom: Vec<u8>,
     #[cfg(feature = "netplay")]
     net: Option<mmx_core::netgame::NetPlay<mmx_net::MatchboxTransport>>,
+    /// The last dropped session's log (`net_record`).
+    #[cfg(feature = "netplay")]
+    net_log: String,
 }
 
 #[wasm_bindgen]
@@ -91,6 +94,8 @@ impl Emu {
             rom: rom.to_vec(),
             #[cfg(feature = "netplay")]
             net: None,
+            #[cfg(feature = "netplay")]
+            net_log: String::new(),
         };
         emu.refresh_frame();
         Ok(emu)

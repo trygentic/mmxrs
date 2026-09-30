@@ -1,6 +1,8 @@
 //! `cargo xtask <verify|dump|ledger|rominfo>`. Plain `std::env::args`.
 //! All fs lives here, never in the libs.
 
+mod net;
+
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
@@ -17,6 +19,12 @@ const USAGE: &str = "usage: cargo xtask <command>
   ledger
   rominfo
   zerosheet [--x3 PATH [--wave|--slash]] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data; --wave: the saber wave, --slash: the slash arc) -> DIR/NN_name.png + DIR/sheet.png
+  netsim [--mode rollback|lockstep] [--rtt MS] [--jitter MS] [--loss PCT] [--delay N] [--prediction N] [--frames N]
+       [--load STATE] [--x3 PATH] [--zero] [--timing ntsc|pal] [--seed N] [--report F.json] [--record PREFIX] [script]
+       two session games over a simulated link (virtual clock); host plays pad 1 of the script, guest pad 2;
+       exit 1 on desync or a mismatch with the plain run. --record writes PREFIX-host.log / PREFIX-guest.log
+  netreplay LOG [LOG2] [--load STATE] [--x3 PATH] [--rom PATH]   a session log (mmxrs --net-record) against a
+       plain replay of its confirmed inputs; with two logs (one per peer) also compare them
 env: MMX_ROM=path/to/Mega Man X (USA).sfc, MMX_X3_ROM=path/to/Mega Man X3 (USA).sfc (P2 as X3 Zero; = --x3)";
 
 fn main() {
@@ -29,6 +37,8 @@ fn main() {
         Some("ledger") => ledger(),
         Some("rominfo") => rominfo(),
         Some("zerosheet") => zerosheet(&args[1..]),
+        Some("netsim") => netsim(&args[1..]),
+        Some("netreplay") => netreplay(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             2
@@ -522,6 +532,93 @@ fn zerosheet(args: &[String]) -> i32 {
         println!("  {i:2} {:14} {:2} sprites", f.name, f.sprites.len());
     }
     0
+}
+
+/// `--x3 PATH` or `$MMX_X3_ROM`: the X3 Zero set.
+fn x3_set(args: &[String]) -> Option<mmx_core::zero_data::ZeroSet> {
+    let p = flag(args, "--x3").map(PathBuf::from).or_else(|| std::env::var_os("MMX_X3_ROM").filter(|v| !v.is_empty()).map(PathBuf::from))?;
+    let b = std::fs::read(&p).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+    let b = if b.len() % 0x8000 == 512 { &b[512..] } else { &b[..] };
+    Some(mmx_core::zero_data::extract_x3(b).unwrap_or_else(|e| die(&format!("{}: {e}", p.display()))))
+}
+
+fn netsim(args: &[String]) -> i32 {
+    use mmx_core::netgame::Mode;
+    let mode = flag(args, "--mode").map_or(Mode::Rollback, |m| Mode::parse(m).unwrap_or_else(|| die("--mode: rollback or lockstep")));
+    let mut o = net::SimOpts::new(mode);
+    let n = |k: &str, d: u32| num(args, k).map_or(d, |v| v as u32);
+    o.delay = n("--delay", u32::from(o.delay)) as u8;
+    o.prediction = n("--prediction", u32::from(o.prediction)) as u8;
+    o.rtt_ms = n("--rtt", o.rtt_ms);
+    o.jitter_ms = n("--jitter", o.jitter_ms);
+    o.frames = n("--frames", o.frames);
+    o.seed = u64::from(n("--seed", 1));
+    o.loss_pct = flag(args, "--loss").map_or(o.loss_pct, |v| v.parse().unwrap_or_else(|_| die("--loss: percent")));
+    o.timing = flag(args, "--timing")
+        .map(String::from)
+        .or_else(|| std::env::var("MMX_TIMING").ok())
+        .map_or(mmx_core::Timing::Auto, |t| mmx_core::Timing::parse(&t).unwrap_or_else(|| die("--timing: auto, ntsc or pal")));
+    o.x3 = x3_set(args);
+    o.zero = args.iter().any(|a| a == "--zero");
+    o.load = flag(args, "--load").map(|p| (p.to_string(), std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")))));
+    let record = flag(args, "--record");
+    o.record = record.is_some();
+    let script = scripted(args);
+    let r = net::netsim(&rom(), &o, &script).unwrap_or_else(|e| die(&e));
+    print!("{}", net::sim_text(&r));
+    if let Some(p) = flag(args, "--report") {
+        std::fs::write(p, net::sim_json(&r)).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+    }
+    if let Some(prefix) = record {
+        for p in &r.peers {
+            let path = format!("{prefix}-{}.log", p.role);
+            std::fs::write(&path, p.log.as_deref().unwrap_or_default()).unwrap_or_else(|e| die(&format!("{path}: {e}")));
+            println!("log: {path}");
+        }
+    }
+    i32::from(!r.ok())
+}
+
+fn netreplay(args: &[String]) -> i32 {
+    let mut logs = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if matches!(args[i].as_str(), "--load" | "--x3" | "--rom") {
+            i += 2;
+            continue;
+        }
+        logs.push(net::parse_log(&args[i]).unwrap_or_else(|e| die(&e)));
+        i += 1;
+    }
+    if logs.is_empty() || logs.len() > 2 {
+        die("netreplay LOG [LOG2] [--load STATE] [--x3 PATH] [--rom PATH]");
+    }
+    let rom = match flag(args, "--rom") {
+        Some(p) => std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}"))),
+        None => rom(),
+    };
+    let x3 = x3_set(args);
+    let load = flag(args, "--load").map(|p| std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}"))));
+    let mut bad = false;
+    for l in &logs {
+        print!("{}", net::summary(l));
+        match net::replay(&rom, l, x3.as_ref(), load.as_deref()) {
+            Ok(r) => {
+                bad |= r.first_bad.is_some();
+                println!("{}", net::verdict(l, &r));
+            }
+            Err(e) => {
+                bad = true;
+                println!("replay: {e}");
+            }
+        }
+    }
+    if let [a, b] = &logs[..] {
+        let c = net::compare(a, b);
+        bad |= c.contains("differ");
+        print!("{c}");
+    }
+    i32::from(bad)
 }
 
 fn write_png(path: &Path, px: &[u32], w: usize, h: usize) -> Result<(), Box<dyn std::error::Error>> {

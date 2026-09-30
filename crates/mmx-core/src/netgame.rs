@@ -15,6 +15,7 @@ use mmx_net::{
     MAX_DELAY, MAX_ROLLBACK_DELAY,
 };
 
+use crate::netlog::{Event, Header, Recorder};
 use crate::zero_data::ZeroSet;
 use crate::{Timing, coop, Game, Pads, RomError};
 
@@ -197,6 +198,19 @@ enum Engine<T: Transport> {
     },
 }
 
+/// One simulated frame, for [`NetPlay::observe`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Simulated {
+    pub frame: u32,
+    pub pad1: u16,
+    pub pad2: u16,
+    /// Re-simulation after a rollback (the frame was shown before).
+    pub replay: bool,
+}
+
+/// Callback run after every simulated frame (see [`NetPlay::observe`]).
+pub type Observer = Box<dyn FnMut(&Game, Simulated)>;
+
 /// A session in either [`Mode`] plus everything a frontend tick needs: the
 /// ROM (to rebuild the game when the session starts), rollback's state ring
 /// and skip/interrupt bookkeeping.
@@ -210,6 +224,18 @@ pub struct NetPlay<T: Transport> {
     pub last_error: Option<String>,
     /// Applied to the rebuilt game (the frontend's audio device rate).
     pub audio_rate: Option<u32>,
+    /// Called after every simulated frame, rollback replays included
+    /// (`xtask netsim` measures the remote player's snapping with it).
+    pub observe: Option<Observer>,
+    /// Session log (`--net-record`, docs/netplay.md "Session logs"): set
+    /// before the session starts; written from `Running` on, times in ms
+    /// since then.
+    pub record: Option<Recorder>,
+    /// Rollback prediction window (0 in lockstep), for the log header.
+    prediction: u8,
+    /// `now_ms` at `Running`, and at the latest tick.
+    t0_ms: u64,
+    last_ms: u64,
 }
 
 impl<T: Transport> NetPlay<T> {
@@ -257,6 +283,10 @@ impl<T: Transport> NetPlay<T> {
     }
 
     pub fn new(cfg: NetConfig, rom: Vec<u8>, transport: T, room: &str) -> Result<Self, String> {
+        let prediction = match &cfg {
+            NetConfig::Rollback(c) => c.max_prediction,
+            NetConfig::Lockstep(_) => 0,
+        };
         let engine = match cfg {
             NetConfig::Rollback(cfg) => Engine::Rollback {
                 ring: StateRing::new(usize::from(cfg.max_prediction) + 2),
@@ -276,6 +306,11 @@ impl<T: Transport> NetPlay<T> {
             started: false,
             last_error: None,
             audio_rate: None,
+            observe: None,
+            record: None,
+            prediction,
+            t0_ms: 0,
+            last_ms: 0,
         })
     }
 
@@ -375,9 +410,67 @@ impl<T: Transport> NetPlay<T> {
     /// (replayed frames' audio dropped). Lockstep: latch the pad, step the
     /// next frame if both pads are known, else return 0 (the game waits).
     pub fn tick(&mut self, game: &mut Game, pad: u16, now_ms: u64) -> u32 {
-        match self.engine {
+        let (f0, was_live) = (self.frame(), self.live());
+        let skipping = matches!(self.engine, Engine::Rollback { skip, .. } if skip > 0);
+        self.last_ms = now_ms;
+        let n = match self.engine {
             Engine::Rollback { .. } => self.tick_rollback(game, pad, now_ms),
             Engine::Lockstep { .. } => self.tick_lockstep(game, pad, now_ms),
+        };
+        self.log_tick(now_ms, f0, was_live && !skipping);
+        n
+    }
+
+    /// Recorder bookkeeping after a tick: compared checksums, settled pads,
+    /// time marks and stalls (a live, non-skipping tick with no new frame).
+    fn log_tick(&mut self, now_ms: u64, f0: u32, could_step: bool) {
+        // Checksums are taken before a frame in rollback, after it in lockstep.
+        let (checks, after) = match &mut self.engine {
+            Engine::Rollback { session, .. } => (session.take_checks(), 0),
+            Engine::Lockstep { session, .. } => (session.take_checks(), 1),
+        };
+        let (frame, settled, live) = (self.frame(), self.settled_frames(), self.live());
+        let Some(rec) = self.record.as_mut() else { return };
+        let ms = now_ms.saturating_sub(self.t0_ms);
+        for (f, local, remote) in checks {
+            rec.event(&Event::Check { ms, frames: f + after, local, remote });
+        }
+        rec.settle(settled);
+        rec.tick(ms, frame, frame > f0, could_step && live && frame == f0);
+    }
+
+    fn log(&mut self, e: Event) {
+        if let Some(r) = self.record.as_mut() {
+            r.event(&e);
+        }
+    }
+
+    /// Log the session start (header) and remember the time origin.
+    fn log_start(&mut self, game: &Game, now_ms: u64, delay: u8, interval: u16) {
+        self.t0_ms = now_ms;
+        let h = Header {
+            rom_crc: game.rom_info().crc32,
+            trapset: trapset_id(game),
+            mode: self.mode(),
+            host: self.is_host(),
+            delay,
+            prediction: self.prediction,
+            interval,
+            timing: game.timing(),
+            x3: game.zero_set().is_some(),
+            zero: game.p1_zero(),
+            load: None,
+        };
+        if let Some(r) = self.record.as_mut() {
+            r.start(&h);
+        }
+    }
+
+    fn log_closed(&mut self, reason: String) {
+        let ms = self.last_ms.saturating_sub(self.t0_ms);
+        if let Some(r) = self.record.as_mut() {
+            r.event(&Event::Closed { ms, reason });
+            r.finish(ms);
         }
     }
 
@@ -410,8 +503,14 @@ impl<T: Transport> NetPlay<T> {
             session.poll(now_ms);
         } else {
             session.add_local_input(pad);
+            let f0 = session.frame();
             let err = match session.advance(now_ms) {
-                Ok(reqs) => apply_rollback(session, ring, game, &reqs, &mut n).err(),
+                Ok(reqs) => {
+                    if let (Some(RollbackRequest::LoadState { frame }), Some(r)) = (reqs.first(), self.record.as_mut()) {
+                        r.event(&Event::Rollback { frame: f0, depth: f0 - frame });
+                    }
+                    apply_rollback(session, ring, game, &reqs, &mut n, &mut self.observe, &mut self.record).err()
+                }
                 Err(RollbackError::Closed(_)) => None,
                 Err(e) => Some(e.to_string()),
             };
@@ -420,33 +519,52 @@ impl<T: Transport> NetPlay<T> {
                 session.close();
             }
         }
-        self.rollback_events(game);
+        self.rollback_events(game, now_ms);
         n
     }
 
-    fn rollback_events(&mut self, game: &mut Game) {
-        let Engine::Rollback { session, skip, interrupted, .. } = &mut self.engine else {
+    fn rollback_events(&mut self, game: &mut Game, now_ms: u64) {
+        let Engine::Rollback { session, .. } = &mut self.engine else {
             return;
         };
-        for ev in session.events() {
+        let (events, frame) = (session.events(), session.frame());
+        let ms = now_ms.saturating_sub(self.t0_ms);
+        for ev in events {
+            let Engine::Rollback { session, skip, interrupted, .. } = &mut self.engine else {
+                return;
+            };
             match ev {
-                RollbackEvent::Running { coop_flags, .. } => {
+                RollbackEvent::Running { coop_flags, input_delay, check_interval, .. } => {
                     match start_game(&self.rom, coop_flags, self.audio_rate, game) {
-                        Ok(()) => self.started = true,
+                        Ok(()) => {
+                            self.started = true;
+                            self.log_start(game, now_ms, input_delay, check_interval);
+                        }
                         Err(e) => {
                             self.last_error = Some(e);
                             session.close();
                         }
                     }
                 }
-                RollbackEvent::WaitRecommendation { skip_frames } => *skip = u32::from(skip_frames),
-                RollbackEvent::NetworkInterrupted { .. } => *interrupted = true,
-                RollbackEvent::NetworkResumed => *interrupted = false,
-                RollbackEvent::DesyncDetected { frame, .. } => {
-                    self.last_error = Some(format!("desync at frame {frame}"))
+                RollbackEvent::WaitRecommendation { skip_frames } => {
+                    *skip = u32::from(skip_frames);
+                    self.log(Event::Wait { ms, frame, skip: skip_frames });
+                }
+                RollbackEvent::NetworkInterrupted { .. } => {
+                    *interrupted = true;
+                    self.log(Event::Interrupted { ms, frame });
+                }
+                RollbackEvent::NetworkResumed => {
+                    *interrupted = false;
+                    self.log(Event::Resumed { ms, frame });
+                }
+                RollbackEvent::DesyncDetected { frame, local, remote } => {
+                    self.last_error = Some(format!("desync at frame {frame}"));
+                    self.log(Event::Desync { ms, frames: frame, local, remote });
                 }
                 RollbackEvent::Disconnected { reason } => {
                     self.last_error.get_or_insert_with(|| reason.to_string());
+                    self.log_closed(reason.to_string());
                 }
                 RollbackEvent::Synchronizing { .. } => {}
             }
@@ -465,6 +583,12 @@ impl<T: Transport> NetPlay<T> {
             if let Some((frame, pad1, pad2)) = session.poll() {
                 game.step(Pads { p1: pad1, p2: pad2 });
                 n = 1;
+                if let Some(r) = self.record.as_mut() {
+                    r.simulated(frame, pad1, pad2);
+                }
+                if let Some(f) = self.observe.as_mut() {
+                    f(game, Simulated { frame, pad1, pad2, replay: false });
+                }
                 if session.needs_hash(frame) {
                     session.report_hash(frame, net_checksum(game));
                 }
@@ -472,30 +596,39 @@ impl<T: Transport> NetPlay<T> {
             // Send the freshly latched pad now rather than next tick.
             session.update(transport, now_ms);
         }
-        self.lockstep_events(game);
+        self.lockstep_events(game, now_ms);
         n
     }
 
-    fn lockstep_events(&mut self, game: &mut Game) {
+    fn lockstep_events(&mut self, game: &mut Game, now_ms: u64) {
         let Engine::Lockstep { session, .. } = &mut self.engine else {
             return;
         };
+        let ms = now_ms.saturating_sub(self.t0_ms);
         for ev in session.take_events() {
+            let Engine::Lockstep { session, .. } = &mut self.engine else {
+                return;
+            };
             match ev {
-                SessionEvent::Started { coop_flags, .. } => {
+                SessionEvent::Started { coop_flags, delay, hash_interval, .. } => {
                     match start_game(&self.rom, coop_flags, self.audio_rate, game) {
-                        Ok(()) => self.started = true,
+                        Ok(()) => {
+                            self.started = true;
+                            self.log_start(game, now_ms, delay, hash_interval);
+                        }
                         Err(e) => {
                             self.last_error = Some(e);
                             session.close();
                         }
                     }
                 }
-                SessionEvent::Desync { frame, .. } => {
-                    self.last_error = Some(format!("desync at frame {frame}"))
+                SessionEvent::Desync { frame, local, remote } => {
+                    self.last_error = Some(format!("desync at frame {frame}"));
+                    self.log(Event::Desync { ms, frames: frame + 1, local, remote });
                 }
                 SessionEvent::Closed(reason) => {
                     self.last_error.get_or_insert_with(|| reason.to_string());
+                    self.log_closed(reason.to_string());
                 }
                 SessionEvent::PeerHello { .. }
                 | SessionEvent::Stalled { .. }
@@ -566,6 +699,7 @@ impl<T: Transport> NetPlay<T> {
             Engine::Rollback { session, .. } => session.close(),
             Engine::Lockstep { session, .. } => session.close(),
         }
+        self.log_closed(CloseReason::LocalQuit.to_string());
     }
 }
 
@@ -594,6 +728,8 @@ fn apply_rollback<T: Transport>(
     game: &mut Game,
     reqs: &[RollbackRequest],
     n: &mut u32,
+    observe: &mut Option<Observer>,
+    record: &mut Option<Recorder>,
 ) -> Result<(), String> {
     for r in reqs {
         match *r {
@@ -609,9 +745,15 @@ fn apply_rollback<T: Transport>(
                     .ok_or_else(|| format!("rollback: no saved state for frame {frame}"))?;
                 net_load(game, s)?;
             }
-            RollbackRequest::Advance { pad1, pad2, replay, .. } => {
+            RollbackRequest::Advance { frame, pad1, pad2, replay, .. } => {
                 game.step(Pads { p1: pad1, p2: pad2 });
                 *n += 1;
+                if let Some(r) = record.as_mut() {
+                    r.simulated(frame, pad1, pad2);
+                }
+                if let Some(f) = observe.as_mut() {
+                    f(game, Simulated { frame, pad1, pad2, replay });
+                }
                 if replay {
                     // Heard once already. The new frame is always the last
                     // request, so its samples stay for the frontend.

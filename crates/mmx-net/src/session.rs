@@ -336,6 +336,8 @@ pub struct Session {
     remote_hashes: BTreeMap<u32, u64>,
     outbox: Vec<(Channel, Vec<u8>)>,
     events: Vec<SessionEvent>,
+    /// Compared hashes `(frame, local, remote)` not yet taken.
+    checks: Vec<(u32, u64, u64)>,
     stats: SessionStats,
 }
 
@@ -377,6 +379,7 @@ impl Session {
             remote_hashes: BTreeMap::new(),
             outbox: Vec::new(),
             events: Vec::new(),
+            checks: Vec::new(),
             stats: SessionStats::default(),
             cfg,
         })
@@ -429,6 +432,13 @@ impl Session {
         s.remote_known = self.remote.contiguous();
         s.peer_ack = self.peer_ack;
         s
+    }
+
+    /// Drain the hash comparisons made so far as `(frame, local, remote)`,
+    /// matches and mismatches alike (for session logs). Grows by one per
+    /// hash interval until taken.
+    pub fn take_checks(&mut self) -> Vec<(u32, u64, u64)> {
+        std::mem::take(&mut self.checks)
     }
 
     /// Drain pending events.
@@ -772,6 +782,7 @@ impl Session {
         };
         self.local_hashes.remove(&frame);
         self.remote_hashes.remove(&frame);
+        self.checks.push((frame, local, remote));
         if local == remote {
             self.stats.hashes_ok += 1;
         } else {

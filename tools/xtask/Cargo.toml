@@ -3,10 +3,11 @@ name = "xtask"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "mmxrs developer tasks: verify, dump, ledger, rominfo"
+description = "mmxrs developer tasks: verify, dump, ledger, rominfo, netsim, netreplay"
 publish = false
 
 [dependencies]
 mmx-core = { path = "../../crates/mmx-core" }
+mmx-net = { path = "../../crates/mmx-net" }
 mmx-verify = { path = "../../crates/mmx-verify" }
 png = "0.18"

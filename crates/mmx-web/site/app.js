@@ -211,10 +211,21 @@ function netFrame(dt) {
   if (shown) blit();
 }
 
+let netUsed = false; // a session was started: its log can be downloaded
 const netSupported = () => !!emu && typeof emu.net_connect === 'function';
 function netButtons() {
   $('netHost').disabled = $('netJoin').disabled = net || !netSupported();
   $('netLeave').disabled = !net;
+  $('netLog').disabled = !netSupported() || !netUsed;
+}
+function netLog() {
+  const text = emu?.net_record?.();
+  if (!text) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+  a.download = `mmxrs-${$('netRoom').value.trim() || 'session'}-${Date.now()}.log`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 function netConnect(host) {
   if (!netSupported()) { $('netStatus').textContent = emu ? 'netplay: not in this build (--features netplay)' : 'netplay: load the ROM first'; return; }
@@ -229,7 +240,7 @@ function netConnect(host) {
     $('netStatus').textContent = `netplay: ${err}`;
     return;
   }
-  net = true;
+  net = netUsed = true;
   netButtons();
 }
 function netLeave() {
@@ -241,6 +252,7 @@ function netLeave() {
 $('netHost').addEventListener('click', () => netConnect(true));
 $('netJoin').addEventListener('click', () => netConnect(false));
 $('netLeave').addEventListener('click', netLeave);
+$('netLog').addEventListener('click', netLog);
 {
   const q = new URLSearchParams(location.search);
   for (const k of ['signal', 'room', 'ice', 'mode', 'delay']) {

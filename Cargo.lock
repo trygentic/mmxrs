@@ -7214,6 +7214,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "mmx-core",
+ "mmx-net",
  "mmx-verify",
  "png",
 ]

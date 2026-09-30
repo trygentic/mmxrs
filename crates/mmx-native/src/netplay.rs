@@ -23,9 +23,11 @@ pub struct Net {
     reported_end: bool,
     said_running: bool,
     epoch: std::time::Instant,
+    /// `--net-record`: the log file and when it was last appended to.
+    record: Option<(std::fs::File, u64)>,
 }
 
-/// `--coop-host/--coop-join ROOM [--signal] [--ice] [--mode] [--delay] [--prediction]` -> a connecting session.
+/// `--coop-host/--coop-join ROOM [--signal] [--ice] [--mode] [--delay] [--prediction] [--net-record]` -> a connecting session.
 #[allow(clippy::too_many_arguments)]
 pub fn connect(
     rom: &[u8],
@@ -39,6 +41,7 @@ pub fn connect(
     x3: Option<&mmx_core::zero_data::ZeroSet>,
     zero: bool,
     timing: mmx_core::Timing,
+    record: Option<&str>,
 ) -> Result<Net, String> {
     let mut cfg = NetPlay::<NetTransport>::config(rom, host, mode, delay, x3, zero, timing)?;
     if let (NetConfig::Rollback(c), Some(p)) = (&mut cfg, prediction) {
@@ -49,13 +52,21 @@ pub fn connect(
         .map(mmx_net::IceConfig::parse)
         .transpose()
         .map_err(|e| format!("--ice: {e}"))?;
+    let record = record
+        .map(|p| std::fs::File::create(p).map(|f| (f, 0)).map_err(|e| format!("--net-record {p}: {e}")))
+        .transpose()?;
     let t = open(&url, ice)?;
+    let mut play = NetPlay::new(cfg, rom.to_vec(), t, room)?;
+    if record.is_some() {
+        play.record = Some(mmx_core::netlog::Recorder::new());
+    }
     Ok(Net {
-        play: NetPlay::new(cfg, rom.to_vec(), t, room)?,
+        play,
         reported: None,
         reported_end: false,
         said_running: false,
         epoch: std::time::Instant::now(),
+        record,
     })
 }
 
@@ -88,7 +99,24 @@ impl Net {
         r
     }
 
+    /// Append the session log's new lines (every second, and when done).
+    fn flush_record(&mut self, force: bool) {
+        use std::io::Write;
+        let now = self.now_ms();
+        let (Some((file, last)), Some(rec)) = (self.record.as_mut(), self.play.record.as_mut()) else {
+            return;
+        };
+        if force || now >= *last + 1000 {
+            *last = now;
+            if let Err(e) = file.write_all(rec.drain().as_bytes()) {
+                eprintln!("netplay: --net-record: {e}");
+                self.record = None;
+            }
+        }
+    }
+
     fn report(&mut self) {
+        self.flush_record(false);
         let stage = mmx_net::Transport::stage(self.play.transport());
         if self.reported != Some(stage) {
             self.reported = Some(stage);
@@ -103,6 +131,7 @@ impl Net {
         if !self.reported_end && self.play.closed() {
             self.reported_end = true;
             eprintln!("netplay: {}", self.play.status());
+            self.flush_record(true);
         }
     }
 
@@ -120,6 +149,7 @@ impl Net {
             self.play.pump(now);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        self.flush_record(true);
     }
 }
 
@@ -158,7 +188,12 @@ mod tests {
             Mode::Rollback => 0,
             Mode::Lockstep => mode.default_delay(),
         };
-        let mk = |host| connect(rom, host, room, &url, Some("none"), mode, delay, None, None, false, mmx_core::Timing::Auto).expect("connect");
+        // Both peers record (--net-record): the logs must agree.
+        let log = |host: bool| std::env::temp_dir().join(format!("mmxrs-{room}-{}-{}.log", std::process::id(), if host { "host" } else { "guest" }));
+        let mk = |host: bool| {
+            let path = log(host);
+            connect(rom, host, room, &url, Some("none"), mode, delay, None, None, false, mmx_core::Timing::Auto, path.to_str()).expect("connect")
+        };
         let mut peers = [
             (mk(true), session_game(rom, 0, mmx_core::Timing::Auto).unwrap(), 0x1111u32),
             (mk(false), session_game(rom, 0, mmx_core::Timing::Auto).unwrap(), 0x7777u32),
@@ -196,6 +231,30 @@ mod tests {
             net.tick(game, 0);
             std::thread::sleep(Duration::from_millis(10));
         }
+        let logs: Vec<mmx_core::netlog::Log> = [true, false]
+            .map(|h| {
+                let text = std::fs::read_to_string(log(h)).expect("session log written");
+                let _ = std::fs::remove_file(log(h));
+                mmx_core::netlog::parse(&text).expect("session log parses")
+            })
+            .to_vec();
+        let n = logs[0].pads.len().min(logs[1].pads.len());
+        assert!(n as u32 >= frames - 10, "{n} confirmed frames logged");
+        assert_eq!(logs[0].pads[..n], logs[1].pads[..n]);
+        assert!(logs[0].header.host && !logs[1].header.host && logs[0].header.mode == mode);
+        let checks = |l: &mmx_core::netlog::Log| -> Vec<(u32, u64)> {
+            l.events.iter().filter_map(|e| match *e {
+                mmx_core::netlog::Event::Check { frames, local, remote, .. } => {
+                    assert_eq!(local, remote);
+                    Some((frames, local))
+                }
+                _ => None,
+            }).collect()
+        };
+        let (a, b) = (checks(&logs[0]), checks(&logs[1]));
+        let want = (frames / 60 - 1) as usize;
+        assert!(a.len() >= want && a.iter().filter(|c| b.contains(c)).count() >= want, "{a:?} / {b:?}");
+        assert!(logs.iter().all(|l| l.events.iter().any(|e| matches!(e, mmx_core::netlog::Event::Closed { .. }))));
     }
 
     #[test]

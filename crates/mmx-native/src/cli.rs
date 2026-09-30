@@ -6,7 +6,7 @@ pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local]
        mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
              [--ice 'stun:.. turn:.. username=U credential=C' | none]
-             [--mode rollback|lockstep] [--delay N] [--prediction N]
+             [--mode rollback|lockstep] [--delay N] [--prediction N] [--net-record LOG]
        mmxrs --headless --frames N [--rom PATH] [--dump-at F=out.png,...]
              [--hold P1MASK] [--p2-hold MASK] [--coop-local]
 ROM defaults to $MMX_ROM, --x3-rom (Mega Man X3 USA: P2 is drawn as X3 Zero, X swings
@@ -15,7 +15,8 @@ Online: both players pass the same --mode (default rollback). --delay is the inp
 in frames, host's wins: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
 same-region link --mode lockstep --delay 3 plays smoothest; across continents use
 --mode rollback --delay 3 --prediction 20 (rollback's window must cover the round
-trip in frames, default 8; see docs/netplay.md).";
+trip in frames, default 8; see docs/netplay.md). --net-record LOG writes a session log
+(confirmed inputs, checksums, stalls, rollbacks) for `cargo xtask netreplay LOG`.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -48,6 +49,8 @@ pub struct Args {
     pub prediction: Option<u8>,
     /// `--timing auto|ntsc|pal`: video timing; auto follows the header region.
     pub timing: mmx_core::Timing,
+    /// `--net-record LOG`: session log (`mmx_core::netlog`) for `xtask netreplay`.
+    pub net_record: Option<String>,
 }
 
 impl Args {
@@ -79,6 +82,7 @@ impl Default for Args {
             delay: None,
             prediction: None,
             timing: mmx_core::Timing::Auto,
+            net_record: None,
         }
     }
 }
@@ -154,6 +158,7 @@ pub fn parse<I: IntoIterator<Item = String>>(
                 let v = val("--timing")?;
                 a.timing = mmx_core::Timing::parse(&v).ok_or_else(|| format!("bad --timing {v:?}: auto, ntsc or pal"))?;
             }
+            "--net-record" => a.net_record = Some(val("--net-record")?),
             "--prediction" => {
                 let v = val("--prediction")?;
                 let n: u8 = v.parse().map_err(|_| format!("bad --prediction {v:?}"))?;
@@ -233,8 +238,9 @@ mod tests {
         let a = p("--coop-join room_1 --signal ws://h:1 --ice none --delay 0").unwrap();
         assert_eq!(a.net, Some((false, "room_1".into())));
         assert_eq!((a.signal.as_str(), a.ice.as_deref(), a.net_delay()), ("ws://h:1", Some("none"), 0));
-        let a = p("--coop-host r").unwrap();
+        let a = p("--coop-host r --net-record s.log").unwrap();
         assert_eq!(a.net, Some((true, "r".into())));
+        assert_eq!(a.net_record.as_deref(), Some("s.log"));
         assert_eq!((a.signal.as_str(), a.mode, a.net_delay()), ("ws://127.0.0.1:3536", Mode::Rollback, 2));
         assert!(p("--coop-host bad/room").is_err());
         assert!(p("--coop-host r --delay 4").is_err());
