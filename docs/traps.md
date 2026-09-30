@@ -73,9 +73,11 @@ clock still do not advance.
 - `cargo xtask trace --frames F --calls`: every call target of frame F with
   its first caller. This is how the real hook addresses were found; the
   disassembly's bank-`$80` PCs drift from the cartridge.
+- `trace --pcs FILE` writes every PC of the frame (feed a disassembler).
 - `Game::isolated_trace = Some(vec![])` records every PC fetched inside
   `call_isolated*`; `cargo xtask cooptrace --frame F` diffs P1's and P2's
-  player update and prints each branch that went a different way.
+  player update and prints each branch that went a different way (`--phase 2`:
+  the terrain phase `$81:9D67`; `--dump PREFIX`: both PC lists).
 - `cargo xtask lagdiff --frames N [script] [--refill] [--dump A-B]`: solo
   and co-op (P2 idle) in lockstep; the first real-time opcode fetch where
   P1's PC or master clock differs (isolated calls are not in the trace).
