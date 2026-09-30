@@ -168,8 +168,14 @@ save direct page and slots 0..6, swap a copy of P2's block in with
 $80:D801)` with M=1, X=0, D=0, DB=`$80`, take the seven entries it wrote,
 put slots 0..6, the block and direct page back. The entries go into 8 slots
 (bar + down marker, `HUD_SLOTS`) right after P2's sprites (4-aligned, whole
-high-table bytes set to `$AA`), with X = 232 (216 when the boss bar is up)
-and palette 3 (`zero_palette`). `p2_oam_base/count` grow to cover them, so
+high-table bytes set to `$AA`), with X = 8 and palette 3 (`zero_palette`),
+under X's bar: the vertical mirror of the redraw's output, `y' = $B8 - y`
+(`BAR_MIRROR`), pieces vflipped (hidden `$E0` entries stay hidden). So P2's
+icon sits at Y `$68`, 8 px under X's (`$50`), and its pieces grow down from
+it: 16 HP spans Y 104..168, 32 HP (X's cap at Y 0) ends at 200. The weapon
+bar is the next column (X 24, Y 8..96 with a weapon selected: `--poke
+7E0BDB=02@1-30,7E1F12=00@1`), the boss bar the right edge, so neither is
+in the way. `p2_oam_base/count` grow to cover them, so
 `oam_hide` clears them at the next build like P2's sprites. P2's display
 slice leaves `HUD_SLOTS` slots free below 128 (`room`); with P2 hidden and
 the game at 128 slots the bar takes the game's last 8. The bar is rebuilt
@@ -199,7 +205,7 @@ MMX_COOP_P2_HP=6 dump --load states/hw-spiky.state --frames 200 --at 30,34,60,10
 frame 30  X hp 16 / P2 hp 6    frame 34  X hp 16 / P2 act 0E hp 4
 ```
 
-`frame_000030.png` / `frame_000060.png`: P2's bar (right edge, red) drops
+`frame_000030.png` / `frame_000060.png`: P2's bar (under X's, red) drops
 from 6 to 4 HP; X's bar stays full; P1's line identical to a solo run.
 
 ```
@@ -494,7 +500,7 @@ P2 can:
 - Take enemy contact damage (knockback, i-frames, death at HP 0).
 - Die in pits, or be taken out when the camera scrolls away vertically;
   be revived by P1 (or come back after 10 s) at half HP, no life lost;
-  its own HP bar on the right edge (see "P2 HP bar and revive").
+  its own HP bar under X's (see "P2 HP bar and revive").
 
 P2 can't:
 - Take damage from enemy shots or hazards that go through `$84:9F2A`.

@@ -27,16 +27,17 @@ const BAR_REDRAW: u32 = 0x80D801;
 /// `$1F11`: HP bar state (0 init, 2 shown, 4 hide, 6 hidden).
 const BAR_STATE: u32 = 0x7E1F11;
 const BAR_SHOWN: u8 = 2;
-/// `$1F0E`: boss object; nonzero = boss bar in slots 16..23 at X `$E8`.
-const BOSS_OBJ: u32 = 0x7E1F0E;
 /// Slots of X's bar (icon + up to 6 pieces).
 const BAR_SLOTS: usize = 7;
 /// OAM slots P2's HUD takes past P2's sprites: the bar and the down marker.
 pub const HUD_SLOTS: usize = BAR_SLOTS + 1;
-/// P2's bar: the right edge, like X's on the left (8 px in); left of the
-/// boss bar (X 232) when there is one.
-const BAR_X: u8 = 232;
-const BAR_X_BOSS: u8 = 216;
+/// P2's bar: under X's, same X (the weapon bar is the next column, X 24;
+/// the boss bar is on the right edge). X's bar grows up from its icon (Y
+/// `$50`); P2's is its vertical mirror, icon 8 px under X's (Y `$68`) and
+/// the pieces growing down: `y' = BAR_MIRROR - y`, pieces vflipped. 32 HP
+/// (cap at Y 0 for X) ends at Y 200.
+const BAR_X: u8 = 8;
+const BAR_MIRROR: u8 = 0x50 + 0x68;
 /// `$E3`: slots the game's OAM build used.
 const OAM_USED: usize = 0xE3;
 const OAM_HI: u32 = 0x7E0900;
@@ -149,7 +150,6 @@ fn hud(game: &mut Game) {
     let start = ((end + 3) & !3).min(128 - HUD_SLOTS);
     let base = if c.p2_oam_count > 0 { c.p2_oam_base } else { used.min(start) };
     let bar = bar_entries(game, hp);
-    let x = if w16(game.wram(), BOSS_OBJ) != 0 { BAR_X_BOSS } else { BAR_X };
     let pal = game.coop.zero_palette;
     // Down marker: the bar's icon at the fall spot, blinking.
     let marker = match game.coop.revive.spot {
@@ -168,7 +168,11 @@ fn hud(game: &mut Game) {
     for k in 0..BAR_SLOTS {
         let e = &mut w[oam + (start + k) * 4..][..4];
         e.copy_from_slice(&bar[k * 4..k * 4 + 4]);
-        e[0] = x;
+        e[0] = BAR_X;
+        if e[1] != OAM_HIDDEN_Y {
+            e[1] = BAR_MIRROR.wrapping_sub(e[1]);
+            e[3] ^= u8::from(k > 0) << 7;
+        }
         coop::set_oam_palette(e, pal);
     }
     let e = &mut w[oam + (start + BAR_SLOTS) * 4..][..4];
