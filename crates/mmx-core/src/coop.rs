@@ -9,12 +9,10 @@
 //! X's remapped input `$0BDE..$0BE3` lives *inside* the block (offset `$36`),
 //! so it needs no separate shadow.
 //!
-//! Hooks (all `TrapReturn::Observe`: the body runs, then the ROM bytes):
-//! * `$80:D450` shots loop (object master `$80:D203` calls it after the player
-//!   update `$81:812E` at `$80:D22C`): P2 update slice.
-//! * `$80:D63B` last OAM list pass of `$80:D585` (called at `$80:D5A1`, right
-//!   after the player emitter `$80:D6B2` at `$80:D59E`): P2 display slice.
-//! * `$84:9D07` enemy-contact hit on X (JMP target inside `$84:9B03`): stub.
+//! Hooks (all `TrapReturn::Observe`: the body runs, then the ROM bytes; real
+//! cartridge PCs, see the constants below): update slice after `$81:812E`,
+//! physics slice after `$81:9D67`, display slice after the player emitter,
+//! and a contact pass on every enemy's `JSL $84:9B03`.
 //!
 //! Default off: every body returns first thing when `enabled` is false, so a
 //! registered-but-disabled group leaves the game byte-identical.
@@ -41,9 +39,13 @@ pub const HOOK_PHYSICS: u32 = 0x80D241;
 /// P2 display slice hook: `$80:D5FA` (OAM lists 3-5), the call right after the
 /// player emitter inside the OAM build `$80:D544`. Confirmed by trace.
 pub const HOOK_DISPLAY: u32 = 0x80D5FA;
-/// Enemy contact damage on X (tail of `$84:9B03` after the hit test
-/// `$84:9C0E` with `X=$0BA8`). Entered by `JMP`, starts with an SRAM probe.
-pub const HOOK_CONTACT: u32 = 0x849D07;
+/// Enemy-vs-X contact routine: every enemy's AI `JSL`s it with `D` = the
+/// enemy (154 call sites; `$82:9C41` for the Highway bikes), `RTL`, A=1 on a
+/// hit. It checks X's i-frames (`$0C30`/`$0C32`, in the block), runs the box
+/// test `$84:9C0E` with `X=$0BA8`, then `JMP $84:9D07` applies the damage
+/// (`$0BAA`, `$0BCF`, `$0BD8`, `$0C11`, `$0C32`: all in the block). Found by
+/// `trace --find` on the frame P1's HP dropped. Observe hook on the entry.
+pub const HOOK_CONTACT: u32 = 0x849B03;
 /// Player update: `PHP/PHD`, sets `D=$0BA8` itself, ends `RTL` (JSL entry).
 pub const PLAYER_UPDATE: u32 = 0x81812E;
 /// Player terrain/physics phase (`JSL` from `$80:D23D`, ends `RTL`): collision
@@ -56,6 +58,12 @@ pub const INPUT_REMAP: u32 = 0x80E518;
 /// Player OAM emitter (`JSR` from `$80:D55D`, ends `RTS`). Needs
 /// `M=1, X=0, D=0` (true at [`HOOK_DISPLAY`]). Confirmed by trace.
 pub const PLAYER_OAM: u32 = 0x80D671;
+/// Companion-object update loop over `$0C38..$0C98` (`JSR` from `$80:D26C`,
+/// `RTS`; listing `$80:D2D3`, drift `-$41`). Sets `D` itself.
+pub const FX_UPDATE: u32 = 0x80D292;
+/// Companion-object OAM emitter (`JSR` from `$80:D55A`, just before
+/// [`PLAYER_OAM`]; listing `$80:D681`). Same register needs as the player's.
+pub const FX_OAM: u32 = 0x80D640;
 
 /// Direct-page OAM cursor: next free OAM slot (`AND #$7F`, `*4` = byte
 /// offset into `$0700`). `$E5` = high-table byte index, `$E6` = accumulator.
@@ -80,8 +88,13 @@ const P1_OWNED: [(u32, usize); 2] = [
 /// write list). Swapped with a P2 shadow around every slice like the block;
 /// without this P2 read P1's grounded state and "landed" at its jump apex.
 // unverified: exact extent; these two ranges fixed the apex landing on the real ROM.
-const P2_SWAPPED: [(u32, usize); 2] = [(0x7E1F31, 7), (0x7E1FA1, 16)];
-const P2_SWAPPED_LEN: usize = 7 + 16;
+///
+/// `$0C38..$0C98` are X's three companion objects (`$20` each): the armour
+/// part overlays spawned by `$81:9D7E` from `$1F99`, updated by `$80:D292`
+/// and drawn by `$80:D640` right before the player emitter. Swapping them
+/// gives P2 its own set (run in P2's physics and display slices).
+const P2_SWAPPED: [(u32, usize); 3] = [(0x7E1F31, 7), (0x7E1FA1, 16), (0x7E0C38, 0x60)];
+const P2_SWAPPED_LEN: usize = 7 + 16 + 0x60;
 
 fn swap_scratch(w: &mut [u8; 0x20000], shadow: &mut [u8; P2_SWAPPED_LEN]) {
     let mut o = 0;
@@ -98,6 +111,7 @@ fn swap_scratch(w: &mut [u8; 0x20000], shadow: &mut [u8; P2_SWAPPED_LEN]) {
 /// Offsets into the X block (`$0BA8 + off`).
 pub const OFF_ACTION: usize = 0x02; // $0BAA: $0C death, $0E hurt
 pub const OFF_POS_X: usize = 0x05; // $0BAD word
+pub const OFF_POS_Y: usize = 0x08; // $0BB0 word
 pub const OFF_VEL_X: usize = 0x1A; // $0BC2 word
 pub const OFF_VEL_Y: usize = 0x1C; // $0BC4 word
 pub const OFF_HP: usize = 0x27; // $0BCF, bit7 = HUD redraw
@@ -142,8 +156,10 @@ pub struct CoopState {
     pub zero_palette: u8,
     /// Frames left while P2 is down.
     pub down_frames: u16,
-    /// ponytail: the v1 contact hook only counts; v2 routes hits per player.
+    /// Hits P2 took from enemy contact (diagnostic).
     pub contact_hits: u32,
+    /// Inside P2's contact pass (the isolated call re-enters [`HOOK_CONTACT`]).
+    pub in_contact: bool,
 }
 
 impl Default for CoopState {
@@ -160,6 +176,7 @@ impl Default for CoopState {
             zero_palette: ZERO_PALETTE,
             down_frames: 0,
             contact_hits: 0,
+            in_contact: false,
         }
     }
 }
@@ -170,6 +187,20 @@ impl Default for CoopState {
 pub fn swap_block(wram: &mut [u8; 0x20000], shadow: &mut [u8; X_BLOCK_LEN]) {
     let b = ix(ram::X_BASE);
     wram[b..b + X_BLOCK_LEN].swap_with_slice(shadow);
+}
+
+/// Sound ring `$0B72` (16 x {cmd, param}): write index `$0BA3`, read index
+/// `$0BA4` (NMI sends one entry per frame, `$80:8822`), both `AND #$1E`.
+/// Enqueue (`$80:888F`/`$80:88D4`) has no full check: a 17th pending entry
+/// laps the reader and the whole backlog is lost.
+const SND_WRITE: usize = 0x0BA3;
+const SND_READ: usize = 0x0BA4;
+/// P2 may enqueue only while this many entries or fewer are pending after its slice.
+const P2_SOUND_CAP: u8 = 8;
+
+/// Pending sound entries in the ring.
+pub fn sound_pending(write: u8, read: u8) -> u8 {
+    (write.wrapping_sub(read) & 0x1E) / 2
 }
 
 /// Clamp P2's world X into the visible window `[cam, cam + 256 - 16]`.
@@ -199,6 +230,12 @@ pub fn respawn_anchor(wram: &[u8; 0x20000]) -> [u8; X_BLOCK_LEN] {
     p2
 }
 
+/// Pit rule of the camera code `$80:E14A`: more than `$20` px below the
+/// bottom of the 224-line screen. Signed like the ROM's `CMP`/`BMI`.
+pub fn fell_off(y: u16, cam_y: u16) -> bool {
+    (y.wrapping_sub(0x20).wrapping_sub(cam_y.wrapping_add(0xE0)) as i16) >= 0
+}
+
 /// P2 is dead: `$81:96CB` sets action `$0C` and HP `$80`.
 pub fn p2_is_down(p2: &[u8; X_BLOCK_LEN]) -> bool {
     p2[OFF_ACTION] == ACTION_DEATH || p2[OFF_HP] & 0x7F == 0
@@ -223,7 +260,7 @@ fn go_down(game: &mut Game) {
     game.coop.down_frames = P2_DOWN_FRAMES;
 }
 
-/// `$80:D450`: P2 update slice.
+/// [`HOOK_UPDATE`]: P2 update slice.
 fn p2_update(game: &mut Game) {
     if !game.coop.enabled {
         return;
@@ -249,6 +286,10 @@ fn p2_update(game: &mut Game) {
             return;
         }
         game.coop.p2 = respawn_anchor(game.wram());
+        // Debug: `MMX_COOP_P2_HP=N` spawns P2 with N HP (to test HP-0 deaths).
+        if let Some(hp) = std::env::var("MMX_COOP_P2_HP").ok().and_then(|v| v.parse().ok()) {
+            game.coop.p2[OFF_HP] = hp;
+        }
         // Scratch starts as a copy of P1's (grounded) state.
         let mut copy = [0u8; P2_SWAPPED_LEN];
         let w = game.wram();
@@ -292,6 +333,7 @@ fn p2_physics(game: &mut Game) {
     }
     with_p2_swapped(game, |game| {
         game.call_isolated(PLAYER_PHYSICS);
+        game.call_isolated_ret(FX_UPDATE, crate::TrapReturn::Rts);
         let w = game.wram_mut();
         let cam = word(w, ram::CAMERA_X);
         let x = word(w, ram::X_POS_X);
@@ -302,6 +344,15 @@ fn p2_physics(game: &mut Game) {
             w[ix(ram::X_VEL_X)..ix(ram::X_VEL_X) + 2].fill(0);
         }
     });
+    let cam_y = word(game.wram(), ram::CAMERA_Y);
+    let p2 = &mut game.coop.p2;
+    if fell_off(u16::from_le_bytes([p2[OFF_POS_Y], p2[OFF_POS_Y + 1]]), cam_y) {
+        // The ROM's pit death lives in the camera code (`$80:E14A`, P1 only):
+        // Y - $20 >= camera Y + $E0 -> `$84:9F2A` with $7F damage. Same rule
+        // here, but the result is just "P2 down" (no stage-wide death flow).
+        p2[OFF_ACTION] = ACTION_DEATH;
+        p2[OFF_HP] = 0x80;
+    }
     if p2_is_down(&game.coop.p2) {
         go_down(game);
     }
@@ -310,14 +361,25 @@ fn p2_physics(game: &mut Game) {
 /// Swap P2's block and scratch in, run `f`, swap out, and put back every
 /// P1-owned byte the slice may have touched (camera requests, freeze flags).
 fn with_p2_swapped(game: &mut Game, f: impl FnOnce(&mut Game)) {
+    // Debug: `MMX_COOP_DIFF=1` prints every byte a P2 slice leaves changed
+    // outside the block (after the P1-owned restore), i.e. P2's global side effects.
+    static DIFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let before = DIFF.get_or_init(|| std::env::var_os("MMX_COOP_DIFF").is_some()).then(|| Box::new(*game.wram()));
     let saved: Vec<Vec<u8>> =
         P1_OWNED.iter().map(|&(a, n)| game.wram()[ix(a)..ix(a) + n].to_vec()).collect();
     let mut p2 = game.coop.p2;
     let mut scratch = game.coop.p2_scratch;
+    let snd = game.wram()[SND_WRITE];
     let w = game.wram_mut();
     swap_block(w, &mut p2);
     swap_scratch(w, &mut scratch);
     f(game);
+    // P2's sounds share P1's ring; drop them (rewind the write index) rather
+    // than let the ring lap its reader.
+    let w = game.wram_mut();
+    if sound_pending(w[SND_WRITE], w[SND_READ]) > P2_SOUND_CAP {
+        w[SND_WRITE] = snd;
+    }
     let w = game.wram_mut();
     swap_block(w, &mut p2);
     swap_scratch(w, &mut scratch);
@@ -326,9 +388,18 @@ fn with_p2_swapped(game: &mut Game, f: impl FnOnce(&mut Game)) {
     }
     game.coop.p2 = p2;
     game.coop.p2_scratch = scratch;
+    if let Some(b) = before {
+        let d: Vec<String> = (0..0x20000)
+            .filter(|&i| b[i] != game.wram()[i])
+            .map(|i| format!("${:05X}:{:02X}->{:02X}", 0x7E0000 + i, b[i], game.wram()[i]))
+            .collect();
+        if !d.is_empty() {
+            eprintln!("coop diff frame {} {}", game.frame_count(), d.join(" "));
+        }
+    }
 }
 
-/// `$80:D63B`: P2 display slice. Runs the ROM's own player emitter on P2's
+/// [`HOOK_DISPLAY`]: P2 display slice. Runs the ROM's own emitters on P2's
 /// block through the game's OAM cursor `$E4`, so P2 lands in the next free
 /// slots (no collision with the game's entries by construction), then forces
 /// the Zero palette on exactly the slots it got.
@@ -344,11 +415,16 @@ fn p2_display(game: &mut Game) {
     }
     let pal = game.coop.zero_palette;
     let mut p2 = game.coop.p2;
+    let mut scratch = game.coop.p2_scratch;
     swap_block(game.wram_mut(), &mut p2);
-    // `$80:D6B2` is entered by JSR and ends in RTS.
+    swap_scratch(game.wram_mut(), &mut scratch);
+    // Both emitters are entered by JSR and end in RTS; armour parts first,
+    // as in the ROM's OAM build.
+    game.call_isolated_ret(FX_OAM, crate::TrapReturn::Rts);
     game.call_isolated_ret(PLAYER_OAM, crate::TrapReturn::Rts);
     let w = game.wram_mut();
     swap_block(w, &mut p2);
+    swap_scratch(w, &mut scratch);
     let last = w[OAM_CURSOR] & 0x7F;
     for slot in usize::from(first)..usize::from(last.max(first)) {
         let o = ix(ram::OAM_BUF) + slot * 4;
@@ -358,13 +434,29 @@ fn p2_display(game: &mut Game) {
     game.coop.p2_oam_count = usize::from(last.max(first) - first);
 }
 
-/// `$84:9D07`: enemy touched P1. v1 stub: count only; P2 takes no contact
-/// damage yet (v2: rerun `$84:9C0E` with P2's block swapped in).
+/// `$84:9B03` entry, `D` = the enemy: run the same contact routine once more
+/// with P2's block swapped in, so the enemy can hit P2 (damage, knockback,
+/// i-frames and death all land in P2's block). The result (A) is thrown away:
+/// the enemy's AI only sees P1's pass, which the ROM runs right after.
+/// ponytail: an enemy that dies on contact dies only when it touches P1.
 fn contact(game: &mut Game) {
-    if !game.coop.enabled {
+    let p2 = &game.coop.p2;
+    // `$0C30`/`$0C32` set = P2 is hurt; the ROM would then test the ride
+    // armour `$0E18` instead, which is shared, so skip.
+    if !game.coop.enabled || game.coop.in_contact || game.coop.p2_hidden || p2_is_down(p2) || p2[0x88] != 0 || p2[0x8A] != 0 {
         return;
     }
-    game.coop.contact_hits = game.coop.contact_hits.wrapping_add(1);
+    // The box test scribbles on direct page `$00..$11` and the damage on `$0000`;
+    // P1's pass may bail before writing them, so put them back.
+    let dp: [u8; 0x20] = game.wram()[..0x20].try_into().unwrap();
+    let hp = p2[OFF_HP];
+    game.coop.in_contact = true;
+    with_p2_swapped(game, |game| game.call_isolated(HOOK_CONTACT));
+    game.coop.in_contact = false;
+    game.wram_mut()[..0x20].copy_from_slice(&dp);
+    if game.coop.p2[OFF_HP] != hp {
+        game.coop.contact_hits = game.coop.contact_hits.wrapping_add(1);
+    }
 }
 
 #[cfg(test)]
@@ -414,8 +506,19 @@ mod tests {
         assert_eq!(clamp_p2_x(0xFFFF, 0xFFF0), 0xFFFF);
     }
 
+    #[test]
+    fn coop_fell_off() {
+        assert!(!fell_off(0x01FF, 0x0100));
+        assert!(fell_off(0x0200, 0x0100));
+        assert!(!fell_off(0x0010, 0x0000));
+    }
 
-
+    #[test]
+    fn coop_sound_pending() {
+        assert_eq!(sound_pending(0x04, 0x00), 2);
+        assert_eq!(sound_pending(0x02, 0x1E), 2);
+        assert_eq!(sound_pending(0x10, 0x10), 0);
+    }
 
     #[test]
     fn coop_oam_palette() {
