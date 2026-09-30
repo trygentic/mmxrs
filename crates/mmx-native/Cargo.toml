@@ -27,6 +27,12 @@ sha2 = "0.10"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 gilrs = "0.11"
 
+# Apple GameController: Switch Pro, DualShock/DualSense and Xbox pads that
+# gilrs's IOKit backend misses or reads no input from (src/gc_pad.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString"] }
+objc2-game-controller = { version = "0.3", features = ["GCController", "GCExtendedGamepad", "GCControllerElement", "GCControllerButtonInput", "GCControllerDirectionPad", "GCControllerAxisInput", "GCPhysicalInputProfile", "GCDevice"] }
+
 [dev-dependencies]
 # In-process signalling server for the localhost rollback end-to-end test.
 mmx-signal = { path = "../../tools/mmx-signal" }

@@ -4,6 +4,8 @@
 mod app;
 mod audio;
 mod cli;
+#[cfg(target_os = "macos")]
+mod gc_pad;
 mod headless;
 mod keys;
 mod netplay;

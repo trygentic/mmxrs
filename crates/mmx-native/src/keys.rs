@@ -108,6 +108,49 @@ pub const PAD_BUTTONS: &[(gilrs::Button, u16)] = &[
     (gilrs::Button::DPadRight, BTN_RIGHT),
 ];
 
+/// macOS GameController extended-gamepad buttons -> SNES bits, in the order
+/// `gc_pad::snapshot` reads them. GC names are positional on every pad:
+/// `buttonA` is the bottom face button (Xbox A, PlayStation Cross, Switch B),
+/// `buttonB` right, `buttonX` left, `buttonY` top. D-pad and left stick are
+/// read separately.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const GC_BUTTONS: [(&str, u16); 10] = [
+    ("buttonA", BTN_B),
+    ("buttonB", BTN_A),
+    ("buttonX", BTN_Y),
+    ("buttonY", BTN_X),
+    ("leftShoulder", BTN_L),
+    ("rightShoulder", BTN_R),
+    ("leftTrigger", BTN_L),
+    ("rightTrigger", BTN_R),
+    ("buttonMenu", BTN_START),
+    ("buttonOptions", BTN_SELECT),
+];
+
+/// `"B Y Up"`: SNES pad bits by name, for the `--pads` diagnostic.
+pub fn bit_names(bits: u16) -> String {
+    const NAMES: [(u16, &str); 12] = [
+        (BTN_B, "B"),
+        (BTN_Y, "Y"),
+        (BTN_SELECT, "Select"),
+        (BTN_START, "Start"),
+        (BTN_UP, "Up"),
+        (BTN_DOWN, "Down"),
+        (BTN_LEFT, "Left"),
+        (BTN_RIGHT, "Right"),
+        (BTN_A, "A"),
+        (BTN_X, "X"),
+        (BTN_L, "L"),
+        (BTN_R, "R"),
+    ];
+    let v: Vec<&str> = NAMES.iter().filter(|(b, _)| bits & b != 0).map(|(_, n)| *n).collect();
+    if v.is_empty() {
+        "-".into()
+    } else {
+        v.join(" ")
+    }
+}
+
 /// Left stick -> d-pad bits (gilrs Y is up-positive).
 pub fn stick_bits(x: f32, y: f32) -> u16 {
     const DZ: f32 = 0.5;
@@ -206,6 +249,21 @@ mod tests {
     #[test]
     fn pad_buttons_cover_all() {
         assert_eq!(PAD_BUTTONS.iter().fold(0, |a, (_, b)| a | b), ALL12);
+    }
+
+    #[test]
+    fn gc_matches_gilrs_positions() {
+        // everything but the d-pad (read separately on GC)
+        let gc = GC_BUTTONS.iter().fold(0, |a, (_, b)| a | b);
+        assert_eq!(gc, ALL12 & !(BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT));
+        let pad = |b| PAD_BUTTONS.iter().find(|(x, _)| *x == b).unwrap().1;
+        let gcb = |n| GC_BUTTONS.iter().find(|(x, _)| *x == n).unwrap().1;
+        assert_eq!(gcb("buttonA"), pad(gilrs::Button::South));
+        assert_eq!(gcb("buttonB"), pad(gilrs::Button::East));
+        assert_eq!(gcb("buttonX"), pad(gilrs::Button::West));
+        assert_eq!(gcb("buttonY"), pad(gilrs::Button::North));
+        assert_eq!(bit_names(0), "-");
+        assert_eq!(bit_names(BTN_B | BTN_UP), "B Up");
     }
 
     #[test]

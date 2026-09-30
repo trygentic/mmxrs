@@ -21,6 +21,15 @@ const AUDIO_TARGET_SECS: f64 = 0.050;
 const MAX_CATCHUP: u32 = 4;
 const FAST_FORWARD_STEPS: u32 = 8;
 
+/// A gamepad from either source. GameController keys are the controller
+/// object's address (`gc_pad::GcPad::key`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PadId {
+    Gilrs(gilrs::GamepadId),
+    #[cfg(target_os = "macos")]
+    Gc(usize),
+}
+
 struct App {
     game: Game,
     scale: u32,
@@ -31,8 +40,15 @@ struct App {
     tex: (usize, usize),
     audio: Option<Audio>,
     gilrs: Option<gilrs::Gilrs>,
-    pad1: Option<gilrs::GamepadId>,
-    pad2: Option<gilrs::GamepadId>,
+    /// macOS GameController pads seen last frame (see `gc_pad`).
+    #[cfg(target_os = "macos")]
+    gc: Vec<crate::gc_pad::GcPad>,
+    pad1: Option<PadId>,
+    pad2: Option<PadId>,
+    /// `--pads` / `MMX_PAD_DEBUG=1`: log every pad bit change.
+    pad_debug: bool,
+    /// Last bits logged per pad (`pad_debug` only).
+    pad_seen: Vec<(PadId, u16)>,
     kb: [u16; 2],
     fast: bool,
     paused: bool,
@@ -59,6 +75,17 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         n.play.audio_rate = Some(a.rate);
     }
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
+    let pad_debug = args.pads || std::env::var_os("MMX_PAD_DEBUG").is_some_and(|v| v == "1");
+    #[cfg(target_os = "macos")]
+    crate::gc_pad::monitor_background(pad_debug);
+    let gilrs = gilrs::Gilrs::new()
+        .map_err(|e| eprintln!("gamepads: {e}"))
+        .ok();
+    if let Some(g) = &gilrs {
+        for (_, gp) in g.gamepads() {
+            eprintln!("gamepad connected (gilrs): {}", gp.name());
+        }
+    }
     let mut app = App {
         game,
         scale: args.scale,
@@ -68,11 +95,13 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         pixels: None,
         tex: (256, 224),
         audio,
-        gilrs: gilrs::Gilrs::new()
-            .map_err(|e| eprintln!("gamepads: {e}"))
-            .ok(),
+        gilrs,
+        #[cfg(target_os = "macos")]
+        gc: Vec::new(),
         pad1: None,
         pad2: None,
+        pad_debug,
+        pad_seen: Vec::new(),
         kb: [0; 2],
         fast: false,
         paused: false,
@@ -100,11 +129,27 @@ fn state_path(slot: u8) -> PathBuf {
 }
 
 impl App {
-    fn pad_bits(&self, id: Option<gilrs::GamepadId>) -> u16 {
-        let (Some(g), Some(id)) = (&self.gilrs, id) else {
-            return 0;
-        };
-        let Some(gp) = g.connected_gamepad(id) else {
+    /// True while GameController lists any pad: gilrs input is then ignored,
+    /// since GC sees every pad gilrs could (and gilrs may see the same pad
+    /// again, or see it but read nothing).
+    fn gc_active(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return !self.gc.is_empty();
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
+    fn pad_bits(&self, id: Option<PadId>) -> u16 {
+        match id {
+            Some(PadId::Gilrs(id)) if !self.gc_active() => self.gilrs_bits(id),
+            #[cfg(target_os = "macos")]
+            Some(PadId::Gc(k)) => self.gc.iter().find(|p| p.key == k).map_or(0, |p| p.bits),
+            _ => 0,
+        }
+    }
+
+    fn gilrs_bits(&self, id: gilrs::GamepadId) -> u16 {
+        let Some(gp) = self.gilrs.as_ref().and_then(|g| g.connected_gamepad(id)) else {
             return 0;
         };
         let buttons = keys::PAD_BUTTONS
@@ -120,31 +165,109 @@ impl App {
 
     /// z2-native's rule: the pad that last pressed a button is P1; in co-op a
     /// different pad that presses becomes P2.
+    fn claim(&mut self, id: PadId) {
+        if !self.coop {
+            self.pad1 = Some(id);
+        } else if self.pad2 != Some(id) {
+            if self.pad1.is_none() || self.pad1 == Some(id) {
+                self.pad1 = Some(id);
+            } else {
+                self.pad2 = Some(id);
+            }
+        }
+    }
+
+    fn forget(&mut self, id: PadId) {
+        if self.pad1 == Some(id) {
+            self.pad1 = None;
+        }
+        if self.pad2 == Some(id) {
+            self.pad2 = None;
+        }
+        self.pad_seen.retain(|(p, _)| *p != id);
+    }
+
     fn poll_pads(&mut self) {
-        let Some(g) = self.gilrs.as_mut() else { return };
-        while let Some(gilrs::Event { id, event, .. }) = g.next_event() {
+        #[cfg(target_os = "macos")]
+        self.poll_gc();
+        let gc_active = self.gc_active();
+        let mut events = Vec::new();
+        if let Some(g) = self.gilrs.as_mut() {
+            while let Some(gilrs::Event { id, event, .. }) = g.next_event() {
+                events.push((id, event, g.gamepad(id).name().to_string()));
+            }
+        }
+        for (id, event, name) in events {
             match event {
-                gilrs::EventType::ButtonPressed(..) => {
-                    if !self.coop {
-                        self.pad1 = Some(id);
-                    } else if self.pad2 != Some(id) {
-                        if self.pad1.is_none() || self.pad1 == Some(id) {
-                            self.pad1 = Some(id);
-                        } else {
-                            self.pad2 = Some(id);
-                        }
-                    }
-                }
+                gilrs::EventType::ButtonPressed(..) if !gc_active => self.claim(PadId::Gilrs(id)),
+                gilrs::EventType::Connected => eprintln!("gamepad connected (gilrs): {name}"),
                 gilrs::EventType::Disconnected => {
-                    if self.pad1 == Some(id) {
-                        self.pad1 = None;
-                    }
-                    if self.pad2 == Some(id) {
-                        self.pad2 = None;
-                    }
+                    eprintln!("gamepad disconnected (gilrs): {name}");
+                    self.forget(PadId::Gilrs(id));
                 }
                 _ => {}
             }
+        }
+        if self.pad_debug {
+            self.log_pad_changes();
+        }
+    }
+
+    /// Diff this frame's GameController pads against last frame's: log
+    /// connects/disconnects, and a newly pressed bit counts as a press.
+    #[cfg(target_os = "macos")]
+    fn poll_gc(&mut self) {
+        let now = crate::gc_pad::snapshot();
+        let old = std::mem::replace(&mut self.gc, now.clone());
+        for o in &old {
+            match now.iter().find(|p| p.key == o.key) {
+                Some(p) if p.bits & !o.bits != 0 => self.claim(PadId::Gc(p.key)),
+                Some(_) => {}
+                None => {
+                    eprintln!("gamepad disconnected (GameController): {}", o.name);
+                    self.forget(PadId::Gc(o.key));
+                }
+            }
+        }
+        for p in &now {
+            if !old.iter().any(|o| o.key == p.key) {
+                eprintln!("gamepad connected (GameController): {}", p.name);
+                if p.bits != 0 {
+                    self.claim(PadId::Gc(p.key));
+                }
+            }
+        }
+    }
+
+    /// `--pads`: one stderr line per pad whose bits changed this frame.
+    fn log_pad_changes(&mut self) {
+        let mut pads: Vec<(PadId, String, u16)> = Vec::new();
+        #[cfg(target_os = "macos")]
+        pads.extend(self.gc.iter().map(|p| (PadId::Gc(p.key), format!("{} [GC]", p.name), p.bits)));
+        if let Some(g) = &self.gilrs {
+            let ignored = if self.gc_active() { ", ignored: GC active" } else { "" };
+            for (id, gp) in g.gamepads() {
+                pads.push((PadId::Gilrs(id), format!("{} [gilrs{ignored}]", gp.name()), self.gilrs_bits(id)));
+            }
+        }
+        for (id, name, bits) in pads {
+            let last = self.pad_seen.iter_mut().find(|(p, _)| *p == id);
+            let prev = last.as_ref().map_or(0, |(_, b)| *b);
+            if bits == prev {
+                continue;
+            }
+            match last {
+                Some(l) => l.1 = bits,
+                None => self.pad_seen.push((id, bits)),
+            }
+            let slot = if self.pad1 == Some(id) {
+                "P1"
+            } else if self.pad2 == Some(id) {
+                "P2"
+            } else {
+                "--"
+            };
+            eprintln!("pad {slot} {name}: {bits:#06x} {}", keys::bit_names(bits));
         }
     }
 
