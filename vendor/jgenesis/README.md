@@ -38,7 +38,10 @@ Every source change carries a `// mmxrs patch` comment.
 4. `snes-core/src/ppu.rs`: added `Ppu::oam_bytes` (512 B low table as
    little-endian words, then the 32 B high table) and `Ppu::cgram`.
 5. `snes-core/src/api.rs`: added to `SnesEmulator`: `cpu_registers`,
-   `set_cpu_registers`, `at_instruction_boundary`, `wram`, `wram_mut`,
+   `set_cpu_registers`, `at_instruction_boundary`, `next_tick_fetches_opcode`
+   (ticks a clone of the CPU against a side-effect-free probe bus, the same
+   trick upstream's `bus::next_cpu_cycle_mclk` uses, to tell an opcode fetch
+   from an NMI/IRQ entry or WAI), `wram`, `wram_mut`,
    `oam_bytes`, `cgram`, and `run_cpu_isolated(until_pbr_pc, max_cycles)`
    which ticks only the main CPU (plus the CPU-clocked multiply/divide unit
    and deferred writes) against the normal bus; PPU, APU, DMA, coprocessors

@@ -242,6 +242,46 @@ impl SnesEmulator {
         !self.main_cpu.is_mid_instruction()
     }
 
+    /// True when the next CPU tick fetches the opcode at `PBR:PC`, i.e. the CPU is at a boundary
+    /// and will not start an NMI/IRQ, stay in WAI/STP, or reset instead. Same trick as
+    /// `bus::next_cpu_cycle_mclk`: tick a clone of the CPU against a bus that has the real
+    /// interrupt lines but no side effects. An opcode fetch is the only first cycle that
+    /// increments PC (hardware interrupts re-read PC without incrementing).
+    /// DMA is not considered: a pending DMA still runs before the fetch.
+    #[must_use]
+    pub fn next_tick_fetches_opcode(&mut self) -> bool {
+        struct Probe<'a, 'b>(&'a Bus<'b>);
+
+        impl BusInterface for Probe<'_, '_> {
+            fn read(&mut self, _address: u32) -> u8 {
+                0
+            }
+            fn write(&mut self, _address: u32, _value: u8) {}
+            fn idle(&mut self) {}
+            fn nmi(&self) -> bool {
+                self.0.nmi()
+            }
+            fn acknowledge_nmi(&mut self) {}
+            fn irq(&self) -> bool {
+                self.0.irq()
+            }
+            fn halt(&self) -> bool {
+                self.0.halt()
+            }
+            fn reset(&self) -> bool {
+                self.0.reset()
+            }
+        }
+
+        if self.main_cpu.is_mid_instruction() {
+            return false;
+        }
+        let pc = self.main_cpu.registers().pc;
+        let mut cpu = self.main_cpu.clone();
+        cpu.tick(&mut Probe(&new_bus!(self)));
+        cpu.is_mid_instruction() && cpu.registers().pc != pc
+    }
+
     #[must_use]
     pub fn wram(&self) -> &[u8; 0x20000] {
         self.memory.main_ram()
