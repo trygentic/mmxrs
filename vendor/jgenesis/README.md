@@ -55,9 +55,10 @@ between `SnesEmulator::tick` calls (see `docs/traps.md`).
   before its next instruction (2026-09-30).
 
 - `snes-core/src/ppu.rs`, `ppu/sprites.rs`, `api.rs`: player 2's shadow sprite
-  tile page for mmx-core (`P2Tiles`: 512-word page + 128-bit OAM slot mask,
+  tile page for mmx-core (`P2Tiles`: 768-word page (48 tiles, three rows) +
+  128-bit OAM slot mask,
   with pending copies that go live on the next OAMDATA write). A sprite whose
-  slot bit is set reads its tiles from the page (`tile & 0x1F`) instead of
+  slot bit is set reads its tiles from the page (`(tile & 0x3F) % 48`) instead of
   VRAM. `SnesEmulator::p2_tile_page_mut`, `set_p2_tile_slots`, `p2_tiles`,
   `set_p2_tiles`. Encoded as nothing inside the emulator state
   (`P2TilesSlot`), so old save states still decode; mmx-core appends it to its

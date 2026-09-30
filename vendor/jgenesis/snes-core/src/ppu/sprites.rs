@@ -398,9 +398,11 @@ impl Ppu {
                 let tile_addr = ((tile_base_addr + (tile_number & 0x00FF) * tile_size_words)
                     & VRAM_ADDRESS_MASK) as usize;
 
-                // mmxrs patch: P2 slots index the shadow page with tile & 0x1F
+                // mmxrs patch: P2 slots index the shadow page with tile & 0x3F
+                // (a 4th row wraps to the 1st; the page has 3)
                 let tile_data = if p2_page {
-                    let o = usize::from(tile_number & 0x1F) * tile_size_words as usize;
+                    let o = usize::from((tile_number & 0x3F) % super::P2_PAGE_TILES)
+                        * tile_size_words as usize;
                     &self.p2_tiles.0.page[o..o + tile_size_words as usize]
                 } else {
                     &self.vram[tile_addr..tile_addr + tile_size_words as usize]

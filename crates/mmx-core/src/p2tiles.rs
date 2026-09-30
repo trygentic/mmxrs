@@ -5,7 +5,7 @@
 //! frame streamer `$84:8FCA`, the entries it appended to the DMA queue `$0500`
 //! are taken back out and their ROM source bytes copied into the vendored
 //! PPU's shadow page. The display slice then flags P2's OAM slots, and the PPU
-//! fetches those sprites' tiles from the page (`tile & 0x1F`). Page and mask
+//! fetches those sprites' tiles from the page (`tile & 0x3F`). Page and mask
 //! go live on the game's next OAM upload, together with the OAM they match.
 //!
 //! Art hook: [`fill_page`] is the one place the page is written. A Zero art
@@ -28,8 +28,13 @@ const DMA_BUDGET: usize = 0x1F25;
 /// Block offset of the tile window base (in tiles).
 const OFF_TILE_BASE: usize = 0x18;
 
+/// X's window: 32 tiles (two rows), the part of the page the X1 streamer path fills.
 pub const PAGE_TILES: u16 = 32;
 pub const PAGE_WORDS: usize = 512;
+/// The whole shadow page: 48 tiles (three rows, X3 Zero frames); the PPU
+/// indexes it with `(tile & 0x3F) % 48`, so a window must be 64-tile aligned.
+pub const SHADOW_TILES: u16 = snes_core::api::P2_PAGE_TILES;
+pub const SHADOW_WORDS: usize = snes_core::api::P2_PAGE_WORDS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueEntry {
@@ -53,7 +58,8 @@ pub fn decode_entry(e: &[u8]) -> QueueEntry {
 /// Word offset of a transfer in the page, or `None` if it does not fit in
 /// the 512-word window starting at VRAM word `window`. The page mirrors the
 /// window 1:1 (two name-table rows of 16 tiles), so tile `n` of the window is
-/// at `n * 16` and the PPU's `tile & 0x1F` finds it. Pure.
+/// at `n * 16` and the PPU's `tile & 0x3F` finds it (window 64-tile aligned;
+/// `+$18 = 0` on every stage seen). Pure.
 pub fn page_offset(e: &QueueEntry, window: u16) -> Option<usize> {
     let o = usize::from(e.dest.wrapping_sub(window));
     (o + usize::from(e.size) / 2 <= PAGE_WORDS).then_some(o)
@@ -156,7 +162,7 @@ mod tests {
         // A 16x16 sprite at tile n reads n, n+1, n+16, n+17 (nibble wrap);
         // the page index (tile & 0x1F) * 16 must land on the word the window
         // holds at (tile - base) * 16.
-        for base in [0u16, 0x20, 0x40] {
+        for base in [0u16, 0x40, 0x80] {
             for n in 0..0x1F_u16 {
                 if n & 0xF == 0xF || n >= 0x10 {
                     continue; // top-left of a 16x16 in the window
@@ -164,11 +170,27 @@ mod tests {
                 for t in [n, n + 1, n + 16, n + 17] {
                     let tile = base + t;
                     assert!(in_window(tile, base));
-                    assert_eq!(usize::from(tile & 0x1F) * 16, usize::from(tile - base) * 16);
+                    assert_eq!(usize::from((tile & 0x3F) % SHADOW_TILES) * 16, usize::from(tile - base) * 16);
                 }
             }
         }
         assert!(!in_window(0x20, 0));
         assert!(!in_window(0x3F, 0x40));
+    }
+
+    #[test]
+    fn p2tiles_x3_rows_fit() {
+        // X3 frames: tiles $00-$2F, a 16x16 at n (row 0/1) reads n+16/n+17 in
+        // rows 1/2; all inside the 48-tile page, row 3 wraps to row 0.
+        assert_eq!(SHADOW_WORDS, usize::from(SHADOW_TILES) * 16);
+        for n in 0..0x20_u16 {
+            if n & 0xF == 0xF {
+                continue;
+            }
+            for t in [n, n + 1, n + 16, n + 17] {
+                assert_eq!((t & 0x3F) % SHADOW_TILES, t);
+            }
+        }
+        assert_eq!((0x30 & 0x3F) % SHADOW_TILES, 0);
     }
 }

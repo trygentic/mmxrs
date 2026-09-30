@@ -354,12 +354,14 @@ pub struct Ppu {
 }
 
 // mmxrs patch begin: shadow sprite tile page for mmx-core's player 2.
-/// Words per page: 32 4bpp tiles, laid out as two name-table rows of 16, so a
-/// 16x16 sprite's n, n+1, n+16, n+17 stay inside it (`tile & 0x1F`).
-pub const P2_PAGE_WORDS: usize = 512;
+/// Words per page: 48 4bpp tiles, laid out as three name-table rows of 16, so
+/// a 16x16 sprite's n, n+1, n+16, n+17 stay inside it (`tile & 0x3F`; a fourth
+/// row, tiles `$30-$3F`, wraps to row 0: `P2_PAGE_TILES` modulo).
+pub const P2_PAGE_WORDS: usize = 768;
+pub const P2_PAGE_TILES: u16 = 48;
 
 /// A sprite whose OAM slot bit is set in `slots` reads its tiles from `page`
-/// (index `tile_number & 0x1F`) instead of VRAM. The host writes `next_*`;
+/// (index `(tile_number & 0x3F) % 48`) instead of VRAM. The host writes `next_*`;
 /// they go live on the next OAMDATA write (the game's OAM upload), so the page
 /// and mask switch together with the OAM they describe.
 #[derive(Debug, Clone, Encode, Decode)]
@@ -371,8 +373,14 @@ pub struct P2Tiles {
     pub pending: bool,
 }
 
+impl Default for P2Tiles {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl P2Tiles {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             page: Box::new([0; P2_PAGE_WORDS]),
             slots: 0,

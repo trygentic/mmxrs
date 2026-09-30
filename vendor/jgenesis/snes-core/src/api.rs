@@ -7,7 +7,7 @@ use crate::input::SnesInputs;
 use crate::memory::dma::{DmaStatus, DmaUnit};
 use crate::memory::{CpuInternalRegisters, Memory};
 use crate::ppu::{Ppu, PpuTickEffect};
-pub use crate::ppu::P2Tiles; // mmxrs patch
+pub use crate::ppu::{P2_PAGE_TILES, P2_PAGE_WORDS, P2Tiles}; // mmxrs patch
 use crate::{bus, ppu};
 use bincode::error::EncodeError;
 use bincode::{Decode, Encode};

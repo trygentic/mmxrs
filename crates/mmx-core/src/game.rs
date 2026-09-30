@@ -9,7 +9,7 @@ use jgenesis_common::frontend::{
 };
 use sha2::{Digest, Sha256};
 use snes_config::SnesJoypadState;
-use snes_core::api::{CoprocessorRoms, SnesEmulator, SnesEmulatorConfig};
+use snes_core::api::{CoprocessorRoms, P2Tiles, SnesEmulator, SnesEmulatorConfig, P2_PAGE_WORDS};
 use snes_core::input::{SnesController, SnesInputs};
 
 use crate::traps::{TrapRecord, TrapReturn};
@@ -22,6 +22,9 @@ use crate::{coop, Pads, Registers, RomError, RomInfo, TrapLog, TrapTable};
 const SENTINEL_PC: u16 = 0xFFFF;
 /// CPU cycles `call_isolated` allows before giving up (a few frames' worth).
 const CALL_ISOLATED_BUDGET: u32 = 2_000_000;
+/// Version marker before the appended P2 tile page in a save state. v1 (no
+/// marker) had a 512-word page; its tail is ignored (empty page).
+const P2_TILES_MAGIC: &[u8; 4] = b"P2T2";
 
 pub struct Game {
     pub traps: TrapTable,
@@ -336,7 +339,7 @@ impl Game {
 
     /// P2's shadow sprite tile page (pending; live on the next OAM upload).
     /// See `p2tiles.rs`. Part of the save state.
-    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; 512] {
+    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; P2_PAGE_WORDS] {
         self.emu.p2_tile_page_mut()
     }
 
@@ -346,7 +349,7 @@ impl Game {
     }
 
     /// Live P2 page and slot mask (what the renderer uses now).
-    pub fn p2_tiles(&self) -> (&[u16; 512], u128) {
+    pub fn p2_tiles(&self) -> (&[u16; P2_PAGE_WORDS], u128) {
         let t = self.emu.p2_tiles();
         (&t.page, t.slots)
     }
@@ -457,12 +460,14 @@ impl Game {
         self.rom[off % self.rom.len()]
     }
 
-    /// `(emulator, frame_count, fired_at)`, then the PPU's P2 tile page
-    /// (appended, so states from before the page load with an empty one).
+    /// `(emulator, frame_count, fired_at)`, then [`P2_TILES_MAGIC`] and the
+    /// PPU's P2 tile page (appended, so states from before the page, or with
+    /// the old 512-word page and no magic, load with an empty one).
     pub fn save_state(&self) -> Vec<u8> {
         let cfg = bincode::config::standard();
         let state = (self.emu.to_save_state(), self.frame_count, self.fired_at);
         let mut v = bincode::encode_to_vec(state, cfg).expect("save state encodes");
+        v.extend(P2_TILES_MAGIC);
         v.extend(bincode::encode_to_vec(self.emu.p2_tiles(), cfg).expect("p2 tiles encode"));
         v
     }
@@ -472,9 +477,12 @@ impl Game {
         let ((state, frame_count, fired_at), n): ((SnesEmulator, u64, Option<u32>), _) =
             bincode::decode_from_slice(s, cfg).map_err(|e| e.to_string())?;
         self.emu.load_state(state);
-        if n < s.len() {
-            let (t, _) = bincode::decode_from_slice(&s[n..], cfg).map_err(|e| e.to_string())?;
-            self.emu.set_p2_tiles(t);
+        match s[n..].strip_prefix(P2_TILES_MAGIC.as_slice()) {
+            Some(tail) => {
+                let (t, _) = bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
+                self.emu.set_p2_tiles(t);
+            }
+            None => self.emu.set_p2_tiles(P2Tiles::default()),
         }
         self.frame_count = frame_count;
         self.fired_at = fired_at;

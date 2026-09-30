@@ -119,21 +119,25 @@ Code: `crates/mmx-core/src/p2tiles.rs`, PPU patch in
 `vendor/jgenesis/snes-core/src/ppu.rs` (`P2Tiles`) and `ppu/sprites.rs`.
 
 - **PPU.** `Ppu::p2_tiles: P2TilesSlot(P2Tiles)`. `P2Tiles` holds `page`
-  (`[u16; 512]`, 32 4bpp tiles laid out as two name-table rows of 16, the same
-  shape as X's window, so a 16x16 sprite's `n, n+1, n+16, n+17` stay inside)
+  (`[u16; 768]`, 48 4bpp tiles laid out as three name-table rows of 16; X's
+  window is the first two rows, X3 Zero frames use all three; a 16x16
+  sprite's `n, n+1, n+16, n+17` stay inside)
   and `slots: u128` (bit n = OAM slot n), plus `next_page`/`next_slots` and a
   `pending` flag. The host writes the `next_*` copies. They go live on the next
   OAMDATA write, which is the game's NMI OAM upload, so page and mask switch in
   the same vblank as the OAM they describe (no mid-frame tearing, and a lag
   frame keeps the old pair). In `fetch_sprite_tiles` a sprite whose slot bit
-  is set reads `page[(tile & 0x1F) * 16..]` instead of VRAM. That is one shift
+  is set reads `page[((tile & 0x3F) % 48) * 16..]` instead of VRAM (a
+  fourth row, tiles `$30-$3F`, wraps to row 0; no frame uses it; X's window
+  must be 64-tile aligned). That is one shift
   and test per sprite, and with `slots == 0` the renderer is unchanged (the
   `verify --coop-off` parity run stays identical).
 - **Save state.** The page is inside the PPU, so `to_save_state` clones it.
   Its bincode encoding inside `SnesEmulator` is empty (`P2TilesSlot`), and
-  `Game::save_state` appends the `P2Tiles` after `(emu, frame_count,
-  fired_at)`. States written before the patch (the `states/*.state` files) have
-  no tail and load with an empty page. Netplay rollback states wrap
+  `Game::save_state` appends the marker `P2T2` and the `P2Tiles` after
+  `(emu, frame_count, fired_at)`. States written before the patch (no tail)
+  or with the old 512-word page (tail without the marker) load with an empty
+  page. Netplay rollback states wrap
   `Game::save_state`, so they carry the page.
 - **Filling the page.** P2 keeps X's `+$18` (anchor copies X's block and only
   sets `+$17 |= $80` to force a reload), so the emitter writes X's tile numbers
@@ -434,9 +438,7 @@ decode(ROM) == VRAM `$6000-$62FF` for the stand state (test
 `states/x3-zero-stand.state`). **Many frames load a third row** (`$6200`, tiles
 `$20-$2F`): dash, charged shot, saber, beam-in; frames 65-66 use 48 tiles, and
 layouts reach tile `$2C`. So `ZeroSet` pages are 48 slots for X3 (`page()`
-returns 1.5 KiB) against 32 for X1, and **`p2tiles`' 32-tile shadow page is too
-small for X3 Zero**: it needs a third 16-tile row (1.5 KiB, `tile & 0x3F`
-indexing), or the 3-row frames need splitting. 1918 distinct tiles over both
+returns 1.5 KiB) against 32 for X1; the shadow page has the third row for it. 1918 distinct tiles over both
 sets.
 
 **Palette** `$8C:B580` (in CGRAM as sprite palette 1 while Zero plays):
@@ -486,6 +488,6 @@ walk/jump and their shooting twins swapped; corrected there.)
 (stand 0, walk 3, jump 23, fall 26, land 28, hurt 51, wall kick 42, wall slide
 41, dash 55, beam 60), else `None`.
 
-**Unfinished.** The shadow page is 32 tiles (above); ladder/weak/alt frames
+**Unfinished.** Ladder/weak/alt frames
 are named from the sheet only; X1 frames 75-80 and 82-84 have no measured
 meaning, so they fall back.
