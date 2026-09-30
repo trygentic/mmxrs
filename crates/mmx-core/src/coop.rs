@@ -620,6 +620,7 @@ fn p2_display(game: &mut Game) {
     if let Some(z) = zero {
         // X3 Zero: a Rust emitter writes P2's slots and the page (zero.rs).
         let last = crate::zero::emit_x3(game, &z, first, pal);
+        game.oam_slots[1] = crate::display::slots(first.into(), last.into());
         let w = game.wram_mut();
         for slot in usize::from(used)..usize::from(first) {
             w[ix(ram::OAM_BUF) + slot * 4 + 1] = OAM_HIDDEN_Y; // alignment padding
@@ -670,6 +671,7 @@ fn p2_display(game: &mut Game) {
     let base = used.min(first);
     game.coop.p2_oam_base = usize::from(base);
     game.coop.p2_oam_count = usize::from(last - base);
+    game.oam_slots[1] = crate::display::slots(first.into(), last.into());
     // Route P2's slots to the PPU's shadow tile page (p2tiles.rs).
     crate::p2tiles::mark_p2_slots(game);
 }

@@ -351,6 +351,8 @@ pub struct Ppu {
     // mmxrs patch: player 2's shadow sprite tile page (cloned into save states;
     // bincode-encoded by the host after the emulator, see `P2TilesSlot`)
     p2_tiles: P2TilesSlot,
+    // mmxrs patch: display-only sprite offset (not in save states, see `SpriteOffset`)
+    sprite_offset: SpriteOffset,
 }
 
 // mmxrs patch begin: shadow sprite tile page for mmx-core's player 2.
@@ -428,6 +430,31 @@ impl<C> Decode<C> for P2TilesSlot {
     }
 }
 bincode::impl_borrow_decode!(P2TilesSlot);
+
+/// Display-only offset for the OAM slots in `slots` (mmx-core's netplay
+/// smoothing of the remote player): applied to their X/Y when sprites are
+/// scanned and fetched, never to OAM. Encodes as nothing and decodes as zero,
+/// so it is in no save state (a loaded state renders unshifted until the host
+/// sets it again).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpriteOffset {
+    pub slots: u128,
+    pub dx: i16,
+    pub dy: i16,
+}
+
+impl Encode for SpriteOffset {
+    fn encode<E: bincode::enc::Encoder>(&self, _: &mut E) -> Result<(), bincode::error::EncodeError> {
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for SpriteOffset {
+    fn decode<D: bincode::de::Decoder<Context = C>>(_: &mut D) -> Result<Self, bincode::error::DecodeError> {
+        Ok(Self::default())
+    }
+}
+bincode::impl_borrow_decode!(SpriteOffset);
 // mmxrs patch end
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
@@ -478,6 +505,7 @@ impl Ppu {
             sprites: SpriteProcessor::new(),
             deinterlace: config.deinterlace,
             p2_tiles: P2TilesSlot(P2Tiles::new()), // mmxrs patch
+            sprite_offset: SpriteOffset::default(), // mmxrs patch
         }
     }
 
@@ -1608,6 +1636,11 @@ impl Ppu {
 
     pub fn set_p2_tiles(&mut self, t: P2Tiles) {
         self.p2_tiles.0 = t;
+    }
+
+    // mmxrs patch: display-only sprite offset (see `SpriteOffset`)
+    pub fn set_sprite_offset(&mut self, slots: u128, dx: i16, dy: i16) {
+        self.sprite_offset = SpriteOffset { slots, dx, dy };
     }
 
     pub fn frame_buffer(&self) -> &[Color] {

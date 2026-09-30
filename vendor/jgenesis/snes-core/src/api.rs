@@ -334,6 +334,12 @@ impl SnesEmulator {
         self.ppu.set_p2_tiles(t);
     }
 
+    // mmxrs patch: display-only offset for the OAM slots in `slots` (render
+    // time only; not in OAM or any save state)
+    pub fn set_sprite_offset(&mut self, slots: u128, dx: i16, dy: i16) {
+        self.ppu.set_sprite_offset(slots, dx, dy);
+    }
+
     /// Tick only the main CPU until it sits at an instruction boundary with
     /// `PBR:PC == until_pbr_pc` (returns true) or `max_cycles` CPU ticks pass
     /// (returns false). PPU, APU, coprocessors, DMA and `total_master_cycles`

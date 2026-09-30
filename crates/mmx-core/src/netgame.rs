@@ -76,7 +76,120 @@ pub fn session_game(rom: &[u8], coop_flags: u32, timing: Timing) -> Result<Game,
     let mut g = Game::from_rom_timing(rom.to_vec(), timing)?;
     g.coop.enabled = coop_flags & COOP_TWO_PLAYERS != 0;
     coop::register_coop_traps(&mut g);
+    crate::display::register(&mut g);
     Ok(g)
+}
+
+// ------------------------------------------------------------ smoothing
+
+/// Largest move of the smoothing offset per presented frame, px.
+pub const SMOOTH_STEP_MAX: f32 = 5.0;
+/// On an axis where the player moves the decay's way at `v` px a frame,
+/// the decay moves at most `max(SMOOTH_STEP_MAX - 2v, SMOOTH_STEP_MIN)`.
+pub const SMOOTH_STEP_MIN: f32 = 2.0;
+/// A correction (or offset) longer than this is a real teleport (warp,
+/// respawn): drawn at once, not smoothed.
+pub const SMOOTH_TELEPORT: f32 = 96.0;
+
+/// Rollback smoothing (docs/netplay.md "Rollback smoothing"): a display-only
+/// offset for the remote player, so a rollback's correction glides in over
+/// a few frames instead of snapping. Lives in [`NetPlay`], never in the game
+/// state; `xtask netsim` measures its result.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Smoothing {
+    /// Current offset, px (drawn = simulated + offset).
+    pub offset: (f32, f32),
+}
+
+impl Smoothing {
+    /// One presented frame, called right before its step: `before` is the
+    /// remote player's screen position on the frame last presented, `now`
+    /// that same frame's position after this tick's rollback re-simulated it
+    /// (`== before` without one), `next` the frame about to be presented.
+    ///
+    /// Decays the offset toward 0 by `min(SMOOTH_STEP_MAX, 2 + |offset| /
+    /// 3)` px (a 30 px correction is drawn off for 7 more frames), but on an
+    /// axis where the player itself moves (`next - now`) the same way as the
+    /// decay, by at most `max(SMOOTH_STEP_MAX - 2|v|, SMOOTH_STEP_MIN)`: that
+    /// motion may be a misprediction the settled player doesn't make, and the
+    /// two add up on screen. Then adds the correction
+    /// `before - now`, and drops it all on a teleport (over
+    /// [`SMOOTH_TELEPORT`]) or while the player is not drawn. Returns the
+    /// offset to draw with. Correcting the frame already on screen (rather
+    /// than the new one) keeps the corrected velocity: the drawn player
+    /// moves as the re-simulation says, only from where it was.
+    pub fn update(&mut self, before: Option<(i32, i32)>, now: Option<(i32, i32)>, next: Option<(i32, i32)>) -> (i16, i16) {
+        let (x, y) = self.offset;
+        let len = x.hypot(y);
+        let step = (2.0 + len / 3.0).min(SMOOTH_STEP_MAX);
+        let k = if len > step { step / len } else { 1.0 };
+        let v = match (now, next) {
+            (Some(a), Some(b)) => ((b.0 - a.0) as f32, (b.1 - a.1) as f32),
+            _ => (0.0, 0.0),
+        };
+        // decay d (toward 0), limited where it adds to the player's own motion
+        let decay = |o: f32, v: f32| {
+            let d = -o * k;
+            if d * v > 0.0 {
+                d.signum() * d.abs().min((SMOOTH_STEP_MAX - 2.0 * v.abs()).max(SMOOTH_STEP_MIN))
+            } else {
+                d
+            }
+        };
+        self.offset = (x + decay(x, v.0), y + decay(y, v.1));
+        match (before, now) {
+            (Some(b), Some(n)) => {
+                let c = ((b.0 - n.0) as f32, (b.1 - n.1) as f32);
+                self.offset = if c.0.hypot(c.1) > SMOOTH_TELEPORT {
+                    (0.0, 0.0)
+                } else {
+                    (self.offset.0 + c.0, self.offset.1 + c.1)
+                };
+            }
+            _ => self.offset = (0.0, 0.0),
+        }
+        if self.offset.0.hypot(self.offset.1) > SMOOTH_TELEPORT {
+            self.offset = (0.0, 0.0);
+        }
+        (self.offset.0.round() as i16, self.offset.1.round() as i16)
+    }
+}
+
+/// The other player on this peer (P2 on the host, P1 on the guest): 1 or 0.
+pub fn remote_player(host: bool) -> usize {
+    usize::from(host)
+}
+
+fn player_block(game: &Game, player: usize) -> &[u8] {
+    match player {
+        0 => &game.wram()[crate::ram::wram_index(crate::ram::X_BASE)..][..crate::ram::X_BLOCK_LEN],
+        _ => &game.coop.p2,
+    }
+}
+
+/// `player`'s world position (0 = P1's block, 1 = P2's).
+pub fn player_pos(game: &Game, player: usize) -> (i32, i32) {
+    let b = player_block(game, player);
+    let w = |o: usize| i32::from(u16::from_le_bytes([b[o], b[o + 1]]));
+    (w(coop::OFF_POS_X), w(coop::OFF_POS_Y))
+}
+
+/// `player` stands on terrain or an object (`$0BD3|$0BD4` bit 2).
+pub fn player_grounded(game: &Game, player: usize) -> bool {
+    let b = player_block(game, player);
+    (b[coop::OFF_GROUND] | b[coop::OFF_GROUND + 1]) & 4 != 0
+}
+
+/// `player`'s screen position (world minus camera), `None` while it is not
+/// drawn (P2 hidden or down).
+pub fn screen_pos(game: &Game, player: usize) -> Option<(i32, i32)> {
+    if player == 1 && game.coop.p2_hidden {
+        return None;
+    }
+    let w = game.wram();
+    let word = |a: u32| i32::from(u16::from_le_bytes([w[crate::ram::wram_index(a)], w[crate::ram::wram_index(a) + 1]]));
+    let (x, y) = player_pos(game, player);
+    Some((x - word(crate::ram::CAMERA_X), y - word(crate::ram::CAMERA_Y)))
 }
 
 impl RollbackGame for Game {
@@ -206,6 +319,12 @@ pub struct Simulated {
     pub pad2: u16,
     /// Re-simulation after a rollback (the frame was shown before).
     pub replay: bool,
+    /// Not a replay: the remote player's screen position the frame's picture
+    /// shows before smoothing (the step renders the previous frame's OAM, so
+    /// it is taken before the step), `None` while not drawn.
+    pub shown: Option<(i32, i32)>,
+    /// Not a replay: the smoothing offset the frame is drawn with.
+    pub offset: (i16, i16),
 }
 
 /// Callback run after every simulated frame (see [`NetPlay::observe`]).
@@ -231,6 +350,11 @@ pub struct NetPlay<T: Transport> {
     /// before the session starts; written from `Running` on, times in ms
     /// since then.
     pub record: Option<Recorder>,
+    /// Rollback smoothing of the remote player (on by default; display only).
+    pub smoothing: bool,
+    smooth: Smoothing,
+    /// Remote player's screen position on the frame last presented.
+    last_shown: Option<(i32, i32)>,
     /// Rollback prediction window (0 in lockstep), for the log header.
     prediction: u8,
     /// `now_ms` at `Running`, and at the latest tick.
@@ -308,6 +432,9 @@ impl<T: Transport> NetPlay<T> {
             audio_rate: None,
             observe: None,
             record: None,
+            smoothing: true,
+            smooth: Smoothing::default(),
+            last_shown: None,
             prediction,
             t0_ms: 0,
             last_ms: 0,
@@ -417,6 +544,11 @@ impl<T: Transport> NetPlay<T> {
             Engine::Rollback { .. } => self.tick_rollback(game, pad, now_ms),
             Engine::Lockstep { .. } => self.tick_lockstep(game, pad, now_ms),
         };
+        if !self.live() && self.smooth != Smoothing::default() {
+            // session over: the frontend plays on unshifted
+            self.smooth = Smoothing::default();
+            game.set_display_offset(0, 0, 0);
+        }
         self.log_tick(now_ms, f0, was_live && !skipping);
         n
     }
@@ -504,12 +636,17 @@ impl<T: Transport> NetPlay<T> {
         } else {
             session.add_local_input(pad);
             let f0 = session.frame();
+            let remote = remote_player(session.role() == Role::Host);
+            let smooth = self.smoothing.then_some(&mut self.smooth);
             let err = match session.advance(now_ms) {
                 Ok(reqs) => {
                     if let (Some(RollbackRequest::LoadState { frame }), Some(r)) = (reqs.first(), self.record.as_mut()) {
                         r.event(&Event::Rollback { frame: f0, depth: f0 - frame });
                     }
-                    apply_rollback(session, ring, game, &reqs, &mut n, &mut self.observe, &mut self.record).err()
+                    let mut shown = Shown { remote, last: self.last_shown, resim: None, smooth };
+                    let r = apply_rollback(session, ring, game, &reqs, &mut n, &mut shown, &mut self.observe, &mut self.record);
+                    self.last_shown = shown.last;
+                    r.err()
                 }
                 Err(RollbackError::Closed(_)) => None,
                 Err(e) => Some(e.to_string()),
@@ -581,13 +718,14 @@ impl<T: Transport> NetPlay<T> {
         if live {
             session.latch_local(pad);
             if let Some((frame, pad1, pad2)) = session.poll() {
+                let shown = screen_pos(game, remote_player(session.role() == Role::Host));
                 game.step(Pads { p1: pad1, p2: pad2 });
                 n = 1;
                 if let Some(r) = self.record.as_mut() {
                     r.simulated(frame, pad1, pad2);
                 }
                 if let Some(f) = self.observe.as_mut() {
-                    f(game, Simulated { frame, pad1, pad2, replay: false });
+                    f(game, Simulated { frame, pad1, pad2, replay: false, shown, offset: (0, 0) });
                 }
                 if session.needs_hash(frame) {
                     session.report_hash(frame, net_checksum(game));
@@ -722,12 +860,24 @@ fn start_game(
     Ok(())
 }
 
+/// What a rollback tick needs to draw its new frame: the remote player, its
+/// screen position on the frame last presented, the same frame re-simulated
+/// (`Some` after a replay), and the smoothing (None: off).
+struct Shown<'a> {
+    remote: usize,
+    last: Option<(i32, i32)>,
+    resim: Option<Option<(i32, i32)>>,
+    smooth: Option<&'a mut Smoothing>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn apply_rollback<T: Transport>(
     session: &mut RollbackSession<T>,
     ring: &mut StateRing<Vec<u8>>,
     game: &mut Game,
     reqs: &[RollbackRequest],
     n: &mut u32,
+    shown: &mut Shown,
     observe: &mut Option<Observer>,
     record: &mut Option<Recorder>,
 ) -> Result<(), String> {
@@ -746,13 +896,27 @@ fn apply_rollback<T: Transport>(
                 net_load(game, s)?;
             }
             RollbackRequest::Advance { frame, pad1, pad2, replay, .. } => {
+                // A step renders the previous frame's OAM (display.rs). The
+                // last replay step's "previous frame" is the one on screen:
+                // smooth its correction before the new frame's step draws.
+                let (mut pos, mut offset) = (screen_pos(game, shown.remote), (0, 0));
+                if replay {
+                    shown.resim = Some(pos);
+                    pos = None;
+                } else {
+                    if let Some(s) = shown.smooth.as_deref_mut() {
+                        offset = s.update(shown.last, shown.resim.unwrap_or(shown.last), pos);
+                        game.set_display_offset(shown.remote, offset.0, offset.1);
+                    }
+                    shown.last = pos;
+                }
                 game.step(Pads { p1: pad1, p2: pad2 });
                 *n += 1;
                 if let Some(r) = record.as_mut() {
                     r.simulated(frame, pad1, pad2);
                 }
                 if let Some(f) = observe.as_mut() {
-                    f(game, Simulated { frame, pad1, pad2, replay });
+                    f(game, Simulated { frame, pad1, pad2, replay, shown: pos, offset });
                 }
                 if replay {
                     // Heard once already. The new frame is always the last
@@ -832,6 +996,43 @@ mod tests {
             }
         }
         assert!(seen_h && seen_g, "no confirmed frame with both pads");
+    }
+
+    /// The smoothing math on its own (no ROM): a 30 px correction glides
+    /// back in 7 frames, never more than `SMOOTH_STEP_MAX` a frame; the decay
+    /// does not speed up a player already moving its way; a teleport or a
+    /// hidden player is drawn as it is.
+    #[test]
+    fn smoothing_math() {
+        let mut s = Smoothing::default();
+        let p = Some((100, 100));
+        assert_eq!(s.update(p, p, p), (0, 0));
+        assert_eq!(s.update(Some((130, 100)), p, p), (30, 0));
+        let mut drawn = vec![30.0f32];
+        while s.offset != (0.0, 0.0) {
+            s.update(p, p, p);
+            let now = s.offset.0.hypot(s.offset.1);
+            assert!(drawn.last().unwrap() - now <= SMOOTH_STEP_MAX + 1e-3, "{drawn:?} -> {now}");
+            drawn.push(now);
+        }
+        assert_eq!(drawn.len(), 8, "{drawn:?}"); // 30, 25, 20, 15, 10, 5, 1.7, 0
+        // diagonal: direction kept
+        s.update(Some((120, 115)), p, p);
+        s.update(p, p, p);
+        assert!((s.offset.0 / s.offset.1 - 20.0 / 15.0).abs() < 1e-3, "{:?}", s.offset);
+        // drawn 12 px low, the player rising 3 px a frame: the decay (also
+        // up) adds at most 2 px, drawn rises 5; falling, the full step
+        let mut s = Smoothing::default();
+        s.update(Some((100, 112)), p, p);
+        s.update(p, p, Some((100, 97)));
+        assert_eq!(s.offset, (0.0, 10.0));
+        s.update(p, p, Some((100, 103)));
+        assert_eq!(s.offset, (0.0, 5.0));
+        // a warp is shown at once and clears what was left
+        assert_eq!(s.update(Some((300, 100)), p, p), (0, 0));
+        s.update(Some((110, 100)), p, p);
+        assert_eq!(s.update(p, None, None), (0, 0));
+        assert_eq!(s.update(None, p, p), (0, 0));
     }
 
     #[test]
