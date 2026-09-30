@@ -11,12 +11,12 @@ const USAGE: &str = "usage: cargo xtask <command>
   verify [--movie F.bk2|F.lsmv] [--frames N] [--no-frame] [--coop-off] [--tap F,..] [--hold HEX] [--p2-hold HEX]
   trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..]   bank histogram of frame N's opcode fetches
   dump --frames N --out DIR [--at F,F,...] [--movie F] [--tap F,F,...] [--hold HEX] [--p2-hold HEX] [--coop]
-       [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..]  start from / write a save state (P2 re-anchors after a load)
+       [--rom-any PATH] [--poke ADDR=VAL@A[-B],..] [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..]  start from / write a save state (P2 re-anchors after a load)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
   ledger
   rominfo
-  zerosheet --out DIR   X1 Zero's frames (mmx_core::zero_data) -> DIR/NN_name.png + DIR/sheet.png
+  zerosheet [--x3 PATH] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data) -> DIR/NN_name.png + DIR/sheet.png
 env: MMX_ROM=path/to/Mega Man X (USA).sfc";
 
 fn main() {
@@ -60,8 +60,13 @@ fn rom() -> Vec<u8> {
 }
 
 /// `--load PATH`: start from a save state (frame numbering restarts at 1).
+/// `--rom-any PATH`: boot that ROM with `Game::from_rom_any` (X3 research) instead of MMX_ROM.
 fn game_scripted(args: &[String]) -> Game {
-    let mut g = game(rom());
+    let mut g = match flag(args, "--rom-any") {
+        Some(p) => Game::from_rom_any(std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}"))))
+            .unwrap_or_else(|e| die(&format!("ROM rejected: {e}"))),
+        None => game(rom()),
+    };
     if let Some(p) = flag(args, "--load") {
         let s = std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")));
         g.load_state(&s).unwrap_or_else(|e| die(&format!("{p}: {e}")));
@@ -217,7 +222,28 @@ fn dump(args: &[String]) -> i32 {
     }
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("{}: {e}", out.display())));
     let refill = args.iter().any(|a| a == "--refill");
+    // `--poke ADDR=VAL@A[-B],..`: write WRAM byte ADDR (hex, e.g. 7E1FAE) before frames A..=B.
+    let pokes: Vec<(usize, u8, usize, usize)> = flag(args, "--poke")
+        .map(|s| {
+            s.split(',')
+                .map(|t| {
+                    let bad = || -> ! { die(&format!("--poke: want ADDR=VAL@A[-B], got {t}")) };
+                    let (av, fr) = t.split_once('@').unwrap_or_else(|| bad());
+                    let (a, v) = av.split_once('=').unwrap_or_else(|| bad());
+                    let (fa, fb) = fr.split_once('-').unwrap_or((fr, fr));
+                    let h = |x: &str| u32::from_str_radix(x.trim(), 16).unwrap_or_else(|_| bad());
+                    let d = |x: &str| x.trim().parse::<usize>().unwrap_or_else(|_| bad());
+                    (ram::wram_index(h(a)), h(v) as u8, d(fa), d(fb))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     for f in 1..=frames {
+        for &(a, v, fa, fb) in &pokes {
+            if (fa..=fb).contains(&f) {
+                g.wram_mut()[a] = v;
+            }
+        }
         if refill {
             // QA cheat: keep a living X at max HP (pits still kill).
             let w = g.wram_mut();
@@ -379,18 +405,25 @@ fn cooptrace(args: &[String]) -> i32 {
     0
 }
 
-/// `zerosheet --out DIR`: every frame of `zero_data::extract_x1` on a 64x64
-/// cell (origin 32,44), one PNG each, plus a contact sheet (8 per row, 2x,
-/// index in the corner).
+/// `zerosheet [--x3 PATH] --out DIR`: every frame of `zero_data::extract_x1`
+/// (64x64 cell, origin 32,44) or `extract_x3` (96x88, origin 48,44), one PNG
+/// each, plus a contact sheet (8 per row, 2x, index in the corner).
 fn zerosheet(args: &[String]) -> i32 {
     use mmx_core::zero_data;
-    const C: usize = 64;
     // 3x5 digits for the index.
     const DIG: [u16; 10] = [0x7B6F, 0x2C97, 0x73E7, 0x73CF, 0x5BC9, 0x79CF, 0x79EF, 0x7249, 0x7BEF, 0x7BCF];
     let out = PathBuf::from(flag(args, "--out").unwrap_or_else(|| die("zerosheet needs --out DIR")));
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("{}: {e}", out.display())));
-    let g = game(rom());
-    let z = zero_data::extract_x1(g.rom_bytes()).unwrap_or_else(|e| die(&e));
+    let (z, (cw, ch, ox, oy)) = match flag(args, "--x3") {
+        Some(p) => {
+            let mut b = std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+            if b.len() % 0x8000 == 512 {
+                b.drain(..512);
+            }
+            (zero_data::extract_x3(&b).unwrap_or_else(|e| die(&e)), (96usize, 88usize, 48i32, 44i32))
+        }
+        None => (zero_data::extract_x1(game(rom()).rom_bytes()).unwrap_or_else(|e| die(&e)), (64, 64, 32, 44)),
+    };
     let rgb = |c: u16| -> u32 {
         let ch = |v: u16| u32::from(v & 31) << 3 | u32::from(v & 31) >> 2;
         ch(c) << 16 | ch(c >> 5) << 8 | ch(c >> 10)
@@ -399,7 +432,7 @@ fn zerosheet(args: &[String]) -> i32 {
         .frames
         .iter()
         .map(|f| {
-            let mut px = vec![0x303048u32; C * C];
+            let mut px = vec![0x303048u32; cw * ch];
             // Last OAM entry first, so the first ends on top.
             for s in f.sprites.iter().rev() {
                 let n = if s.big { 16 } else { 8 };
@@ -418,9 +451,9 @@ fn zerosheet(args: &[String]) -> i32 {
                             | (b[2 * r + 1] >> bit & 1) << 1
                             | (b[16 + 2 * r] >> bit & 1) << 2
                             | (b[17 + 2 * r] >> bit & 1) << 3;
-                        let (x, y) = (32 + i32::from(s.x) + xx as i32, 44 + i32::from(s.y) + yy as i32);
-                        if v != 0 && (0..C as i32).contains(&x) && (0..C as i32).contains(&y) {
-                            px[y as usize * C + x as usize] = rgb(z.palette[usize::from(v)]);
+                        let (x, y) = (ox + i32::from(s.x) + xx as i32, oy + i32::from(s.y) + yy as i32);
+                        if v != 0 && (0..cw as i32).contains(&x) && (0..ch as i32).contains(&y) {
+                            px[y as usize * cw + x as usize] = rgb(z.palette[usize::from(v)]);
                         }
                     }
                 }
@@ -430,25 +463,25 @@ fn zerosheet(args: &[String]) -> i32 {
         .collect();
     for (i, (f, px)) in z.frames.iter().zip(&cells).enumerate() {
         let path = out.join(format!("{i:02}_{}.png", f.name.replace(' ', "_")));
-        write_png(&path, px, C, C).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+        write_png(&path, px, cw, ch).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
     }
     let cols = 8;
-    let (w, h) = (cols * C * 2, cells.len().div_ceil(cols) * C * 2);
+    let (w, h) = (cols * cw * 2, cells.len().div_ceil(cols) * ch * 2);
     let mut sheet = vec![0u32; w * h];
     for (i, px) in cells.iter().enumerate() {
-        let (ox, oy) = ((i % cols) * C * 2, (i / cols) * C * 2);
+        let (sx, sy) = ((i % cols) * cw * 2, (i / cols) * ch * 2);
         let mut cell = px.clone();
         for (k, ch) in i.to_string().bytes().enumerate() {
             let d = DIG[usize::from(ch - b'0')];
             for b in 0..15 {
                 if d >> (14 - b) & 1 != 0 {
-                    cell[(1 + b / 3) * C + 1 + 4 * k + b % 3] = 0xFFFF00;
+                    cell[(1 + b / 3) * cw + 1 + 4 * k + b % 3] = 0xFFFF00;
                 }
             }
         }
-        for y in 1..C * 2 {
-            for x in 1..C * 2 {
-                sheet[(oy + y) * w + ox + x] = cell[(y / 2) * C + x / 2];
+        for y in 1..ch * 2 {
+            for x in 1..cw * 2 {
+                sheet[(sy + y) * w + sx + x] = cell[(y / 2) * cw + x / 2];
             }
         }
     }

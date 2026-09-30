@@ -122,7 +122,7 @@ fn joypad(bits: u16) -> SnesController {
     })
 }
 
-fn parse_header(mut rom: Vec<u8>) -> Result<(Vec<u8>, RomInfo), RomError> {
+fn parse_header(mut rom: Vec<u8>, strict: bool) -> Result<(Vec<u8>, RomInfo), RomError> {
     let had_copier_header = rom.len() % 0x8000 == 512;
     if had_copier_header {
         rom.drain(..512);
@@ -133,10 +133,10 @@ fn parse_header(mut rom: Vec<u8>) -> Result<(Vec<u8>, RomInfo), RomError> {
     let title = String::from_utf8_lossy(&rom[0x7FC0..0x7FD5])
         .trim_end()
         .to_string();
-    if !title.starts_with("MEGAMAN X") {
+    if strict && !title.starts_with("MEGAMAN X") {
         return Err(RomError::NotMegaManX { title });
     }
-    if rom[0x7FD6] != 0 {
+    if strict && rom[0x7FD6] != 0 {
         return Err(RomError::Coprocessor(rom[0x7FD6]));
     }
     let info = RomInfo {
@@ -151,7 +151,16 @@ fn parse_header(mut rom: Vec<u8>) -> Result<(Vec<u8>, RomInfo), RomError> {
 
 impl Game {
     pub fn from_rom(rom: Vec<u8>) -> Result<Game, RomError> {
-        let (rom, info) = parse_header(rom)?;
+        Self::load(parse_header(rom, true)?)
+    }
+
+    /// Research boot (X3 etc.): size check and copier-header strip only, no
+    /// title or coprocessor check. The co-op traps assume X1; don't register them.
+    pub fn from_rom_any(rom: Vec<u8>) -> Result<Game, RomError> {
+        Self::load(parse_header(rom, false)?)
+    }
+
+    fn load((rom, info): (Vec<u8>, RomInfo)) -> Result<Game, RomError> {
         let emu = SnesEmulator::create(
             rom.clone(),
             SnesEmulatorConfig::default(),
