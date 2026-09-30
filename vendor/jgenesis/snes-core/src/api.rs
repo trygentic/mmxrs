@@ -301,6 +301,17 @@ impl SnesEmulator {
         self.ppu.cgram()
     }
 
+    // mmxrs patch: raw VRAM words and OBSEL (sprite tile base, gap; word addresses)
+    #[must_use]
+    pub fn vram(&self) -> &[u16; 0x8000] {
+        self.ppu.vram()
+    }
+
+    #[must_use]
+    pub fn obsel(&self) -> (u16, u16) {
+        self.ppu.obsel()
+    }
+
     /// Tick only the main CPU until it sits at an instruction boundary with
     /// `PBR:PC == until_pbr_pc` (returns true) or `max_cycles` CPU ticks pass
     /// (returns false). PPU, APU, coprocessors, DMA and `total_master_cycles`

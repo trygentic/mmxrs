@@ -1499,6 +1499,15 @@ impl Ppu {
         *self.cgram
     }
 
+    // mmxrs patch: raw VRAM (words) and OBSEL (sprite tile base, gap; word addresses)
+    pub fn vram(&self) -> &[u16; VRAM_LEN_WORDS] {
+        &self.vram
+    }
+
+    pub fn obsel(&self) -> (u16, u16) {
+        (self.registers.obj_tile_base_address, self.registers.obj_tile_gap_size)
+    }
+
     pub fn frame_buffer(&self) -> &[Color] {
         self.frame_buffer.as_ref()
     }

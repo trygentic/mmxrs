@@ -8,6 +8,7 @@ mod game;
 pub mod netgame;
 pub mod ram;
 pub mod traps;
+pub mod zero;
 
 pub use game::Game;
 pub use traps::{TrapFn, TrapLog, TrapReturn, TrapTable};
