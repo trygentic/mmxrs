@@ -318,8 +318,8 @@ impl SnesEmulator {
         self.ppu.p2_tile_page_mut()
     }
 
-    pub fn set_p2_tile_slots(&mut self, mask: u128, page1: u128) {
-        self.ppu.set_p2_tile_slots(mask, page1);
+    pub fn set_p2_tile_slots(&mut self, mask: u128, page1: u128, page2: u128) {
+        self.ppu.set_p2_tile_slots(mask, page1, page2);
     }
 
     /// The whole P2 page state (live and pending). Not in the bincode

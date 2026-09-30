@@ -204,6 +204,8 @@ pub struct CoopState {
     pub zero_frame: u16,
     /// P2's saber swing (X3 set only), see `saber.rs`.
     pub saber: crate::saber::Saber,
+    /// Wave frame in shadow page 2 per player (`[P2, P1]`; `u16::MAX`: none).
+    pub wave_frames: [u16; 2],
     /// Player 1 as Zero (`Game::set_p1_zero`), independent of `enabled`.
     pub p1: crate::zero::ZeroP1,
     /// Down spot and revive progress (coop_hud.rs).
@@ -228,7 +230,8 @@ impl Default for CoopState {
             p2_items: 0,
             p2_shots: 0,
             zero_frame: u16::MAX,
-            saber: crate::saber::Saber { slot: 0xFF, ..Default::default() },
+            saber: Default::default(),
+            wave_frames: [u16::MAX; 2],
             p1: Default::default(),
             revive: Default::default(),
         }
@@ -375,7 +378,7 @@ fn p2_update(game: &mut Game) {
     let mut pad = word(game.wram(), PAD2_HELD) & !(BTN_START | BTN_SELECT);
     if game.zero_set.is_some() {
         // X swings the saber; during a swing the ROM gets a masked pad.
-        pad = crate::saber::update(&mut game.coop.saber, game.coop.p2[OFF_ACTION], pad);
+        pad = crate::saber::update(&mut game.coop.saber, &game.coop.p2, pad);
     }
     let (live, fired) = (shots_live(game.wram()), game.coop.p2[OFF_SHOTS]);
     with_p2_swapped(game, |game| {
@@ -575,7 +578,10 @@ fn p2_display(game: &mut Game) {
     let zero = game.zero_set.clone();
     let fx = &game.coop.p2_scratch[P2_SWAPPED_LEN - 0x60..];
     let need = match &zero {
-        Some(z) => crate::zero::x3_frame(&game.coop.p2, &game.coop.saber).map_or(0, |f| z.frames[f].sprites.len()),
+        Some(z) => {
+            crate::zero::x3_frame(&game.coop.p2, &game.coop.saber).map_or(0, |f| z.frames[f].sprites.len())
+                + crate::zero::wave_len(z, &game.coop.saber)
+        }
         None => {
             layout_len(game, &game.coop.p2)
                 + (0..3).map(|k| &fx[k * 0x20..k * 0x20 + 0x20]).filter(|o| o[0] != 0).map(|o| layout_len(game, o)).sum::<usize>()
@@ -594,8 +600,6 @@ fn p2_display(game: &mut Game) {
         let base = used.min(first);
         game.coop.p2_oam_base = usize::from(base);
         game.coop.p2_oam_count = usize::from(last - base);
-        let mask = (u128::from(first)..u128::from(last)).fold(0u128, |m, s| m | 1 << s);
-        game.add_p2_tile_slots(mask, false);
         return;
     }
     let w = game.wram_mut();

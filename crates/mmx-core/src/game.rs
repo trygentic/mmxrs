@@ -24,8 +24,10 @@ const SENTINEL_PC: u16 = 0xFFFF;
 const CALL_ISOLATED_BUDGET: u32 = 2_000_000;
 /// Version marker before the appended P2 tile pages in a save state. v1 (no
 /// marker) had a 512-word page; its tail is ignored (empty page). v2
-/// (`P2T2`) had one 768-word page: it loads as page 0.
-const P2_TILES_MAGIC: &[u8; 4] = b"P2T3";
+/// (`P2T2`) had one 768-word page: it loads as page 0. v3 (`P2T3`) had two
+/// pages (no wave page): they load as pages 0 and 1.
+const P2_TILES_MAGIC: &[u8; 4] = b"P2T4";
+const P2_TILES_MAGIC_V3: &[u8; 4] = b"P2T3";
 const P2_TILES_MAGIC_V2: &[u8; 4] = b"P2T2";
 
 pub struct Game {
@@ -205,6 +207,7 @@ impl Game {
         self.zero_set = set.map(std::sync::Arc::new);
         self.coop.zero_frame = u16::MAX; // refill the page on the next draw
         self.coop.p1.frame = u16::MAX;
+        self.coop.wave_frames = [u16::MAX; 2];
     }
 
     /// [`Game::set_zero_set`] from a Mega Man X3 (USA) image (copier header ok).
@@ -382,7 +385,8 @@ impl Game {
     }
 
     /// The shadow sprite tile pages (pending; live on the next OAM upload):
-    /// page 0 is P2's, page 1 (`P2_PAGE_WORDS..`) a Zero P1's. See
+    /// page 0 is P2's, page 1 (`P2_PAGE_WORDS..`) a Zero P1's, page 2 the
+    /// saber waves (P2's in columns 0-7, P1's in 8-15). See
     /// `p2tiles.rs`. Part of the save state.
     pub fn p2_tile_page_mut(&mut self) -> &mut [u16; P2_PAGE_WORDS * P2_PAGES] {
         self.emu.p2_tile_page_mut()
@@ -391,14 +395,14 @@ impl Game {
     /// OAM slots (bit n = slot n) that read the shadow pages instead of VRAM
     /// (all of them page 0).
     pub fn set_p2_tile_slots(&mut self, mask: u128) {
-        self.emu.set_p2_tile_slots(mask, 0);
+        self.emu.set_p2_tile_slots(mask, 0, 0);
     }
 
-    /// Add `mask` to the pending slot mask, reading page 1 when `page1`.
-    pub fn add_p2_tile_slots(&mut self, mask: u128, page1: bool) {
+    /// Add `mask` to the pending slot mask, reading shadow page `page` (0-2).
+    pub fn add_p2_tile_slots(&mut self, mask: u128, page: u8) {
         let t = self.emu.p2_tiles();
-        let p1 = if page1 { t.next_page1 | mask } else { t.next_page1 & !mask };
-        self.emu.set_p2_tile_slots(t.next_slots | mask, p1);
+        let on = |p: u8, bits: u128| if page == p { bits | mask } else { bits & !mask };
+        self.emu.set_p2_tile_slots(t.next_slots | mask, on(1, t.next_page1), on(2, t.next_page2));
     }
 
     /// Live shadow pages and slot mask (what the renderer uses now).
@@ -533,6 +537,15 @@ impl Game {
         if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC.as_slice()) {
             let (t, _) = bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
             self.emu.set_p2_tiles(t);
+        } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V3.as_slice()) {
+            const W2: usize = P2_PAGE_WORDS * 2;
+            type V3 = (Box<[u16; W2]>, u128, Box<[u16; W2]>, u128, bool, u128, u128);
+            let ((page, slots, next, next_slots, pending, page1, next_page1), _): (V3, _) =
+                bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
+            let mut t = P2Tiles { slots, next_slots, pending, page1, next_page1, ..P2Tiles::default() };
+            t.page[..W2].copy_from_slice(&page[..]);
+            t.next_page[..W2].copy_from_slice(&next[..]);
+            self.emu.set_p2_tiles(t);
         } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V2.as_slice()) {
             type V2 = (Box<[u16; P2_PAGE_WORDS]>, u128, Box<[u16; P2_PAGE_WORDS]>, u128, bool);
             let ((page, slots, next, next_slots, pending), _): (V2, _) =
@@ -548,6 +561,7 @@ impl Game {
         self.fired_at = fired_at;
         self.coop.zero_frame = u16::MAX; // the page came from the state: refill it
         self.coop.p1.frame = u16::MAX;
+        self.coop.wave_frames = [u16::MAX; 2];
         Ok(())
     }
 }

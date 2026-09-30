@@ -359,15 +359,15 @@ pub struct Ppu {
 /// row, tiles `$30-$3F`, wraps to row 0: `P2_PAGE_TILES` modulo).
 pub const P2_PAGE_WORDS: usize = 768;
 pub const P2_PAGE_TILES: u16 = 48;
-/// Two pages back to back: page 1 is for slots also set in `page1` (a second
-/// Zero, mmx-core's P1).
-pub const P2_PAGES: usize = 2;
+/// Three pages back to back: page 1 is for slots also set in `page1` (a second
+/// Zero, mmx-core's P1), page 2 for slots set in `page2` (the saber waves).
+pub const P2_PAGES: usize = 3;
 
 /// A sprite whose OAM slot bit is set in `slots` reads its tiles from `page`
 /// (index `(tile_number & 0x3F) % 48`) instead of VRAM. The host writes `next_*`;
 /// they go live on the next OAMDATA write (the game's OAM upload), so the page
 /// and mask switch together with the OAM they describe. A slot also set in
-/// `page1` reads the second page.
+/// `page1` reads the second page, one set in `page2` the third.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct P2Tiles {
     pub page: Box<[u16; P2_PAGE_WORDS * P2_PAGES]>,
@@ -377,6 +377,8 @@ pub struct P2Tiles {
     pub pending: bool,
     pub page1: u128,
     pub next_page1: u128,
+    pub page2: u128,
+    pub next_page2: u128,
 }
 
 impl Default for P2Tiles {
@@ -395,6 +397,8 @@ impl P2Tiles {
             pending: false,
             page1: 0,
             next_page1: 0,
+            page2: 0,
+            next_page2: 0,
         }
     }
 
@@ -402,6 +406,7 @@ impl P2Tiles {
         self.page.copy_from_slice(self.next_page.as_ref());
         self.slots = self.next_slots;
         self.page1 = self.next_page1;
+        self.page2 = self.next_page2;
         self.pending = false;
     }
 }
@@ -1590,9 +1595,10 @@ impl Ppu {
         &mut self.p2_tiles.0.next_page
     }
 
-    pub fn set_p2_tile_slots(&mut self, mask: u128, page1: u128) {
+    pub fn set_p2_tile_slots(&mut self, mask: u128, page1: u128, page2: u128) {
         self.p2_tiles.0.next_slots = mask;
         self.p2_tiles.0.next_page1 = page1;
+        self.p2_tiles.0.next_page2 = page2;
         self.p2_tiles.0.pending = true;
     }
 

@@ -95,42 +95,88 @@ pub fn oam_entry(s: &Sprite, (ox, oy): (i16, i16), right: bool, attr: u8) -> Opt
     Some(([x as u8, y as u8, s.tile, a], (x >> 8) as u8 & 1 | u8::from(s.big) << 1))
 }
 
-/// P2 as X3 Zero, from OAM slot `first` (4-aligned): its frame's page into
-/// shadow page 0 (when the frame changed), its sprites into `$0700` and
-/// the high table `$0900`. Returns the slot past P2's last one.
+/// P2 as X3 Zero, from OAM slot `first` (4-aligned): its wave (on top)
+/// and its frame into `$0700` and the high table `$0900`, their pages into
+/// shadow pages 2 and 0 (when the frame changed), their slots into the
+/// PPU's mask. Returns the slot past P2's last one.
 pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
     let p2 = game.coop.p2;
-    let Some(f) = x3_frame(&p2, &game.coop.saber) else { return first };
-    if game.coop.zero_frame != f as u16 {
-        crate::p2tiles::fill_page(game, 0, &set.page(f));
-        game.coop.zero_frame = f as u16;
+    let attr = p2[0x11] & 0x30 | (pal & 7) << 1;
+    let saber = game.coop.saber;
+    let mut e = wave_entries(game, set, &saber, 0, attr);
+    let n_wave = e.len();
+    if let Some(f) = x3_frame(&p2, &saber) {
+        if game.coop.zero_frame != f as u16 {
+            crate::p2tiles::fill_page(game, 0, &set.page(f));
+            game.coop.zero_frame = f as u16;
+        }
+        e.extend(frame_entries(game, set, &p2, f, attr));
     }
-    emit_frame(game, set, &p2, f, first, p2[0x11] & 0x30 | (pal & 7) << 1)
+    let e = &e[..e.len().min(128 - usize::from(first))];
+    let last = write_entries(game, first, e);
+    let mask = |a: usize, b: usize| (a..b).fold(0u128, |m, s| m | 1 << s);
+    let (f, w) = (usize::from(first), n_wave.min(e.len()));
+    game.add_p2_tile_slots(mask(f, f + w), 2);
+    game.add_p2_tile_slots(mask(f + w, usize::from(last)), 0);
+    last
 }
 
-/// Frame `f` of `obj` (a player block) into OAM from slot `first`, `attr` =
-/// priority / palette bits. Returns the slot past the last one written.
-fn emit_frame(game: &mut Game, set: &ZeroSet, obj: &[u8], f: usize, first: u8, attr: u8) -> u8 {
+/// Frame `f` of `obj` (a player block) as OAM entries, `attr` = priority /
+/// palette bits.
+fn frame_entries(game: &Game, set: &ZeroSet, obj: &[u8], f: usize, attr: u8) -> Vec<([u8; 4], u8)> {
     let w = game.wram();
     let cam = |a: u32| u16::from_le_bytes([w[ix(a)], w[ix(a) + 1]]);
     let (ox, oy) = screen_origin(obj, cam(ram::CAMERA_X), cam(ram::CAMERA_Y));
-    let origin = (ox, oy + X3_Y_OFFSET);
     let right = obj[0x11] & 0x40 != 0;
-    let mut slot = usize::from(first);
-    let mut hi = 0u32;
-    let w = game.wram_mut();
-    for s in &set.frames[f].sprites {
-        let Some((e, h)) = oam_entry(s, origin, right, attr) else { continue };
-        if slot >= 128 {
-            break;
+    set.frames[f].sprites.iter().filter_map(|s| oam_entry(s, (ox, oy + X3_Y_OFFSET), right, attr)).collect()
+}
+
+/// The wave's colours on Zero's palette (`$8C:B580`, which every Zero
+/// wears): the wave draws with 1 (white) and 6-9 (greens `5394 338C 2308
+/// 2288`); Zero's has white 4 (`639C`) and greens 12 (`2388`) and 1
+/// (`1284`). No sprite palette is free with co-op on (docs/zero.md).
+pub const WAVE_ON_ZERO: [u8; 16] = [0, 4, 0, 0, 0, 0, 12, 12, 1, 1, 0, 0, 0, 0, 0, 0];
+
+/// Sprites the wave of `saber` draws now (upper bound for slot planning).
+pub fn wave_len(set: &ZeroSet, saber: &Saber) -> usize {
+    saber.wave.at().and_then(|(_, _, f, _)| set.wave.frames.get(f)).map_or(0, |f| f.sprites.len())
+}
+
+/// `saber`'s wave as OAM entries; its tiles go into shadow page 2 at
+/// columns `8 * which` (P2 0, P1 1) when its frame changed.
+fn wave_entries(game: &mut Game, set: &ZeroSet, saber: &Saber, which: usize, attr: u8) -> Vec<([u8; 4], u8)> {
+    let Some((x, y, f, _)) = saber.wave.at().filter(|w| w.2 < set.wave.frames.len()) else { return Vec::new() };
+    let col = 8 * which;
+    if game.coop.wave_frames[which] != f as u16 {
+        let page = set.wave.page(f, &WAVE_ON_ZERO);
+        for (slot, t) in page.chunks_exact(32).enumerate().filter(|(s, _)| s % 16 < 8) {
+            crate::p2tiles::fill_page(game, 2 * crate::p2tiles::SHADOW_WORDS + (slot + col) * 16, t);
         }
-        w[ix(ram::OAM_BUF) + slot * 4..][..4].copy_from_slice(&e);
-        hi |= u32::from(h) << (2 * (slot - usize::from(first)));
-        slot += 1;
+        game.coop.wave_frames[which] = f as u16;
+    }
+    let w = game.wram();
+    let cam = |a: u32| u16::from_le_bytes([w[ix(a)], w[ix(a) + 1]]);
+    let origin = (x.wrapping_sub(cam(ram::CAMERA_X)) as i16, y.wrapping_sub(cam(ram::CAMERA_Y)) as i16);
+    set.wave.frames[f]
+        .sprites
+        .iter()
+        .filter_map(|s| oam_entry(&Sprite { tile: s.tile + col as u8, ..*s }, origin, saber.wave.right, attr))
+        .collect()
+}
+
+/// Entries into OAM from slot `first`. Returns the slot past the last one.
+fn write_entries(game: &mut Game, first: u8, entries: &[([u8; 4], u8)]) -> u8 {
+    let first = usize::from(first);
+    let slot = first + entries.len();
+    let w = game.wram_mut();
+    let mut hi = 0u64;
+    for (k, (e, h)) in entries.iter().enumerate() {
+        w[ix(ram::OAM_BUF) + (first + k) * 4..][..4].copy_from_slice(e);
+        hi |= u64::from(*h) << (2 * k);
     }
     // High table: the player owns whole bytes from `first`; keep the game's
     // bits above its last slot in the last partial byte.
-    for (k, b) in (usize::from(first)..slot).step_by(4).enumerate() {
+    for (k, b) in (first..slot).step_by(4).enumerate() {
         let i = ix(OAM_HI) + b / 4;
         let n = (slot - b).min(4);
         let keep = if n == 4 { 0 } else { 0xFFu8 << (2 * n) };
@@ -153,7 +199,7 @@ pub struct ZeroP1 {
 
 impl Default for ZeroP1 {
     fn default() -> Self {
-        Self { on: false, frame: u16::MAX, saber: Saber { slot: 0xFF, ..Default::default() } }
+        Self { on: false, frame: u16::MAX, saber: Saber::default() }
     }
 }
 
@@ -184,9 +230,10 @@ fn p1_pad(game: &mut Game) {
     }
     let w = game.wram();
     let held = u16::from_le_bytes([w[ix(ram::PAD1_HELD)], w[ix(ram::PAD1_HELD) + 1]]);
-    let action = w[ix(ram::X_ACTION)];
+    let b = ix(ram::X_BASE);
+    let obj: [u8; ram::X_BLOCK_LEN] = w[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
     let keep = held & (crate::BTN_START | crate::BTN_SELECT);
-    let pad = crate::saber::update(&mut game.coop.p1.saber, action, held) | keep;
+    let pad = crate::saber::update(&mut game.coop.p1.saber, &obj, held) | keep;
     let w = game.wram_mut();
     w[ix(ram::PAD1_HELD)..][..2].copy_from_slice(&pad.to_le_bytes());
     let pr = ix(ram::PAD1_PRESSED);
@@ -205,24 +252,26 @@ pub fn emit_p1(game: &mut Game) {
     let Some(set) = game.zero_set.clone() else { return };
     let b = ix(ram::X_BASE);
     let obj: [u8; ram::X_BLOCK_LEN] = game.wram()[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
-    let Some(f) = x3_frame(&obj, &game.coop.p1.saber) else { return };
-    if game.coop.p1.frame != f as u16 {
-        crate::p2tiles::fill_page(game, crate::p2tiles::SHADOW_WORDS, &set.page(f));
-        game.coop.p1.frame = f as u16;
+    let saber = game.coop.p1.saber;
+    let attr = obj[0x11] & 0x3E;
+    let mut e = wave_entries(game, &set, &saber, 1, attr);
+    let n_wave = e.len();
+    if let Some(f) = x3_frame(&obj, &saber) {
+        if game.coop.p1.frame != f as u16 {
+            crate::p2tiles::fill_page(game, crate::p2tiles::SHADOW_WORDS, &set.page(f));
+            game.coop.p1.frame = f as u16;
+        }
+        e.extend(frame_entries(game, &set, &obj, f, attr));
     }
     let w = game.wram_mut();
-    let cam = |a: u32| u16::from_le_bytes([w[ix(a)], w[ix(a) + 1]]);
-    let (ox, oy) = screen_origin(&obj, cam(ram::CAMERA_X), cam(ram::CAMERA_Y));
-    let right = obj[0x11] & 0x40 != 0;
-    let mut mask = 0u128;
-    for s in &set.frames[f].sprites {
-        let Some((e, h)) = oam_entry(s, (ox, oy + X3_Y_OFFSET), right, obj[0x11] & 0x3E) else { continue };
+    let (mut body, mut wave) = (0u128, 0u128);
+    for (k, (e, h)) in e.iter().enumerate() {
         let slot = usize::from(w[OAM_CURSOR] & 0x7F);
         if slot >= 127 {
             break;
         }
-        w[ix(ram::OAM_BUF) + slot * 4..][..4].copy_from_slice(&e);
-        mask |= 1 << slot;
+        w[ix(ram::OAM_BUF) + slot * 4..][..4].copy_from_slice(e);
+        *if k < n_wave { &mut wave } else { &mut body } |= 1 << slot;
         w[OAM_HI_ACC] = w[OAM_HI_ACC] >> 2 | h << 6;
         w[OAM_CURSOR] += 1;
         if w[OAM_CURSOR] & 3 == 0 {
@@ -230,7 +279,8 @@ pub fn emit_p1(game: &mut Game) {
             w[OAM_HI_INDEX] += 1;
         }
     }
-    game.add_p2_tile_slots(mask, true);
+    game.add_p2_tile_slots(body, 1);
+    game.add_p2_tile_slots(wave, 2);
 }
 
 /// The OAM build's direct-page cursor (`$E4`), high-table byte index (`$E5`)

@@ -686,7 +686,7 @@ mod tests {
     fn trapset_id_includes_x3() {
         let mut g = session_game(&synthetic_rom(), COOP_TWO_PLAYERS).unwrap();
         let plain = trapset_id(&g);
-        g.set_zero_set(Some(ZeroSet { tiles: vec![], palette: [0; 16], frames: vec![] }));
+        g.set_zero_set(Some(ZeroSet::default()));
         assert_ne!(trapset_id(&g), plain);
     }
 
