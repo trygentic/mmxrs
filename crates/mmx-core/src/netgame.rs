@@ -4,9 +4,10 @@
 //! `rollback_tick`, shrunk) or input-delay lockstep (z2rs's `step_session`).
 //! See `docs/netplay.md` "Frontend wiring".
 //!
-//! Save states for rollback are [`Game::save_state`] plus the co-op state
-//! ([`coop::CoopState`], P2's shadow block), which `save_state` leaves out:
-//! without it a rollback would rewind P1 and the world but not P2.
+//! Save states for rollback are [`Game::save_state`], which carries the
+//! co-op state ([`coop::CoopState`], P2's shadow block) since the `COOP`
+//! tail (docs/savestates.md): without it a rollback would rewind P1 and the
+//! world but not P2.
 
 use mmx_net::{
     hash_state, CloseReason, ConnectStage, Role, RollbackConfig, RollbackError, RollbackEvent,
@@ -20,34 +21,18 @@ use crate::zero_data::ZeroSet;
 use crate::{Timing, coop, Game, Pads, RomError};
 
 /// Bump when anything that changes simulation between two builds changes
-/// outside the trap addresses (mixed into [`trapset_id`]).
-const NET_REVISION: u64 = 2;
+/// outside the trap addresses (mixed into [`trapset_id`]). 3: save states
+/// carry `CoopState` (a `--load` state now restores P2 on both peers).
+const NET_REVISION: u64 = 3;
 
-/// Rollback save state: `u32` LE length of the encoded [`coop::CoopState`],
-/// that encoding, then [`Game::save_state`].
+/// Rollback save state: [`Game::save_state`] (co-op state included).
 pub fn net_save(game: &Game) -> Vec<u8> {
-    let cfg = bincode::config::standard();
-    let coop = bincode::encode_to_vec(&game.coop, cfg).expect("coop state encodes");
-    let mut v = Vec::with_capacity(4 + coop.len() + 512 * 1024);
-    v.extend_from_slice(&(coop.len() as u32).to_le_bytes());
-    v.extend_from_slice(&coop);
-    v.extend_from_slice(&game.save_state());
-    v
+    game.save_state()
 }
 
 /// Inverse of [`net_save`].
 pub fn net_load(game: &mut Game, s: &[u8]) -> Result<(), String> {
-    let n = s
-        .get(..4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
-        .ok_or("net state too short")?;
-    let coop_bytes = s.get(4..4 + n).ok_or("net state truncated")?;
-    let (coop, _): (coop::CoopState, _) =
-        bincode::decode_from_slice(coop_bytes, bincode::config::standard())
-            .map_err(|e| e.to_string())?;
-    game.load_state(&s[4 + n..])?;
-    game.coop = coop;
-    Ok(())
+    game.load_state(s)
 }
 
 /// Desync checksum: FNV-1a 64 over WRAM `$7E:0000..$2000` and P2's shadow block.
@@ -1062,7 +1047,8 @@ mod tests {
         g.coop.p2_hidden = false;
         let s = net_save(&g);
         let sum = net_checksum(&g);
-        g.coop = coop::CoopState::default();
+        // `enabled` is the frontend's setting: kept across a load.
+        g.coop = coop::CoopState { enabled: true, ..Default::default() };
         g.step(Pads { p1: BTN_B, p2: 0 });
         net_load(&mut g, &s).unwrap();
         assert_eq!(g.coop.p2[5], 0x42);

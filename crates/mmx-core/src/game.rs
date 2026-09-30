@@ -31,6 +31,20 @@ const P2_TILES_MAGIC: &[u8; 4] = b"P2T5";
 const P2_TILES_MAGIC_V4: &[u8; 4] = b"P2T4";
 const P2_TILES_MAGIC_V3: &[u8; 4] = b"P2T3";
 const P2_TILES_MAGIC_V2: &[u8; 4] = b"P2T2";
+/// Marker after the P2 tile pages: `COOP`, a `u32` LE length, then the
+/// bincode [`coop::CoopState`]. States without it load with a default one
+/// (P2 hidden: it re-anchors beside P1 when it next shows).
+const COOP_MAGIC: &[u8; 4] = b"COOP";
+
+/// What a save state holds, without loading it ([`Game::state_info`]).
+#[derive(Debug, Clone)]
+pub struct StateInfo {
+    pub frame_count: u64,
+    /// Tile-page marker (`P2T5`, older `P2T4`..`P2T2`), `None` before them.
+    pub tiles: Option<String>,
+    /// The co-op state, when the save has one (`COOP`).
+    pub coop: Option<coop::CoopState>,
+}
 
 pub struct Game {
     timing: Timing,
@@ -624,24 +638,64 @@ impl Game {
 
     /// `(emulator, frame_count, fired_at)`, then [`P2_TILES_MAGIC`] and the
     /// PPU's P2 tile page (appended, so states from before the page, or with
-    /// the old 512-word page and no magic, load with an empty one).
+    /// the old 512-word page and no magic, load with an empty one), then
+    /// [`COOP_MAGIC`], the length and the [`coop::CoopState`]. See
+    /// docs/savestates.md.
     pub fn save_state(&self) -> Vec<u8> {
         let cfg = bincode::config::standard();
         let state = (self.emu.to_save_state(), self.frame_count, self.fired_at);
         let mut v = bincode::encode_to_vec(state, cfg).expect("save state encodes");
         v.extend(P2_TILES_MAGIC);
         v.extend(bincode::encode_to_vec(self.emu.p2_tiles(), cfg).expect("p2 tiles encode"));
+        let coop = bincode::encode_to_vec(&self.coop, cfg).expect("coop state encodes");
+        v.extend(COOP_MAGIC);
+        v.extend((coop.len() as u32).to_le_bytes());
+        v.extend(coop);
         v
     }
 
+    /// The co-op tail right after the `P2T5` pages (`COOP`, `u32` LE length,
+    /// bincode); `Ok(None)` when absent (saved before it).
+    fn coop_tail(t: &[u8]) -> Result<Option<coop::CoopState>, String> {
+        let Some(t) = t.strip_prefix(COOP_MAGIC.as_slice()) else { return Ok(None) };
+        let n = t.get(..4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize).ok_or("co-op state truncated")?;
+        let body = t.get(4..4 + n).ok_or("co-op state truncated")?;
+        let (c, _) = bincode::decode_from_slice(body, bincode::config::standard()).map_err(|e| format!("co-op state: {e}"))?;
+        Ok(Some(c))
+    }
+
+    /// Frame count, tile-page marker and co-op state of a save state.
+    pub fn state_info(s: &[u8]) -> Result<StateInfo, String> {
+        let cfg = bincode::config::standard();
+        let ((_, frame_count, _), n): ((SnesEmulator, u64, Option<u32>), _) =
+            bincode::decode_from_slice(s, cfg).map_err(|e| e.to_string())?;
+        let tiles = [P2_TILES_MAGIC, P2_TILES_MAGIC_V4, P2_TILES_MAGIC_V3, P2_TILES_MAGIC_V2]
+            .into_iter()
+            .find(|m| s[n..].starts_with(m.as_slice()))
+            .map(|m| String::from_utf8_lossy(m).into_owned());
+        let coop = match s[n..].strip_prefix(P2_TILES_MAGIC.as_slice()) {
+            Some(t) => {
+                let (_, m): (P2Tiles, _) = bincode::decode_from_slice(t, cfg).map_err(|e| e.to_string())?;
+                Self::coop_tail(&t[m..])?
+            }
+            None => None,
+        };
+        Ok(StateInfo { frame_count, tiles, coop })
+    }
+
+    /// Restores the emulator, the P2 tile pages and [`coop::CoopState`]. The
+    /// frontend's settings in `CoopState` (`enabled`, P1 as Zero, P2's
+    /// palette) are kept, not taken from the state.
     pub fn load_state(&mut self, s: &[u8]) -> Result<(), String> {
         let cfg = bincode::config::standard();
+        let mut coop = None;
         let ((state, frame_count, fired_at), n): ((SnesEmulator, u64, Option<u32>), _) =
             bincode::decode_from_slice(s, cfg).map_err(|e| e.to_string())?;
         self.emu.load_state(state);
         if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC.as_slice()) {
-            let (t, _) = bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
+            let (t, m) = bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
             self.emu.set_p2_tiles(t);
+            coop = Self::coop_tail(&tail[m..])?;
         } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V4.as_slice()) {
             const W3: usize = P2_PAGE_WORDS * 3;
             type V4 = (Box<[u16; W3]>, u128, Box<[u16; W3]>, u128, bool, u128, u128, u128, u128);
@@ -673,9 +727,13 @@ impl Game {
         }
         self.frame_count = frame_count;
         self.fired_at = fired_at;
-        self.coop.zero_frame = u16::MAX; // the page came from the state: refill it
-        self.coop.p1.frame = u16::MAX;
-        self.coop.wave_frames = [u16::MAX; 2];
+        let (enabled, p1_on, palette) = (self.coop.enabled, self.coop.p1.on, self.coop.zero_palette);
+        // With a `COOP` tail the pages and the frames they hold came from the
+        // same state; without one, a default (P2 hidden: it re-anchors).
+        self.coop = coop.unwrap_or_default();
+        self.coop.enabled = enabled;
+        self.coop.p1.on = p1_on;
+        self.coop.zero_palette = palette;
         Ok(())
     }
 }

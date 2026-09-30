@@ -20,7 +20,7 @@ pub mod traps;
 pub mod zero;
 pub mod zero_data;
 
-pub use game::Game;
+pub use game::{Game, StateInfo};
 pub use traps::{TrapFn, TrapLog, TrapReturn, TrapTable};
 
 /// SNES joypad state per player in auto-read layout:
