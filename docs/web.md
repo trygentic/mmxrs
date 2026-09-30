@@ -48,8 +48,10 @@ in-memory slot (gone on reload). Hold Tab to fast-forward (audio muted).
 
 The worklet (`site/worklet.js`) holds a stereo ring; the page steps frames
 until ~50 ms is queued (max 4 per rAF), and the worklet drops the oldest audio
-past 90 ms. Without audio (context suspended until a key press) it falls back
-to a 60.0988 Hz wall-clock accumulator.
+past 90 ms. Online, `net_tick_audio` is paced the same way (one frame of audio
+per tick, silence when the session held the frame back). Without audio (context
+suspended until a key press) it falls back to a wall-clock accumulator at
+`emu.fps()` (60.0988 NTSC, 50.007 PAL).
 
 ## Automation: `window.mmx`
 

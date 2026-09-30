@@ -66,6 +66,8 @@ pub struct Emu {
     width: usize,
     height: usize,
     audio_rate: Option<u32>,
+    /// Audio already taken from the game by `net_tick_audio`, for `audio_take`.
+    pcm: Vec<(f32, f32)>,
     /// ROM bytes: an online session rebuilds the game from power-on.
     #[cfg(feature = "netplay")]
     rom: Vec<u8>,
@@ -84,6 +86,7 @@ impl Emu {
             width: 0,
             height: 0,
             audio_rate: None,
+            pcm: Vec::new(),
             #[cfg(feature = "netplay")]
             rom: rom.to_vec(),
             #[cfg(feature = "netplay")]
@@ -120,11 +123,23 @@ impl Emu {
 
     /// Interleaved stereo f32 since the last call.
     pub fn audio_take(&mut self) -> Vec<f32> {
-        self.game.take_audio().into_iter().flat_map(|(l, r)| [l, r]).collect()
+        let mut pcm = std::mem::take(&mut self.pcm);
+        pcm.extend(self.game.take_audio());
+        pcm.into_iter().flat_map(|(l, r)| [l, r]).collect()
     }
     pub fn set_audio_rate(&mut self, hz: u32) {
         self.game.set_audio_rate(hz);
         self.audio_rate = Some(hz);
+        // audio may start (first key press) after net_connect: the session's
+        // rebuilt game must still render at the device rate
+        #[cfg(feature = "netplay")]
+        if let Some(n) = self.net.as_mut() {
+            n.audio_rate = Some(hz);
+        }
+    }
+    /// Emulated frames per second (50.007 on a PAL ROM, 60.0988 NTSC).
+    pub fn fps(&self) -> f64 {
+        self.game.fps()
     }
 
     pub fn save_state(&self) -> Vec<u8> {
