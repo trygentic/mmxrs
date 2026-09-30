@@ -6,7 +6,10 @@ locally from the file picker or a drop; nothing is uploaded. A second picker,
 "Mega Man X3 ROM (optional, enables Zero's sprites and saber)", calls
 `Emu::set_x3_rom(bytes)` (kept for later X ROM loads): P2 is drawn as X3
 Zero and P2's X (key T) swings the saber, see docs/zero.md "Playing as Zero".
-Load it before Host/Join; both peers need it.
+Load it before Host/Join; both peers need it. The checkbox "Play as Zero
+(X3 ROM)" (`Emu::set_p1_zero`) makes player 1 Zero too (key V swings the
+saber); it unchecks itself while no X3 ROM is loaded. Online both peers must
+tick it (it is part of the handshake id).
 
 ## Build and serve
 
