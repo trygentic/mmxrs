@@ -21,6 +21,7 @@ Bring your own ROM: nothing from the cartridge is in this repository. See
 | `crates/mmx-verify` | lockstep oracle-vs-DUT compare, `.bk2` movies |
 | `crates/mmx-net` | rollback / lockstep netplay protocol (from z2rs), WebRTC via matchbox |
 | `crates/mmx-native` | desktop app + headless runner |
+| `crates/mmx-launcher` | egui window that configures and starts `mmxrs` |
 | `crates/mmx-web` | wasm cdylib + static site |
 | `tools/xtask` | `cargo xtask verify|dump|ledger|rominfo` |
 | `tools/mmx-signal` | signalling server for netplay |
@@ -44,5 +45,9 @@ cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local --x3-rom "/pa
 Player 2: WASD, G jump, F buster, H dash, T saber (X3 ROM loaded). Without an
 X3 ROM player 2 is X's sprites in Zero's colours, buster only.
 
-Per-crate docs: `docs/traps.md`, `docs/verify.md`, `docs/coop.md`,
+Prefer a window to flags? The launcher picks the ROMs, options and online
+settings, remembers them, and starts the game (docs/launcher.md):
+`cargo build --release -p mmx-native -p mmx-launcher && ./target/release/mmxrs-launcher`.
+
+Per-crate docs: `docs/launcher.md`, `docs/traps.md`, `docs/verify.md`, `docs/coop.md`,
 `docs/netplay.md`, `docs/native.md`, `docs/web.md`.
