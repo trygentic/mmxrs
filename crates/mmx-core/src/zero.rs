@@ -243,6 +243,9 @@ fn p1_pad(game: &mut Game) {
     let obj: [u8; ram::X_BLOCK_LEN] = w[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
     let keep = held & (crate::BTN_START | crate::BTN_SELECT);
     let pad = crate::saber::update(&mut game.coop.p1.saber, &obj, held) | keep;
+    if crate::saber::whoosh(&game.coop.p1.saber) {
+        game.coop.sfx[crate::sfx::P1] = 1;
+    }
     let w = game.wram_mut();
     w[ix(ram::PAD1_HELD)..][..2].copy_from_slice(&pad.to_le_bytes());
     let pr = ix(ram::PAD1_PRESSED);

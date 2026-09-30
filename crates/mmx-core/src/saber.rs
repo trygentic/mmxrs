@@ -157,6 +157,12 @@ pub fn update(s: &mut Saber, obj: &[u8], pad: u16) -> u16 {
     }
 }
 
+/// First frame of the arc pose: where X3's whoosh plays (`sfx.rs`; X3 plays
+/// it 10 frames into Zero's swing, with the ball he throws after the arc).
+pub fn whoosh(s: &Saber) -> bool {
+    pose_at(s.t, s.air) == Some((ARC, 0))
+}
+
 /// The swing is on its arc pose and has not hit yet.
 fn arc(s: &Saber) -> bool {
     s.t > 0 && !s.hit && pose_index(s.t, s.air) == Some(ARC)
@@ -374,8 +380,9 @@ mod tests {
     }
 
     /// Netplay: a 2-frame rollback every frame through the swing draws the
-    /// same pictures as the straight run (page, mask and `zero_frame` travel
-    /// together in `net_save`).
+    /// same pictures and plays the same audio (whoosh included) as the
+    /// straight run (page, mask, `zero_frame` and `sfx` travel together in
+    /// `net_save`).
     #[test]
     fn saber_frames_survive_rollback() {
         let (Some(x1), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
@@ -409,10 +416,12 @@ mod tests {
             if f > 2 {
                 crate::netgame::net_load(&mut b, &saves[f - 3]).unwrap();
                 for r in f - 2..=f {
+                    b.take_audio(); // replayed frames' audio is dropped (netgame)
                     b.step(pad(r));
                 }
             }
             assert_eq!(a.frame().0, b.frame().0, "frame {f} (zf {})", a.coop.zero_frame);
+            assert_eq!(a.take_audio(), b.take_audio(), "frame {f}: audio (whoosh {:?})", a.coop.sfx);
         }
     }
 }

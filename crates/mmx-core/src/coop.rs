@@ -219,6 +219,8 @@ pub struct CoopState {
     pub p2_away: u16,
     /// P2 was left behind: re-anchor on P1 (HP kept) at the next `p2_anchor_ok`.
     pub p2_warp: bool,
+    /// Frames into Zero's saber whoosh + 1 per player (`sfx::P2`, `sfx::P1`), 0 = silent.
+    pub sfx: [u16; 2],
 }
 
 impl Default for CoopState {
@@ -245,6 +247,7 @@ impl Default for CoopState {
             revive: Default::default(),
             p2_away: 0,
             p2_warp: false,
+            sfx: [0; 2],
         }
     }
 }
@@ -381,6 +384,9 @@ fn p2_update(game: &mut Game) {
     if game.zero_set.is_some() {
         // X swings the saber; during a swing the ROM gets a masked pad.
         pad = crate::saber::update(&mut game.coop.saber, &game.coop.p2, pad);
+        if crate::saber::whoosh(&game.coop.saber) {
+            game.coop.sfx[crate::sfx::P2] = 1;
+        }
     }
     let (live, fired) = (shots_live(game.wram()), game.coop.p2[OFF_SHOTS]);
     with_p2_swapped(game, |game| {

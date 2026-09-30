@@ -271,6 +271,7 @@ impl Game {
             p2: joypad(pads.p2),
         };
         let mut rendered = false;
+        let audio_from = self.audio.0.len();
         // Run past the frame to the next instruction boundary, so a step
         // always ends between instructions (safe for set_regs, call_isolated,
         // save states). The trap check for that boundary runs next step.
@@ -286,6 +287,10 @@ impl Game {
                 )
                 .expect("frontend sinks are infallible and there is no SRAM");
             rendered |= effect == TickEffect::FrameRendered;
+        }
+        if let Some(s) = self.zero_set.as_ref().and_then(|z| z.sounds.as_ref()) {
+            let fps = self.emu.target_fps();
+            crate::sfx::mix(&mut self.coop.sfx, &s.swing, fps, &mut self.audio.0[audio_from..]);
         }
         self.frame_count += 1;
     }
