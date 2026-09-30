@@ -287,8 +287,8 @@ wall poses, no saber; "unused poses" are 18-20, hurt is 24-27, lying/dying
 in set `$53`.
 
 **X -> Zero mapping** (`zero_frame_for(action, frame)`), X frames measured on
-Octopus: stand 0-2 (blink), stand-shoot 49-50, walk 13-22 (shooting 3-12),
-jump 32-34 (shooting 23-25), fall 35-36 (26-27), land 37-38, hurt 51-53,
+Octopus: stand 0-2 (blink), stand-shoot 49-50, walk 3-12 (shooting 13-22; corrected, see X3 below),
+jump 23-25 (shooting 32-34), fall 25-27 (34-36), land 28-29 (37-38), hurt 51-53,
 ready 81.
 
 | X action | Zero frame |
@@ -374,3 +374,118 @@ Sources:
 [2] [superfamicom.org, Capcom Cx4 - Hitachi HG51B169](https://wiki.superfamicom.org/capcom-cx4-hitachi-hg51b169),
 [3] [justin3009/MMX3-ZeroProject, MMX3_SpriteSetup.asm](https://github.com/justin3009/MMX3-ZeroProject/blob/master/MMX3_SpriteSetup.asm),
 [4] [Euclid, Mega Man X3 Decompression Routine (romhacking.net)](https://www.romhacking.net/documents/205/).
+
+## X3 Zero data
+
+Code: `crates/mmx-core/src/zero_data.rs` (`extract_x3(rom) -> ZeroSet`,
+`zero_x3_frame_for`). Sheet: `cargo xtask zerosheet --x3 PATH --out DIR`
+(96x88 cells, origin 48,44). Measured 2026-09-30 on Mega Man X3 (USA),
+CRC32 `FA0FE671`. The art is Capcom's: render it locally, never commit it.
+
+**Booting X3.** `Game::from_rom_any` skips the title and coprocessor checks
+(the vendored core emulates the Cx4 without a firmware file). `xtask dump
+--rom-any PATH` drives it; `--poke ADDR=VAL@A[-B]` writes a WRAM byte before
+frames A..B. The X1-specific status line `dump` prints is meaningless for X3.
+
+**Calling Zero.** Pause (Start), press R to slide to Zero's monitor, then press
+**Start** on that page (the handler at `$80:C9EF` tests `$0A13 & $10`, the Start
+bit of the pressed-buttons high byte; Y/B/A/X do nothing). A static monitor
+means the swap is refused: `$80:CBB2` refuses when X is in a ride armour
+(`$09DA = $2C`), already swapping (`$76`), on level `$1FAE` = 0 (the intro
+stage, and also 9, `$0C`, `$0D`), `$1F5D` bit 7, when Zero is already out
+(`$0A8E` bit 1 -> X's portrait instead), `$1FE1` bit 0 (Zero used this stage) or
+`$1FB2` bit 6 (Zero gone). The states below come from the intro stage with
+`$1FAE` poked to 1 during the menu and back to 0 once Zero is in:
+`dump --rom-any X3 --load states/x3-intro-play.state --frames 600 --tap 10,150
+--poke 7E1FAE=01@1-200,7E1FAE=00@390 --p1tap 0010@80 --save
+600=states/x3-zero-stand.state`.
+
+States (git-ignored `states/`): `x3-intro-text` (power-on + 3000 frames, Start
+taps 600-1400), `x3-intro-play` (X playable), `x3-zero-stand` (Zero in, frame 0
+page in VRAM), `x3-zero-at-wall` (Zero at the wall at x 3545), and one per
+action, each saved on the frame named: `-walk`, `-jump`, `-fall`, `-dash`,
+`-shoot`, `-charged` (act `$4A`), `-saber` (act `$4C`, frame 88, the arc),
+`-wallslide`, `-wallkick`, `-hurt`, `-death`. Scripts: X3 default pad, Y shoot,
+B jump, A dash; hold Y ~150 frames for the charge.
+
+**Player block** `$7E:09D8` (X's and Zero's; X1's is `$0BA8`): `+02` action,
+`+03` sub-state, `+05` x, `+08` y, `+11` attr (bit 6 = facing right), `+16` set,
+`+17` frame, `+18` VRAM slot (0), `+27` HP (`$09FF`), `+31` DMA list table
+(bank `$85`), `+6B` invulnerability timer (`$0A43`). `$0A8E` bit 1 = Zero is
+the current character.
+
+**Sets.** Zero playing: set `$4A` (117 layouts, table `$0D:99A4`), lists
+`+31 = $85:D6A8`. Death switches to set `$4B` (21 layouts, `$0D:9B03`), lists
+`$85:DB47`, frame 18. The `$8D:8000` pointers are `$0D:xxxx`, layouts
+`$0F:xxxx` (mirrors of `$8D`/`$8F`). Layout: count, then `attr, x, y, tile`
+per sprite (attr bit 5 = 16x16, 6 = hflip, 7 = vflip; palette bits are 0, the
+palette comes from `+11`). Checked against OAM in the stand state: tile `$0B`
+at (-22,16), flipped `x' = -x - 8`, origin (96,167).
+
+**Tiles: raw, streamed per frame, up to 48.** List table: a word offset per
+frame (16-bit, wraps inside bank `$85`: set `$4B` frames 18-20 point back into
+`$D9xx`), then 6-byte entries `len/16, src24, dest16` (bit 15 of dest = last),
+e.g. frame 0: `1A 008031 0060`, `18 A08131 00E1` = 13 tiles `$B1:8000 -> $6000`,
+12 tiles `$B1:81A0 -> $6100`. Offset pointing at a lone `00` = keep the page.
+Sources are uncompressed 4bpp in banks `$B0`/`$B1` (the `$31`/`$30` bank bytes are
+mirrors). Destination `$6000 + 16 * slot`, OBSEL base `$6000`, `+18 = 0`.
+decode(ROM) == VRAM `$6000-$62FF` for the stand state (test
+`zero_data_extract_x3`; `MMX_X3_ROM`, `MMX_X3_ZERO_STATE` or
+`states/x3-zero-stand.state`). **Many frames load a third row** (`$6200`, tiles
+`$20-$2F`): dash, charged shot, saber, beam-in; frames 65-66 use 48 tiles, and
+layouts reach tile `$2C`. So `ZeroSet` pages are 48 slots for X3 (`page()`
+returns 1.5 KiB) against 32 for X1, and **`p2tiles`' 32-tile shadow page is too
+small for X3 Zero**: it needs a third 16-tile row (1.5 KiB, `tile & 0x3F`
+indexing), or the 3-row frames need splitting. 1918 distinct tiles over both
+sets.
+
+**Palette** `$8C:B580` (in CGRAM as sprite palette 1 while Zero plays):
+`2188 1284 728C 5100 639C 5294 318C 009C 0094 008C 2194 429C 2388 031C 0194 1084`.
+The charge flash swaps in a purple palette.
+
+**Frames** (set `$4A` 0-116, then set `$4B` as 117-137), from `+02/+17` logs:
+
+| # | name | # | name |
+|---|---|---|---|
+| 0-2 | stand, blink 1-2 (act `$00`) | 54-59 | dash start, dash 1, 3, end, dash shoot 1, 3 (`$14`, end `$20`) |
+| 3-12 | walk 1-10 (`$04`) | 60-61 | beam, beam land (`$22`) |
+| 13-22 | walk shoot 1-10 | 62-66 | materialize 1-5 (played 66 -> 62) |
+| 23-25 | jump 1-3 (`$06`) | 67-74 | ladder (unverified) |
+| 26-27, 101 | fall 1-3 (`$08`), 100 = apex | 75, 76, 80 | blank |
+| 28-29 | land 1-2 (`$0A`) | 77-79 | hurt alt (tiles of 51-53, unseen) |
+| 30-31 | stand weak (unverified) | 81 | ready (`$02`) |
+| 32-38, 102-103 | jump/fall/land shoot | 82-85 | charged shot (`$4A`) |
+| 39-41 | wall slide 1-3 (`$12`) | 86-90 | saber 1-5 (`$4C`), 88 = arc |
+| 42-43 | wall kick 1-2 (`$10`) | 91-94 | air charged shot (`$4E`) |
+| 44-48 | wall slide/kick shoot | 95-98 | air saber (`$50`) |
+| 49-50 | stand shoot | 99 | stand alt |
+| 51-53 | hurt 1-2, hurt flash (`$0E`) | 104-111 | dash 2, 4-6, dash shoot 2, 4-6 |
+| | | 112-116 | alt charged/saber poses (unverified; 113, 115 are fragments) |
+| 117-134 | set `$4B` event poses (stand, point, leap, kneel) | 135-137 | death (`$0C`, 135), death 2, pieces (fragment) |
+
+Dash loop: 54, 55, 104, 56, 105, 106, 107, 56...; with the buster held the
+shoot twins (58, 108, 59, 109-111) run instead.
+
+**The saber.** In X3 Zero has no plain slash: holding Y charges; release fires
+the big green buster shot (act `$4A`, frames 82-85, the projectile is its own
+object), and Y again swings the saber (act `$4C` 86-90 on the ground, `$50`
+95-98 in the air). The blade is part of the body frames (84, 88, 93, 97: a
+blue-white arc). No separate saber object appears for Zero. `$8F:DBA5` (the
+Zero Project's "Z-Saber projectile", lists `$85:E672`) is X's beam-saber wave
+after he receives Zero's saber, not Zero's; the fan sheet's green arcs are
+not what the USA ROM draws for Zero. Not extracted.
+
+**X1 -> X3 mapping.** X1's set 0 uses the same frame numbers as Zero's set
+`$4A` (measured on X1 from `hw-c` with jumps and shots, and the beam-in from
+`gameover`): walk 3-12 (shooting 13-22), jump 23-25 (32-34), fall 25-27
+(34-36), land 28-29 (37-38), wall slide 39-41 (44-46), wall kick 42-43 (47-48),
+stand shoot 49-50, hurt 51-53, beam-in 60, 61, 66..62. (The X1 section had
+walk/jump and their shooting twins swapped; corrected there.)
+`zero_x3_frame_for(action, frame)`: death `$0C` -> 135; X frames
+0-74 and 81 map to themselves; others fall back to the action's base pose
+(stand 0, walk 3, jump 23, fall 26, land 28, hurt 51, wall kick 42, wall slide
+41, dash 55, beam 60), else `None`.
+
+**Unfinished.** The shadow page is 32 tiles (above); ladder/weak/alt frames
+are named from the sheet only; X1 frames 75-80 and 82-84 have no measured
+meaning, so they fall back.

@@ -32,8 +32,8 @@ pub struct Sprite {
     pub y: i8,
     /// 16x16 when set, else 8x8.
     pub big: bool,
-    /// Page slot 0..31 (VRAM tile `$40 + tile`); a big sprite covers
-    /// `tile, tile+1, tile+16, tile+17`.
+    /// Page slot: 0..31 in X1 (VRAM tile `$40 + tile`), 0..47 in X3 (VRAM
+    /// tile `tile`); a big sprite covers `tile, tile+1, tile+16, tile+17`.
     pub tile: u8,
     pub hflip: bool,
     pub vflip: bool,
@@ -44,7 +44,7 @@ pub struct Frame {
     pub name: &'static str,
     /// OAM order: the first sprite is drawn on top.
     pub sprites: Vec<Sprite>,
-    /// 32 page slots -> index into `ZeroSet::tiles` (32 B each), [`NO_TILE`]
+    /// Page slots (32 in X1, 48 in X3) -> index into `ZeroSet::tiles` (32 B each), [`NO_TILE`]
     /// where the frame's page leaves the slot stale.
     pub tiles_used: Vec<u16>,
 }
@@ -59,10 +59,10 @@ pub struct ZeroSet {
 }
 
 impl ZeroSet {
-    /// The 1 KiB VRAM page (tiles `$40-$5F`) the game streams for `frame`;
-    /// stale slots are zero.
+    /// The VRAM page the game streams for `frame`, 32 B per slot: 1 KiB for
+    /// X1 (tiles `$40-$5F`), 1.5 KiB for X3 (tiles `$00-$2F`); stale slots are zero.
     pub fn page(&self, frame: usize) -> Vec<u8> {
-        let mut p = vec![0u8; 1024];
+        let mut p = vec![0u8; self.frames[frame].tiles_used.len() * 32];
         for (slot, &t) in self.frames[frame].tiles_used.iter().enumerate() {
             if t != NO_TILE {
                 let s = usize::from(t) * 32;
@@ -215,8 +215,8 @@ pub fn extract_x1(rom: &[u8]) -> Result<ZeroSet, String> {
 /// X action (`+$02`) and frame (`+$17 & $7F`) -> the X1 Zero frame to draw,
 /// `None` where X1's Zero has no such pose: the caller draws X's frame in
 /// Zero's colours (`zero::palette_for`). X frames measured on Octopus/Highway:
-/// stand 0-2, stand shoot 49-50, walk 13-22 (shooting 3-12), jump 32-34
-/// (shooting 23-25), fall 35-36 (26-27), land 37-38, hurt 51-53, ready 81.
+/// stand 0-2, stand shoot 49-50, walk 3-12 (shooting 13-22), jump 23-25
+/// (shooting 32-34), fall 25-27 (34-36), land 28-29 (37-38), hurt 51-53, ready 81.
 /// Fallback (None): walk and walk-shoot, wall kick `$10`, wall slide `$12`,
 /// and every action not listed.
 pub fn zero_frame_for(x_action: u8, x_frame: u8) -> Option<usize> {
@@ -233,6 +233,189 @@ pub fn zero_frame_for(x_action: u8, x_frame: u8) -> Option<usize> {
         (0x22, _) => Some(17),        // beam-in: the beam
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// X3: playable Zero. See docs/zero.md, "X3 Zero data".
+
+/// Header title and CRC32 of Mega Man X3 (USA), headerless 2 MiB.
+pub const X3_TITLE: &[u8] = b"MEGAMAN X3";
+pub const X3_CRC32: u32 = 0xFA0F_E671;
+/// Zero's sprite set (object `+$16`), 117 layouts through `$8D:8000`.
+pub const X3_SET: u8 = 0x4A;
+/// Zero's per-frame DMA lists for set `$4A` (object `+$31`, bank `$85`).
+pub const X3_DMA: u32 = 0x85D6A8;
+/// Set `$4B` (21 layouts): Zero's death and event poses, lists `$85:DB47`.
+pub const X3_SET2: u8 = 0x4B;
+pub const X3_DMA2: u32 = 0x85DB47;
+/// Zero's in-game palette (sprite palette 1 while playing him).
+pub const X3_PALETTE: u32 = 0x8CB580;
+/// X3 streams up to three 16-tile rows (VRAM `$6000-$62FF`, tiles `$00-$2F`).
+pub const X3_PAGE_TILES: usize = 48;
+
+/// Set `$4A` frames 0..116, then set `$4B` frames 0..20 (index 117..137).
+/// Named from play (`+$02` action / `+$17` frame logs, docs/zero.md) and the
+/// rendered sheet (`cargo xtask zerosheet --x3`).
+pub const X3_NAMES: [&str; 138] = [
+    "stand", "stand blink 1", "stand blink 2", // 0-2
+    "walk 1", "walk 2", "walk 3", "walk 4", "walk 5", "walk 6", "walk 7", "walk 8", "walk 9", "walk 10", // 3-12
+    "walk shoot 1", "walk shoot 2", "walk shoot 3", "walk shoot 4", "walk shoot 5", // 13-17
+    "walk shoot 6", "walk shoot 7", "walk shoot 8", "walk shoot 9", "walk shoot 10", // 18-22
+    "jump 1", "jump 2", "jump 3", "fall 1", "fall 2", "land 1", "land 2", // 23-29
+    "stand weak 1", "stand weak 2", // 30-31: unverified (not seen in play)
+    "jump shoot 1", "jump shoot 2", "jump shoot 3", "fall shoot 1", "fall shoot 2", // 32-36
+    "land shoot 1", "land shoot 2", // 37-38
+    "wall slide 1", "wall slide 2", "wall slide 3", "wall kick 1", "wall kick 2", // 39-43
+    "wall slide shoot 1", "wall slide shoot 2", "wall slide shoot 3", // 44-46
+    "wall kick shoot 1", "wall kick shoot 2", // 47-48
+    "stand shoot 1", "stand shoot 2", "hurt 1", "hurt 2", "hurt flash", // 49-53
+    "dash start", "dash 1", "dash 3", "dash end", "dash shoot 1", "dash shoot 3", // 54-59
+    "beam", "beam land", // 60-61
+    "materialize 1", "materialize 2", "materialize 3", "materialize 4", "materialize 5", // 62-66
+    "ladder grab", "ladder climb 1", "ladder climb 2", "ladder climb 3", "ladder climb 4", // 67-71: unverified
+    "ladder top 1", "ladder top 2", "ladder shoot", // 72-74: unverified
+    "blank 1", "blank 2", "hurt alt 1", "hurt alt 2", "hurt alt flash", "blank 3", // 75-80
+    "ready", // 81
+    "charged shot 1", "charged shot 2", "charged shot 3", "charged shot 4", // 82-85: act $4A
+    "saber 1", "saber 2", "saber 3", "saber 4", "saber 5", // 86-90: act $4C, 88 = the arc
+    "air charged shot 1", "air charged shot 2", "air charged shot 3", "air charged shot 4", // 91-94: act $4E
+    "air saber 1", "air saber 2", "air saber 3", "air saber 4", // 95-98: act $50
+    "stand alt", // 99
+    "jump apex", "fall 3", "jump shoot apex", "fall shoot 3", // 100-103
+    "dash 2", "dash 4", "dash 5", "dash 6", // 104-107
+    "dash shoot 2", "dash shoot 4", "dash shoot 5", "dash shoot 6", // 108-111
+    "charged shot alt", "saber alt 1", "air charged shot alt", "saber alt 2", "air saber alt", // 112-116: unverified
+    // set $4B
+    "event stand 1", "event stand 2", "event stand 3", "event stand 4", // 117-120
+    "event point 1", "event point 2", "event point 3", // 121-123
+    "event leap 1", "event leap 2", "event leap 3", "event leap 4", "event leap 5", // 124-128
+    "event pose 1", "event pose 2", // 129-130
+    "event kneel 1", "event kneel 2", "event kneel 3", "event kneel 4", // 131-134
+    "death", "death 2", "death pieces", // 135-137: act $0C shows 135 (set $4B frame 18)
+];
+
+/// Page slots loaded by frame `f` of the list table `list`: 6-byte entries
+/// `len/16, src24, dest16` (dest bit 15 = last), dest `$6000 + 16 * slot`
+/// words. Offsets wrap inside bank `$85`. Returns `(slot, rom address)`;
+/// empty = keep the page.
+fn x3_dma(rom: &[u8], list: u32, f: usize) -> Result<Vec<(usize, u32)>, String> {
+    let mut x = (list & 0xFF0000) | (list + u32::from(rw(rom, list + 2 * f as u32)?)) & 0xFFFF;
+    let mut slots = Vec::new();
+    loop {
+        let n = u32::from(rd(rom, x)?) * 16;
+        if n == 0 {
+            break;
+        }
+        let src = rl(rom, x + 1)?;
+        let dest = rw(rom, x + 4)?;
+        let first = usize::from((dest & 0x7FFF).checked_sub(0x6000).ok_or("X3 DMA below $6000")? / 16);
+        for k in 0..n / 32 {
+            slots.push((first + k as usize, src + 32 * k));
+        }
+        if dest & 0x8000 != 0 {
+            break;
+        }
+        x += 6;
+    }
+    Ok(slots)
+}
+
+/// X3 layouts: count, then 4 B per sprite `attr, x, y, tile` (X1 is
+/// `x, y, tile, attr`); attr bits as X1. Pointers are `$0D:xxxx`/`$0F:xxxx`
+/// (mirrors of `$8D`/`$8F`).
+fn x3_layout(rom: &[u8], set: u8, f: usize) -> Result<Vec<Sprite>, String> {
+    let table = rl(rom, SET_TABLE + 3 * u32::from(set))?;
+    let lp = rl(rom, table + 3 * f as u32)?;
+    (0..u32::from(rd(rom, lp)?))
+        .map(|i| {
+            let e = lp + 1 + 4 * i;
+            let a = rd(rom, e)?;
+            Ok(Sprite {
+                x: rd(rom, e + 1)? as i8,
+                y: rd(rom, e + 2)? as i8,
+                big: a & 0x20 != 0,
+                tile: rd(rom, e + 3)?,
+                hflip: a & 0x40 != 0,
+                vflip: a & 0x80 != 0,
+            })
+        })
+        .collect()
+}
+
+/// Playable Zero from Mega Man X3 (USA): set `$4A` (117 frames) and set
+/// `$4B` (21), tiles read raw from ROM (banks `$B0/$B1`, deduplicated),
+/// 48-slot pages (`X3_PAGE_TILES`).
+pub fn extract_x3(rom: &[u8]) -> Result<ZeroSet, String> {
+    if rom.get(0x7FC0..0x7FCA) != Some(X3_TITLE) {
+        return Err("not Mega Man X3 (header title at $7FC0)".into());
+    }
+    let crc = crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC).checksum(rom);
+    if crc != X3_CRC32 {
+        return Err(format!("Mega Man X3 CRC32 {crc:08X}, want {X3_CRC32:08X} (USA)"));
+    }
+    let mut tiles = Vec::new();
+    let mut index = std::collections::HashMap::new();
+    let mut frames = Vec::new();
+    for (set, list, names) in [(X3_SET, X3_DMA, &X3_NAMES[..117]), (X3_SET2, X3_DMA2, &X3_NAMES[117..])] {
+        let mut page = vec![NO_TILE; X3_PAGE_TILES];
+        for (f, &name) in names.iter().enumerate() {
+            let slots = x3_dma(rom, list, f)?;
+            if !slots.is_empty() {
+                page = vec![NO_TILE; X3_PAGE_TILES];
+            }
+            for (s, a) in slots {
+                let t = match index.get(&a) {
+                    Some(&t) => t,
+                    None => {
+                        for k in 0..32 {
+                            tiles.push(rd(rom, a + k)?);
+                        }
+                        let t = (tiles.len() / 32 - 1) as u16;
+                        index.insert(a, t);
+                        t
+                    }
+                };
+                *page.get_mut(s).ok_or(format!("set {set:02X} frame {f}: DMA past the page"))? = t;
+            }
+            let sprites = x3_layout(rom, set, f)?;
+            if let Some(s) = sprites.iter().find(|s| usize::from(s.tile) + if s.big { 17 } else { 0 } >= X3_PAGE_TILES) {
+                return Err(format!("set {set:02X} frame {f}: tile {:02X} past the page", s.tile));
+            }
+            frames.push(Frame { name, sprites, tiles_used: page.clone() });
+        }
+    }
+    let palette = std::array::from_fn(|i| rw(rom, X3_PALETTE + 2 * i as u32).unwrap_or(0));
+    Ok(ZeroSet { tiles, palette, frames })
+}
+
+/// X1 action (`+$02`) and frame (`+$17 & $7F`) -> X3 Zero frame
+/// ([`X3_NAMES`] index). X1's set 0 and Zero's set `$4A` share the frame
+/// numbering (measured on both ROMs): stand 0-2, walk 3-12 (shooting 13-22),
+/// jump 23-25 (32-34), fall 25-27 (34-36), land 28-29 (37-38), wall slide
+/// 39-41 (44-46), wall kick 42-43 (47-48), stand shoot 49-50, hurt 51-53,
+/// beam-in 60-66, ready 81. So frames 0-74 and 81 map to themselves; death
+/// is set `$4B` frame 18; an unknown frame falls back to the action's base pose.
+pub fn zero_x3_frame_for(x_action: u8, x_frame: u8) -> Option<usize> {
+    let f = usize::from(x_frame & 0x7F);
+    if x_action == 0x0C {
+        return Some(135);
+    }
+    if f <= 74 || f == 81 {
+        return Some(f);
+    }
+    Some(match x_action {
+        0x00 | 0x02 => 0,
+        0x04 => 3,
+        0x06 => 23,
+        0x08 => 26,
+        0x0A => 28,
+        0x0E => 51,
+        0x10 => 42,
+        0x12 => 41,
+        0x14 => 55,
+        0x22 => 60,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -300,5 +483,63 @@ mod tests {
         let vram: Vec<u8> = g.vram()[0x6400..0x6600].iter().flat_map(|w| w.to_le_bytes()).collect();
         let stand = X1_NAMES.iter().position(|&n| n == "stand").unwrap();
         assert_eq!(z.page(stand), vram);
+    }
+
+    #[test]
+    fn zero_data_x3_mapping() {
+        let name = |a, f| zero_x3_frame_for(a, f).map(|i| X3_NAMES[i]);
+        assert_eq!(name(0x00, 0), Some("stand"));
+        assert_eq!(name(0x04, 5), Some("walk 3"));
+        assert_eq!(name(0x04, 15), Some("walk shoot 3"));
+        assert_eq!(name(0x12, 41), Some("wall slide 3"));
+        assert_eq!(name(0x10, 42), Some("wall kick 1"));
+        assert_eq!(name(0x0C, 0), Some("death"));
+        assert_eq!(name(0x22, 60), Some("beam"));
+        for a in (0..0x52).step_by(2) {
+            for f in 0..0x80 {
+                assert!(zero_x3_frame_for(a, f).is_none_or(|i| i < X3_NAMES.len()));
+            }
+        }
+    }
+
+    #[test]
+    fn zero_data_extract_x3() {
+        let Some(path) = std::env::var_os("MMX_X3_ROM") else {
+            eprintln!("MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let mut g = crate::Game::from_rom_any(std::fs::read(path).expect("read MMX_X3_ROM")).expect("load X3");
+        let z = extract_x3(g.rom_bytes()).unwrap();
+        assert_eq!(z.frames.len(), 117 + 21);
+        assert_eq!(z.palette[0], 0x2188);
+        // Every sprite's tiles are on its page, except three fragment frames
+        // whose lists load fewer tiles than the layout names (drawn as holes).
+        let partial: Vec<usize> = (0..z.frames.len())
+            .filter(|&i| {
+                let f = &z.frames[i];
+                !f.sprites.iter().all(|s| {
+                    let n = if s.big { [0, 1, 16, 17].as_slice() } else { &[0] };
+                    n.iter().all(|d| f.tiles_used[usize::from(s.tile) + d] != NO_TILE)
+                })
+            })
+            .collect();
+        assert_eq!(partial, [113, 115, 137]);
+        // decode(ROM) == VRAM $6000.. with Zero standing (frame 0's page).
+        // State: docs/zero.md, "X3 Zero data".
+        let state = std::env::var("MMX_X3_ZERO_STATE")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/x3-zero-stand.state").into());
+        let Ok(s) = std::fs::read(&state) else {
+            eprintln!("{state} missing; VRAM check skipped");
+            return;
+        };
+        g.load_state(&s).unwrap();
+        let vram: Vec<u8> = g.vram()[0x6000..0x6300].iter().flat_map(|w| w.to_le_bytes()).collect();
+        let (page, used) = (z.page(0), &z.frames[0].tiles_used);
+        for (slot, &t) in used.iter().enumerate() {
+            if t != NO_TILE {
+                assert_eq!(page[slot * 32..][..32], vram[slot * 32..][..32], "slot {slot:02X}");
+            }
+        }
+        assert!(used.iter().filter(|&&t| t != NO_TILE).count() >= 25);
     }
 }
