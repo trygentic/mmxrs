@@ -19,6 +19,8 @@ const GOODBYE_FLUSH_MS: u64 = 200;
 pub struct Net {
     pub play: NetPlay<NetTransport>,
     reported: Option<ConnectStage>,
+    reported_end: bool,
+    said_running: bool,
     epoch: std::time::Instant,
 }
 
@@ -41,6 +43,8 @@ pub fn connect(
     Ok(Net {
         play: NetPlay::new(cfg, rom.to_vec(), t, room)?,
         reported: None,
+        reported_end: false,
+        said_running: false,
         epoch: std::time::Instant::now(),
     })
 }
@@ -69,6 +73,14 @@ impl Net {
             if stage != ConnectStage::Ended {
                 eprintln!("netplay: {}", stage.describe());
             }
+        }
+        if self.play.live() && self.reported != Some(ConnectStage::Ended) && !self.said_running {
+            self.said_running = true;
+            eprintln!("netplay: session running, restarted from power-on");
+        }
+        if !self.reported_end && self.play.session.state() == mmx_net::RollbackState::Closed {
+            self.reported_end = true;
+            eprintln!("netplay: {}", self.play.status());
         }
         n
     }
