@@ -20,7 +20,7 @@ const USAGE: &str = "usage: cargo xtask <command>
   rominfo
   zerosheet [--x3 PATH [--wave|--slash|--sfx]] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data; --wave: the saber wave, --slash: the slash arc) -> DIR/NN_name.png + DIR/sheet.png; --sfx: his X3 sounds -> DIR/swing.wav
   netsim [--mode rollback|lockstep] [--rtt MS] [--jitter MS] [--loss PCT] [--delay N] [--prediction N] [--frames N]
-       [--load STATE] [--x3 PATH] [--zero] [--timing ntsc|pal] [--seed N] [--report F.json] [--record PREFIX] [script]
+       [--load STATE] [--x3 PATH] [--zero] [--timing ntsc|pal] [--seed N] [--report F.json] [--record PREFIX] [--no-smoothing] [script]
        two session games over a simulated link (virtual clock); host plays pad 1 of the script, guest pad 2;
        exit 1 on desync or a mismatch with the plain run. --record writes PREFIX-host.log / PREFIX-guest.log
   netreplay LOG [LOG2] [--load STATE] [--x3 PATH] [--rom PATH]   a session log (mmxrs --net-record) against a
@@ -618,6 +618,7 @@ fn netsim(args: &[String]) -> i32 {
         .map_or(mmx_core::Timing::Auto, |t| mmx_core::Timing::parse(&t).unwrap_or_else(|| die("--timing: auto, ntsc or pal")));
     o.x3 = x3_set(args);
     o.zero = args.iter().any(|a| a == "--zero");
+    o.smoothing = !args.iter().any(|a| a == "--no-smoothing");
     o.load = flag(args, "--load").map(|p| (p.to_string(), std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")))));
     let record = flag(args, "--record");
     o.record = record.is_some();

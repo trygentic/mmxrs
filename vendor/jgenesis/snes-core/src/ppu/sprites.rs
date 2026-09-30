@@ -167,13 +167,20 @@ impl Ppu {
                 TileSize::Large => (large_width, large_height),
             };
 
+            // mmxrs patch: display-only sprite offset
+            let Some((x, y)) =
+                self.offset_sprite(oam_idx, u16::from_le_bytes([x_lsb, u8::from(x_msb)]), y)
+            else {
+                oam_idx = (oam_idx + 1) & OAM_IDX_MASK;
+                continue;
+            };
+
             if !line_overlaps_sprite(y, sprite_height, scanline) {
                 oam_idx = (oam_idx + 1) & OAM_IDX_MASK;
                 continue;
             }
 
             // Only sprites with pixels in the range [0, 256) are scanned into the sprite buffer
-            let x = u16::from_le_bytes([x_lsb, u8::from(x_msb)]);
             if x >= 256 && x + sprite_width <= 512 {
                 oam_idx = (oam_idx + 1) & OAM_IDX_MASK;
                 continue;
@@ -329,7 +336,10 @@ impl Ppu {
             let x_msb = oam_high_bits.bit(0);
             let size = if oam_high_bits.bit(1) { TileSize::Large } else { TileSize::Small };
 
-            let x = u16::from_le_bytes([x_lsb, x_msb.into()]);
+            // mmxrs patch: display-only sprite offset (scanned sprites always have one)
+            let (x, y) = self
+                .offset_sprite(oam_idx, u16::from_le_bytes([x_lsb, x_msb.into()]), y)
+                .unwrap_or((u16::from_le_bytes([x_lsb, x_msb.into()]), y));
 
             let (sprite_width, sprite_height) = match size {
                 TileSize::Small => (small_width, small_height),
@@ -455,6 +465,19 @@ impl Ppu {
         } else {
             SpriteState::TileFetch { oam_buffer_idx, tile_idx }
         }
+    }
+
+    // mmxrs patch: a slot in `sprite_offset.slots` moves by (dx, dy); `None`
+    // when that puts it off screen (Y >= 224 or above -64, X outside
+    // -64..256), so it is not scanned rather than wrapping to the far edge.
+    fn offset_sprite(&self, oam_idx: u8, x: u16, y: u8) -> Option<(u16, u8)> {
+        let o = self.sprite_offset;
+        if (o.slots >> oam_idx) & 1 == 0 || (o.dx == 0 && o.dy == 0) {
+            return Some((x, y));
+        }
+        let sx = if x >= 256 { x as i16 - 512 } else { x as i16 } + o.dx;
+        let sy = if y >= 224 { i16::from(y) - 256 } else { i16::from(y) } + o.dy;
+        ((-64..256).contains(&sx) && (-64..224).contains(&sy)).then_some((sx as u16 & 0x1FF, sy as u8))
     }
 
     pub(super) fn render_sprite_tiles(&mut self) {

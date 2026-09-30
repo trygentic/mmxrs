@@ -7,7 +7,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::rc::Rc;
 
-use mmx_core::netgame::{net_checksum, session_game, trapset_id, Mode, NetConfig, NetPlay, Simulated};
+use mmx_core::netgame::{
+    net_checksum, player_grounded, remote_player, screen_pos, session_game, trapset_id, Mode, NetConfig, NetPlay, Simulated,
+    SMOOTH_TELEPORT,
+};
 use mmx_core::netlog::{self, Event, Log, Recorder};
 use mmx_core::zero_data::ZeroSet;
 use mmx_core::{ram, Game, Pads, Timing};
@@ -46,6 +49,8 @@ pub struct SimOpts {
     /// Test hook: from this frame on the guest's WRAM `$1F00` is overwritten
     /// every tick (a forced desync).
     pub corrupt_guest_at: Option<u32>,
+    /// Rollback smoothing of the remote player (`NetPlay::smoothing`).
+    pub smoothing: bool,
 }
 
 impl SimOpts {
@@ -65,6 +70,7 @@ impl SimOpts {
             load: None,
             record: false,
             corrupt_guest_at: None,
+            smoothing: true,
         }
     }
 }
@@ -92,11 +98,43 @@ pub struct PeerReport {
     pub remote_err_max: u32,
     pub remote_err_mean: f64,
     pub remote_err_over4_pct: f64,
+    /// What the eye sees of the remote player on each presented frame, as
+    /// drawn (with the smoothing offset) and raw (without it).
+    pub drawn: Motion,
+    pub raw: Motion,
     pub audio_queue_max_ms: u64,
     pub audio_dropped_ms: u64,
     pub audio_starved_ms: u64,
     pub log: Option<String>,
 }
+
+/// Presented frames of the remote player, against the settled run.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Motion {
+    /// Presented frames compared (remote player drawn in both runs).
+    pub frames: u32,
+    /// Correction jerk: `|drawn delta - settled delta|` between consecutive
+    /// presented frames (max of |dx|, |dy|), teleports left out.
+    pub jerk_max: u32,
+    /// Frames with a jerk over [`SNAP_PX`].
+    pub snaps: u32,
+    /// Frame pairs where either run jumped over `SMOOTH_TELEPORT` px (warp,
+    /// respawn): drawn at once on purpose.
+    pub teleports: u32,
+    /// Drawn vs settled position, px (max of |dx|, |dy|).
+    pub err_max: u32,
+    pub err_mean: f64,
+    /// Frames where the settled player stands on a floor and is drawn more
+    /// than [`CLIP_PX`] px below it.
+    pub clips: u32,
+    /// Times the settled remote player left play (down, hidden).
+    pub gone: u32,
+}
+
+/// A jerk over this many px is a visible snap.
+pub const SNAP_PX: u32 = 6;
+/// Drawn feet this far below a settled floor are in it.
+pub const CLIP_PX: i32 = 2;
 
 #[derive(Debug, Default, Clone)]
 pub struct SimReport {
@@ -119,6 +157,7 @@ pub struct SimReport {
     pub packets_dropped: u64,
     pub peers: [PeerReport; 2],
     pub recommendation: String,
+    pub smoothing: bool,
 }
 
 impl SimReport {
@@ -127,8 +166,12 @@ impl SimReport {
     }
 }
 
-/// A frame's last simulation: remote player's screen position, pads, state hash.
-type Settled = ((i32, i32), (u16, u16), u64);
+/// A frame's last simulation: remote player's screen position, pads, state
+/// hash, and the remote player drawn (screen position) and grounded.
+type Pos = (i32, i32);
+type Settled = (Pos, (u16, u16), u64, Option<Pos>, bool);
+/// A presented picture: the remote player's raw position and the offset.
+type Presented = (Option<Pos>, (i16, i16));
 
 /// Per-peer trace from `NetPlay::observe`.
 #[derive(Default)]
@@ -136,6 +179,46 @@ struct Track {
     /// Remote player's screen position when the frame was first simulated.
     shown: Vec<Option<(i32, i32)>>,
     settled: Vec<Option<Settled>>,
+    /// Frame `f`'s picture (the step of `f + 1` draws frame `f`'s OAM): the
+    /// remote player's raw screen position and the smoothing offset.
+    presented: Vec<Option<Presented>>,
+}
+
+/// [`Motion`] of the presented frames, `smoothed`: with their offsets.
+fn motion(t: &Track, n: usize, smoothed: bool) -> Motion {
+    let mut m = Motion::default();
+    let mut err_sum = 0u64;
+    let cheb = |a: (i32, i32), b: (i32, i32)| (a.0 - b.0).unsigned_abs().max((a.1 - b.1).unsigned_abs());
+    let len = |a: (i32, i32), b: (i32, i32)| f64::from(a.0 - b.0).hypot(f64::from(a.1 - b.1)) as f32;
+    let at = |f: usize| -> Option<(Pos, Pos, Pos, bool)> {
+        let (raw, off) = t.presented.get(f).copied().flatten()?;
+        let (.., set, ground) = t.settled.get(f).copied().flatten()?;
+        let (raw, set) = (raw?, set?);
+        let k = i32::from(smoothed);
+        Some(((raw.0 + k * i32::from(off.0), raw.1 + k * i32::from(off.1)), raw, set, ground))
+    };
+    let drawn = |f: usize| t.settled.get(f).copied().flatten().and_then(|s| s.3);
+    for f in 0..n {
+        m.gone += u32::from(f > 0 && drawn(f - 1).is_some() && drawn(f).is_none());
+        let Some((d, r, s, ground)) = at(f) else { continue };
+        m.frames += 1;
+        let e = cheb(d, s);
+        m.err_max = m.err_max.max(e);
+        err_sum += u64::from(e);
+        if ground && d.1 - s.1 > CLIP_PX {
+            m.clips += 1;
+        }
+        let Some((d0, r0, s0, _)) = f.checked_sub(1).and_then(at) else { continue };
+        if len(s, s0) > SMOOTH_TELEPORT || len(r, r0) > SMOOTH_TELEPORT {
+            m.teleports += 1;
+            continue;
+        }
+        let jerk = cheb((d.0 - d0.0, d.1 - d0.1), (s.0 - s0.0, s.1 - s0.1));
+        m.jerk_max = m.jerk_max.max(jerk);
+        m.snaps += u32::from(jerk > SNAP_PX);
+    }
+    m.err_mean = err_sum as f64 / f64::from(m.frames.max(1));
+    m
 }
 
 fn word(w: &[u8], a: usize) -> i32 {
@@ -192,6 +275,7 @@ pub fn netsim(rom: &[u8], o: &SimOpts, script: &dyn Fn(usize, Pads) -> Pads) -> 
         }
         let mut p = NetPlay::new(cfg, rom.to_vec(), t, "netsim")?;
         p.audio_rate = Some(hz);
+        p.smoothing = o.smoothing;
         let track = Rc::new(RefCell::new(Track::default()));
         let tr = Rc::clone(&track);
         p.observe = Some(Box::new(move |g: &Game, s: Simulated| {
@@ -200,12 +284,17 @@ pub fn netsim(rom: &[u8], o: &SimOpts, script: &dyn Fn(usize, Pads) -> Pads) -> 
             if t.settled.len() <= f {
                 t.settled.resize(f + 64, None);
                 t.shown.resize(f + 64, None);
+                t.presented.resize(f + 64, None);
             }
             let pos = remote_pos(g, host);
             if !s.replay {
                 t.shown[f] = Some(pos);
+                if let Some(prev) = f.checked_sub(1) {
+                    t.presented[prev] = Some((s.shown, s.offset));
+                }
             }
-            t.settled[f] = Some((pos, (s.pad1, s.pad2), state_hash(g)));
+            let remote = remote_player(host);
+            t.settled[f] = Some((pos, (s.pad1, s.pad2), state_hash(g), screen_pos(g, remote), player_grounded(g, remote)));
         }));
         if o.record {
             let mut rec = Recorder::new();
@@ -294,6 +383,7 @@ pub fn netsim(rom: &[u8], o: &SimOpts, script: &dyn Fn(usize, Pads) -> Pads) -> 
         frames: o.frames,
         virtual_secs: ms as f64 / 1000.0,
         packets_dropped: link.dropped(),
+        smoothing: o.smoothing,
         ..SimReport::default()
     };
     for (i, net) in nets.iter_mut().enumerate() {
@@ -320,6 +410,8 @@ pub fn netsim(rom: &[u8], o: &SimOpts, script: &dyn Fn(usize, Pads) -> Pads) -> 
             remote_err_max: errs.iter().copied().max().unwrap_or(0),
             remote_err_mean: errs.iter().map(|&e| f64::from(e)).sum::<f64>() / errs.len().max(1) as f64,
             remote_err_over4_pct: 100.0 * errs.iter().filter(|&&e| e > 4).count() as f64 / errs.len().max(1) as f64,
+            drawn: motion(&t, n, true),
+            raw: motion(&t, n, false),
             audio_queue_max_ms: ms_of(dev.max),
             audio_dropped_ms: ms_of(dev.dropped),
             audio_starved_ms: ms_of(dev.starved),
@@ -356,7 +448,7 @@ pub fn netsim(rom: &[u8], o: &SimOpts, script: &dyn Fn(usize, Pads) -> Pads) -> 
     let n = nets.iter().map(|n| n.settled_frames()).min().unwrap_or(0).min(o.frames);
     let mut plain = sim_game(rom, o.timing, x3, o.zero, load)?;
     for f in 0..n as usize {
-        let (Some((_, pads, hh)), Some((_, gpads, gh))) = (ht.settled.get(f).copied().flatten(), gt.settled.get(f).copied().flatten()) else {
+        let (Some((_, pads, hh, ..)), Some((_, gpads, gh, ..))) = (ht.settled.get(f).copied().flatten(), gt.settled.get(f).copied().flatten()) else {
             r.plain_mismatch = Some((f as u32, "missing frame"));
             break;
         };
@@ -409,8 +501,9 @@ pub fn sim_text(r: &SimReport) -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
-        "netsim: {} delay {} prediction {}, RTT {} ms, jitter {} ms, loss {}%, {} frames, {:.1} s virtual, {} packets dropped",
-        r.mode, r.delay, r.prediction, r.rtt_ms, r.jitter_ms, r.loss_pct, r.frames, r.virtual_secs, r.packets_dropped
+        "netsim: {} delay {} prediction {}, RTT {} ms, jitter {} ms, loss {}%, {} frames, {:.1} s virtual, {} packets dropped, smoothing {}",
+        r.mode, r.delay, r.prediction, r.rtt_ms, r.jitter_ms, r.loss_pct, r.frames, r.virtual_secs, r.packets_dropped,
+        if r.smoothing { "on" } else { "off" }
     );
     let desync = match (&r.desync, &r.closed) {
         (Some(d), _) => format!("YES ({d})"),
@@ -436,6 +529,13 @@ pub fn sim_text(r: &SimReport) -> String {
             "       remote player first drawn vs settled: max {} px, mean {:.2} px, {:.1}% of frames > 4 px",
             p.remote_err_max, p.remote_err_mean, p.remote_err_over4_pct
         );
+        for (what, m) in [("drawn", &p.drawn), ("raw  ", &p.raw)] {
+            let _ = writeln!(
+                s,
+                "       remote player {what}: {} snaps > {SNAP_PX} px (jerk max {} px), {} teleports, vs settled max {} px mean {:.2} px, {} clipping, left play {}x",
+                m.snaps, m.jerk_max, m.teleports, m.err_max, m.err_mean, m.clips, m.gone
+            );
+        }
         let _ = writeln!(
             s,
             "       audio: queue max {} ms, dropped {} ms, starved {} ms",
@@ -454,6 +554,12 @@ pub fn sim_text(r: &SimReport) -> String {
 
 pub fn sim_json(r: &SimReport) -> String {
     let q = |v: &str| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));
+    let motion = |m: &Motion| {
+        format!(
+            "{{\"frames\":{},\"snaps\":{},\"jerk_max_px\":{},\"teleports\":{},\"err_max_px\":{},\"err_mean_px\":{:.3},\"clipping\":{},\"left_play\":{}}}",
+            m.frames, m.snaps, m.jerk_max, m.teleports, m.err_max, m.err_mean, m.clips, m.gone
+        )
+    };
     let opt = |v: &Option<String>| v.as_deref().map_or("null".into(), q);
     let peers: Vec<String> = r
         .peers
@@ -462,19 +568,19 @@ pub fn sim_json(r: &SimReport) -> String {
             format!(
                 "{{\"role\":\"{}\",\"frames\":{},\"settled\":{},\"fps\":{:.3},\"game_fps\":{:.3},\"stall_pct\":{:.2},\"checks_ok\":{},\
                  \"rollbacks\":{},\"max_rollback_depth\":{},\"replayed_frames\":{},\"prediction_full\":{},\"wait_recommendations\":{},\
-                 \"remote_err_max_px\":{},\"remote_err_mean_px\":{:.3},\"remote_err_over4_pct\":{:.2},\
+                 \"remote_err_max_px\":{},\"remote_err_mean_px\":{:.3},\"remote_err_over4_pct\":{:.2},\"drawn\":{},\"raw\":{},\
                  \"audio_queue_max_ms\":{},\"audio_dropped_ms\":{},\"audio_starved_ms\":{}}}",
                 p.role, p.frames, p.settled, p.fps, p.game_fps, p.stall_pct, p.checks_ok, p.rollbacks, p.max_rollback_depth,
                 p.replayed_frames, p.saturated, p.wait_recommendations, p.remote_err_max, p.remote_err_mean,
-                p.remote_err_over4_pct, p.audio_queue_max_ms, p.audio_dropped_ms, p.audio_starved_ms
+                p.remote_err_over4_pct, motion(&p.drawn), motion(&p.raw), p.audio_queue_max_ms, p.audio_dropped_ms, p.audio_starved_ms
             )
         })
         .collect();
     format!(
-        "{{\"mode\":\"{}\",\"delay\":{},\"prediction\":{},\"rtt_ms\":{},\"jitter_ms\":{},\"loss_pct\":{},\"frames\":{},\
+        "{{\"mode\":\"{}\",\"smoothing\":{},\"delay\":{},\"prediction\":{},\"rtt_ms\":{},\"jitter_ms\":{},\"loss_pct\":{},\"frames\":{},\
          \"virtual_secs\":{:.3},\"packets_dropped\":{},\"desync\":{},\"desync_frame\":{},\"closed\":{},\"plain_frames\":{},\
          \"plain_mismatch_frame\":{},\"ok\":{},\"peers\":[{}],\"recommendation\":{}}}\n",
-        r.mode, r.delay, r.prediction, r.rtt_ms, r.jitter_ms, r.loss_pct, r.frames, r.virtual_secs, r.packets_dropped,
+        r.mode, r.smoothing, r.delay, r.prediction, r.rtt_ms, r.jitter_ms, r.loss_pct, r.frames, r.virtual_secs, r.packets_dropped,
         opt(&r.desync), r.desync_frame.map_or("null".into(), |f| f.to_string()), opt(&r.closed), r.plain_frames,
         r.plain_mismatch.map_or("null".into(), |(f, _)| f.to_string()), r.ok(), peers.join(","), q(&r.recommendation)
     )
@@ -747,5 +853,100 @@ mod tests {
             assert!(v.contains(&format!("disagreed at frame {n}")) && v.ends_with("matches host"), "{v}");
             assert!(compare(&logs[0], &bad).contains(&format!("checksums differ at frame {n}")));
         }
+    }
+
+    /// The motion metrics on the synthetic ROM (no players on screen): the
+    /// report carries them, and with nothing drawn there is nothing to snap.
+    #[test]
+    fn netsim_motion_metrics_synthetic() {
+        let r = netsim(&synthetic_rom(), &opts(Mode::Rollback), &script).unwrap();
+        let json = sim_json(&r);
+        for k in ["\"smoothing\":true", "\"drawn\":{", "\"raw\":{", "\"snaps\":", "\"clipping\":", "\"teleports\":"] {
+            assert!(json.contains(k), "{k} in {json}");
+        }
+        for p in &r.peers {
+            assert_eq!((p.drawn.snaps, p.raw.snaps, p.drawn.clips), (0, 0, 0), "{}", sim_text(&r));
+        }
+    }
+
+    /// `(rom, state)` from `MMX_ROM` and `states/NAME.state`, or None (skip).
+    fn rom_and_state(name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else {
+            eprintln!("MMX_ROM not set; skipping");
+            return None;
+        };
+        let st = format!("{}/../../states/{name}.state", env!("CARGO_MANIFEST_DIR"));
+        let Ok(state) = std::fs::read(&st) else {
+            eprintln!("{st} missing; skipping");
+            return None;
+        };
+        Some((rom, state))
+    }
+
+    /// 300 ms RTT, 40 ms jitter, 3% loss, delay 3, prediction 20: the
+    /// docs/netplay.md baseline.
+    fn opts_300ms(name: &str, state: Vec<u8>, frames: u32) -> SimOpts {
+        SimOpts { delay: 3, prediction: 20, frames, load: Some((name.into(), state)), ..SimOpts::new(Mode::Rollback) }
+    }
+
+    /// Both peers: no desync, equal to the plain run, no drawn snap over
+    /// `SNAP_PX` (teleports aside), no clipping, and the drawn error at most
+    /// 2.5x the unsmoothed one (the price of gliding: measured 2.0-2.3x, the
+    /// guest's P1 jumping every 40 frames the worst). Returns the report.
+    fn check_smooth(rom: &[u8], o: &SimOpts, script: &dyn Fn(usize, Pads) -> Pads) -> SimReport {
+        let r = netsim(rom, o, script).unwrap();
+        let text = sim_text(&r);
+        eprintln!("{text}");
+        assert!(r.ok(), "{text}");
+        for p in &r.peers {
+            assert!(p.rollbacks > 0, "{text}");
+            assert_eq!(p.drawn.snaps, 0, "{}: {text}", p.role);
+            assert_eq!(p.drawn.clips, 0, "{}: {text}", p.role);
+            assert!(p.drawn.err_mean <= 2.5 * p.raw.err_mean.max(0.5), "{}: {text}", p.role);
+            assert!(p.drawn.err_max <= p.raw.err_max + 4, "{}: {text}", p.role);
+        }
+        r
+    }
+
+    /// The baseline script on hw-spiky (P1 runs right and jumps every 40
+    /// frames, P2 walks right/left for 60 frames each): dozens of snaps
+    /// unsmoothed (the correction jerks the rollbacks make), none drawn.
+    #[test]
+    fn smoothing_removes_snaps_at_300ms() {
+        use mmx_core::{BTN_B, BTN_LEFT, BTN_RIGHT};
+        let Some((rom, state)) = rom_and_state("hw-spiky") else { return };
+        let script = |f: usize, mut p: Pads| {
+            let k = f.saturating_sub(1);
+            p.p1 = BTN_RIGHT | if k % 40 < 12 { BTN_B } else { 0 };
+            p.p2 = if k % 120 < 60 { BTN_RIGHT } else { BTN_LEFT };
+            p
+        };
+        let r = check_smooth(&rom, &opts_300ms("hw-spiky", state, 3600), &script);
+        for p in &r.peers {
+            assert!(p.raw.snaps >= 12, "{}: only {} raw snaps", p.role, p.raw.snaps);
+        }
+    }
+
+    /// hw-e (ledges, a pit): P1 runs right jumping, P2 walks left off the
+    /// ledge into the pit (down, then respawned at P1: out of play and back,
+    /// never smoothed), then follows P1 right, jumping.
+    #[test]
+    fn smoothing_hw_e_pit_and_respawn() {
+        use mmx_core::{BTN_B, BTN_LEFT, BTN_RIGHT};
+        let Some((rom, state)) = rom_and_state("hw-e") else { return };
+        let script = |f: usize, mut p: Pads| {
+            p.p1 = BTN_RIGHT | if f.saturating_sub(1) % 40 < 12 { BTN_B } else { 0 };
+            p.p2 = match f {
+                1..=200 => BTN_LEFT,
+                800.. => {
+                    let k = f - 800;
+                    (if k % 120 < 60 { BTN_RIGHT } else { 0 }) | if k % 60 < 10 { BTN_B } else { 0 }
+                }
+                _ => 0,
+            };
+            p
+        };
+        let r = check_smooth(&rom, &opts_300ms("hw-e", state, 2400), &script);
+        assert!(r.peers[0].drawn.gone >= 1, "P2 never left play (pit)");
     }
 }

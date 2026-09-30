@@ -98,6 +98,8 @@ impl Emu {
     }
 
     pub fn net_drop(&mut self) {
+        // the session's rollback smoothing offset (display only) goes with it
+        self.game.set_display_offset(0, 0, 0);
         if let Some(r) = self.net.take().and_then(|n| n.record) {
             self.net_log = r.snapshot();
         }

@@ -45,6 +45,9 @@ pub struct Game {
     /// X3 Zero art for P2 (static, not in save states; the frame shown is
     /// `coop.zero_frame`). See [`Game::set_zero_set`].
     pub(crate) zero_set: Option<std::sync::Arc<crate::zero_data::ZeroSet>>,
+    /// OAM slots of each player's character in the last OAM build (`[P1,
+    /// P2]`, bit n = slot n; display.rs). Display only, not in save states.
+    pub(crate) oam_slots: [u128; 2],
     emu: SnesEmulator,
     // ponytail: own copy of the ROM for rom_read (~1.5 MiB); jgenesis only
     // exposes cartridge reads through &mut (open-bus side effect).
@@ -219,6 +222,7 @@ impl Game {
             isolated_depth: 0,
             p2_stream: None,
             zero_set: None,
+            oam_slots: [0; 2],
         })
     }
 
@@ -452,6 +456,17 @@ impl Game {
         let t = self.emu.p2_tiles();
         let on = |p: u8, bits: u128| if page == p { bits | mask } else { bits & !mask };
         self.emu.set_p2_tile_slots(t.next_slots | mask, on(1, t.next_page1), on(2, t.next_page2));
+    }
+
+    /// Draw `player`'s (0 = P1, 1 = P2) sprites `(dx, dy)` px off from OAM
+    /// from the next frame rendered on (netplay smoothing, docs/netplay.md
+    /// "Rollback smoothing"). Render time only: OAM, WRAM and save states are
+    /// untouched, and a loaded state renders unshifted until set again. The
+    /// slots are the last OAM build's (the one the next frame shows), minus
+    /// hidden ones (Y = `$E0`).
+    pub fn set_display_offset(&mut self, player: usize, dx: i16, dy: i16) {
+        let mask = crate::display::visible(self.wram(), self.oam_slots[player & 1]);
+        self.emu.set_sprite_offset(mask, dx, dy);
     }
 
     /// Live shadow pages and slot mask (what the renderer uses now).
