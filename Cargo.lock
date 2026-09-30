@@ -2564,9 +2564,12 @@ dependencies = [
  "cpal",
  "gilrs",
  "mmx-core",
+ "mmx-net",
+ "mmx-signal",
  "pixels",
  "png",
  "sha2",
+ "tokio",
  "winit",
 ]
 
