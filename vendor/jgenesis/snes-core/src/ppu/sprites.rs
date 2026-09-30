@@ -304,6 +304,8 @@ impl Ppu {
         let mut tiles_fetched = 0;
         while tiles_fetched < num_tiles_to_fetch {
             let oam_idx = self.sprites.scanned_oam_idxs[oam_buffer_idx as usize];
+            // mmxrs patch: this sprite reads the P2 shadow page instead of VRAM
+            let p2_page = (self.p2_tiles.0.slots >> oam_idx) & 1 != 0;
 
             let oam_low_addr = usize::from(oam_idx) << 1;
             let [x_lsb, y] = self.oam_low[oam_low_addr].to_le_bytes();
@@ -396,7 +398,13 @@ impl Ppu {
                 let tile_addr = ((tile_base_addr + (tile_number & 0x00FF) * tile_size_words)
                     & VRAM_ADDRESS_MASK) as usize;
 
-                let tile_data = &self.vram[tile_addr..tile_addr + tile_size_words as usize];
+                // mmxrs patch: P2 slots index the shadow page with tile & 0x1F
+                let tile_data = if p2_page {
+                    let o = usize::from(tile_number & 0x1F) * tile_size_words as usize;
+                    &self.p2_tiles.0.page[o..o + tile_size_words as usize]
+                } else {
+                    &self.vram[tile_addr..tile_addr + tile_size_words as usize]
+                };
 
                 let tile_row: u16 = (sprite_line % 8).into();
 

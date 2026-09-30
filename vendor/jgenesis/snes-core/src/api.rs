@@ -7,6 +7,7 @@ use crate::input::SnesInputs;
 use crate::memory::dma::{DmaStatus, DmaUnit};
 use crate::memory::{CpuInternalRegisters, Memory};
 use crate::ppu::{Ppu, PpuTickEffect};
+pub use crate::ppu::P2Tiles; // mmxrs patch
 use crate::{bus, ppu};
 use bincode::error::EncodeError;
 use bincode::{Decode, Encode};
@@ -310,6 +311,27 @@ impl SnesEmulator {
     #[must_use]
     pub fn obsel(&self) -> (u16, u16) {
         self.ppu.obsel()
+    }
+
+    // mmxrs patch: P2 shadow sprite tile page (see `ppu::P2Tiles`)
+    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; ppu::P2_PAGE_WORDS] {
+        self.ppu.p2_tile_page_mut()
+    }
+
+    pub fn set_p2_tile_slots(&mut self, mask: u128) {
+        self.ppu.set_p2_tile_slots(mask);
+    }
+
+    /// The whole P2 page state (live and pending). Not in the bincode
+    /// encoding of `SnesEmulator` (old save states stay loadable): the host
+    /// encodes it next to the state and puts it back with `set_p2_tiles`.
+    #[must_use]
+    pub fn p2_tiles(&self) -> &P2Tiles {
+        self.ppu.p2_tiles()
+    }
+
+    pub fn set_p2_tiles(&mut self, t: P2Tiles) {
+        self.ppu.set_p2_tiles(t);
     }
 
     /// Tick only the main CPU until it sits at an instruction boundary with

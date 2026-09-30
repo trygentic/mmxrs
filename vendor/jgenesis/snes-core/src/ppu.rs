@@ -348,7 +348,65 @@ pub struct Ppu {
     frame_buffer: BoxedColorArray<FRAME_BUFFER_LEN>,
     sprites: SpriteProcessor,
     deinterlace: bool,
+    // mmxrs patch: player 2's shadow sprite tile page (cloned into save states;
+    // bincode-encoded by the host after the emulator, see `P2TilesSlot`)
+    p2_tiles: P2TilesSlot,
 }
+
+// mmxrs patch begin: shadow sprite tile page for mmx-core's player 2.
+/// Words per page: 32 4bpp tiles, laid out as two name-table rows of 16, so a
+/// 16x16 sprite's n, n+1, n+16, n+17 stay inside it (`tile & 0x1F`).
+pub const P2_PAGE_WORDS: usize = 512;
+
+/// A sprite whose OAM slot bit is set in `slots` reads its tiles from `page`
+/// (index `tile_number & 0x1F`) instead of VRAM. The host writes `next_*`;
+/// they go live on the next OAMDATA write (the game's OAM upload), so the page
+/// and mask switch together with the OAM they describe.
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct P2Tiles {
+    pub page: Box<[u16; P2_PAGE_WORDS]>,
+    pub slots: u128,
+    pub next_page: Box<[u16; P2_PAGE_WORDS]>,
+    pub next_slots: u128,
+    pub pending: bool,
+}
+
+impl P2Tiles {
+    fn new() -> Self {
+        Self {
+            page: Box::new([0; P2_PAGE_WORDS]),
+            slots: 0,
+            next_page: Box::new([0; P2_PAGE_WORDS]),
+            next_slots: 0,
+            pending: false,
+        }
+    }
+
+    fn latch(&mut self) {
+        self.page.copy_from_slice(self.next_page.as_ref());
+        self.slots = self.next_slots;
+        self.pending = false;
+    }
+}
+
+/// Encodes as nothing and decodes as empty, so save states written before
+/// this patch still decode; the host encodes the `P2Tiles` after the state.
+#[derive(Debug, Clone)]
+pub struct P2TilesSlot(pub P2Tiles);
+
+impl Encode for P2TilesSlot {
+    fn encode<E: bincode::enc::Encoder>(&self, _: &mut E) -> Result<(), bincode::error::EncodeError> {
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for P2TilesSlot {
+    fn decode<D: bincode::de::Decoder<Context = C>>(_: &mut D) -> Result<Self, bincode::error::DecodeError> {
+        Ok(Self(P2Tiles::new()))
+    }
+}
+bincode::impl_borrow_decode!(P2TilesSlot);
+// mmxrs patch end
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 enum ScanlineLength {
@@ -397,6 +455,7 @@ impl Ppu {
             frame_buffer: BoxedColorArray::new(),
             sprites: SpriteProcessor::new(),
             deinterlace: config.deinterlace,
+            p2_tiles: P2TilesSlot(P2Tiles::new()), // mmxrs patch
         }
     }
 
@@ -1508,6 +1567,25 @@ impl Ppu {
         (self.registers.obj_tile_base_address, self.registers.obj_tile_gap_size)
     }
 
+    // mmxrs patch: P2 shadow tile page (pending copy; goes live on the next OAM upload)
+    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; P2_PAGE_WORDS] {
+        self.p2_tiles.0.pending = true;
+        &mut self.p2_tiles.0.next_page
+    }
+
+    pub fn set_p2_tile_slots(&mut self, mask: u128) {
+        self.p2_tiles.0.next_slots = mask;
+        self.p2_tiles.0.pending = true;
+    }
+
+    pub fn p2_tiles(&self) -> &P2Tiles {
+        &self.p2_tiles.0
+    }
+
+    pub fn set_p2_tiles(&mut self, t: P2Tiles) {
+        self.p2_tiles.0 = t;
+    }
+
     pub fn frame_buffer(&self) -> &[Color] {
         self.frame_buffer.as_ref()
     }
@@ -1783,6 +1861,11 @@ impl Ppu {
     }
 
     fn write_oam_data_port(&mut self, value: u8) {
+        // mmxrs patch: the game's OAM upload makes the pending P2 page and mask live
+        if self.p2_tiles.0.pending {
+            self.p2_tiles.0.latch();
+        }
+
         if self.in_active_display(self.state.scanline) {
             self.handle_active_display_oam_write(value);
             return;
