@@ -8,7 +8,6 @@ const $ = (id) => document.getElementById(id);
 const canvas = $('screen');
 const ctx = canvas.getContext('2d');
 
-const NTSC_HZ = 60.0988;
 const FF_FRAMES = 4; // frames per rAF tick while Tab is held
 const TARGET_MS = 50; // matches worklet.js
 
@@ -175,8 +174,8 @@ function loop(t) {
     while (queued + postedSince < want && n < 4) { stepOne(); n++; }
     acc = 0;
   } else {
-    // Fallback: wall-clock accumulator at the SNES NTSC rate.
-    acc += dt * NTSC_HZ;
+    // Fallback: wall-clock accumulator at the game's rate (PAL ROM: 50 fps).
+    acc += dt * emu.fps();
     for (; acc >= 1 && n < 4; acc--, n++) stepOne();
     if (acc > 1) acc = 0; // too slow: slow down rather than spiral
   }
@@ -186,8 +185,10 @@ requestAnimationFrame(loop);
 
 // --- online co-op (bundle built with --features netplay) ----------------------
 // The game keeps running locally while connecting; the session start restarts
-// both peers from power-on and from then on net_tick drives it at 60 Hz
-// (lockstep: a tick whose remote pad is late steps nothing and the game waits).
+// both peers from power-on and from then on the audio clock drives it: one
+// net_tick_audio per frame of audio the worklet needs (a tick that steps
+// nothing, e.g. lockstep waiting on a late pad, queues a frame of silence).
+// A fixed 60 Hz here overran the worklet on the PAL ROM (50 fps): fast music.
 function netFrame(dt) {
   const now = performance.now();
   if (!emu.net_live()) {
@@ -195,9 +196,18 @@ function netFrame(dt) {
     if (emu.net_live()) { netAcc = 0; blit(); }
     return;
   }
-  netAcc = Math.min(netAcc + dt * NTSC_HZ, 4);
   let shown = 0;
-  for (; netAcc >= 1; netAcc--) { shown += emu.net_tick(pads[0], now); pushAudio(); }
+  if (audioLive() && !ff) {
+    const want = (actx.sampleRate * TARGET_MS) / 1000;
+    for (let k = 0; queued + postedSince < want && k < 4; k++) {
+      shown += emu.net_tick_audio(pads[0], now);
+      pushAudio();
+    }
+    netAcc = 0;
+  } else {
+    netAcc = Math.min(netAcc + dt * emu.fps(), 4);
+    for (; netAcc >= 1; netAcc--) { shown += emu.net_tick(pads[0], now); pushAudio(); }
+  }
   if (shown) blit();
 }
 

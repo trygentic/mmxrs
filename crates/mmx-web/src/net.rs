@@ -1,7 +1,8 @@
 //! Online co-op in the browser (feature `netplay`): the shared
 //! `mmx_core::netgame::NetPlay` driver (rollback or lockstep) over `MatchboxTransport` (its message
-//! loop runs through `spawn_local`). The page calls `net_tick` once per
-//! 60 Hz tick from requestAnimationFrame and presents when it returns > 0.
+//! loop runs through `spawn_local`). The page calls `net_tick_audio` while
+//! the worklet queue is below target (`net_tick` at `fps()` without audio)
+//! and presents when it returns > 0.
 
 use mmx_core::netgame::{Mode, NetPlay};
 use mmx_net::MatchboxTransport;
@@ -53,6 +54,20 @@ impl Emu {
     pub fn net_tick(&mut self, pad: u16, now_ms: f64) -> u32 {
         let Some(net) = self.net.as_mut() else { return 0 };
         let n = net.tick(&mut self.game, pad, now_ms as u64);
+        if n > 0 {
+            self.refresh_frame();
+        }
+        n
+    }
+
+    /// [`Emu::net_tick`] paced by the audio clock: always leaves exactly one
+    /// frame of audio for `audio_take` (silence when nothing was stepped).
+    pub fn net_tick_audio(&mut self, pad: u16, now_ms: f64) -> u32 {
+        let Some(net) = self.net.as_mut() else {
+            return 0;
+        };
+        let (n, pcm) = net.tick_audio(&mut self.game, pad, now_ms as u64);
+        self.pcm.extend(pcm);
         if n > 0 {
             self.refresh_frame();
         }
