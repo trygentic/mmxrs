@@ -183,6 +183,19 @@ every frame from P2's block, so there is no cache to carry. The icon: X's
 "X" recoloured to palette 3; with X3 loaded, X3's "Z" emblem from shadow
 page 3 (also for a Zero P1's own icon; docs/zero.md "The HUD icon").
 
+Checked (4x crops of the left edge, frame 30):
+
+```
+[MMX_COOP_P2_HP=8] dump --load states/hw-spiky.state --frames 30 --at 30 --coop [--x3 X3] [--zero]
+dump --load states/hw-bee2.state --x3 X3 --frames 60 --at 60 --coop --poke 7E1F0E=68@1-60,7E1F0F=0E@1-60
+```
+
+hw-spiky full / half HP, with and without X3: X's bar Y 32..96, P2's
+104..168, half HP fills the upper half; with X3 P2's icon is the Z;
+`--zero` (co-op and solo) X's own icon is the Z, its bar unchanged. hw-bee2
+has no boss bar of its own (a mini-boss, `$1F0E = 0`); pointing `$1F0E` at
+the Bee Blader brings it up at X 232 (slots 16..22), clear of P2's bar.
+
 **Down and revive.** `go_down` (HP 0, pit, left behind) hides P2 for
 `P2_DOWN_FRAMES` (600 = 10 s) and records the fall spot (`Revive::spot`,
 P2's position) if it was on screen; a pit or a vertical "lost" is below or
