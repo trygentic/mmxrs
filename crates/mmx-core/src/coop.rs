@@ -135,6 +135,14 @@ pub const OFF_VEL_X: usize = 0x1A; // $0BC2 word
 pub const OFF_VEL_Y: usize = 0x1C; // $0BC4 word
 pub const OFF_HP: usize = 0x27; // $0BCF, bit7 = HUD redraw
 pub const OFF_INPUT: usize = 0x36; // $0BDE held, $0BE0 prev, $0BE2 pressed
+/// `$0BDD`: X's live shot count. The fire routine (`$81:93A8`) refuses when
+/// it is `>=` the cap `+$67` and does `INC $35` (direct page, so P2's own
+/// copy); the shot's despawn does `DEC $0BDD` (absolute, `$81:A2C0`,
+/// `$81:A3FD`, `$81:A4BA`, `$81:A541`) from the shot loop, where P1's block
+/// is live.
+pub const OFF_SHOTS: usize = 0x35;
+/// X's shots: 8 slots of `$40` at `$1228` (`ram::ITEMS_BASE`), `+0` = active.
+const X_SHOTS: u32 = 0x7E1228;
 const ACTION_DEATH: u8 = 0x0C;
 
 // ------------------------------------------------------------ tunables
@@ -182,6 +190,8 @@ pub struct CoopState {
     pub contact_hits: u32,
     /// Inside P2's contact pass (the isolated call re-enters [`HOOK_CONTACT`]).
     pub in_contact: bool,
+    /// Slots of the shot table ([`X_SHOTS`]) holding P2's shots (bit n = slot n).
+    pub p2_shots: u8,
 }
 
 impl Default for CoopState {
@@ -198,6 +208,7 @@ impl Default for CoopState {
             down_frames: 0,
             contact_hits: 0,
             in_contact: false,
+            p2_shots: 0,
         }
     }
 }
@@ -248,6 +259,7 @@ pub fn respawn_anchor(wram: &[u8; 0x20000]) -> [u8; X_BLOCK_LEN] {
     p2[OFF_POS_X..OFF_POS_X + 2].copy_from_slice(&x.saturating_add(P2_X_OFFSET).to_le_bytes());
     p2[OFF_VEL_X..OFF_VEL_X + 4].fill(0);
     p2[OFF_HP] = wram[ix(ram::MAX_HP)] & 0x7F;
+    p2[OFF_SHOTS] = 0; // P1's shots aren't P2's
     // Own VRAM tile window: `+$18` is the tile base (x16 words) the ROM's
     // streamer loads X's per-frame tiles into and the emitter adds to every
     // tile number; `+$17` bit 7 asks for a reload. Sharing X's window drew
@@ -336,6 +348,7 @@ fn p2_update(game: &mut Game) {
     }
 
     let pad = word(game.wram(), PAD2_HELD) & !(BTN_START | BTN_SELECT);
+    let (live, fired) = (shots_live(game.wram()), game.coop.p2[OFF_SHOTS]);
     with_p2_swapped(game, |game| {
         // Run the ROM's own input remapper (`$80:E518`, JSR/RTS) with pad 2
         // in pad 1's slot: it reads `$A7` and the block's previous input and
@@ -349,6 +362,34 @@ fn p2_update(game: &mut Game) {
         w[i..i + 2].copy_from_slice(&saved_pad1);
         game.call_isolated(PLAYER_UPDATE);
     });
+    // B3: remember which slots P2 fired into (the count went up); see `shot_books`.
+    if game.coop.p2[OFF_SHOTS] > fired {
+        game.coop.p2_shots |= shots_live(game.wram()) & !live;
+    }
+}
+
+/// Active slots of the shot table, bit n = slot n.
+fn shots_live(w: &[u8; 0x20000]) -> u8 {
+    (0..8).filter(|&k| w[ix(X_SHOTS) + k * 0x40] != 0).fold(0, |m, k| m | 1 << k)
+}
+
+/// B3: a P2 shot that despawned in this frame's shot loop did `DEC $0BDD` on
+/// P1's count (P1's block is live there) and never on P2's. Left alone, P2
+/// hits the cap after a couple of shots and P1's count wraps to `$FF`, so
+/// neither can fire again (Bee Blader 2 took one hit from P2, and never died
+/// with both shooting). Give the count back to P1 and take it off P2.
+/// Runs at [`HOOK_PHYSICS`], after the shot loop and before anyone can fire
+/// into a freed slot again (firing is in the player update).
+fn shot_books(game: &mut Game) {
+    let gone = game.coop.p2_shots & !shots_live(game.wram());
+    if gone == 0 {
+        return;
+    }
+    game.coop.p2_shots &= !gone;
+    let n = gone.count_ones() as u8;
+    let i = ix(ram::X_BASE) + OFF_SHOTS;
+    game.wram_mut()[i] = game.wram()[i].wrapping_add(n);
+    game.coop.p2[OFF_SHOTS] = game.coop.p2[OFF_SHOTS].saturating_sub(n);
 }
 
 /// `$80:D241` (after the object master's `JSL $81:9D67`): P2's terrain /
@@ -358,7 +399,11 @@ fn p2_update(game: &mut Game) {
 /// B1; left behind by a vertical scroll, B2). The horizontal clamp is in the
 /// display slice, against the camera the ROM scrolled to this frame.
 fn p2_physics(game: &mut Game) {
-    if !game.coop.enabled || game.coop.p2_hidden || p2_is_down(&game.coop.p2) {
+    if !game.coop.enabled {
+        return;
+    }
+    shot_books(game);
+    if game.coop.p2_hidden || p2_is_down(&game.coop.p2) {
         return;
     }
     with_p2_swapped(game, |game| {
