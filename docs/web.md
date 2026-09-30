@@ -16,10 +16,10 @@ Checks: `cargo test -p mmx-web`, `cargo check -p mmx-web --target wasm32-unknown
 
 | | D-pad | B | Y | A | X | L | R | Start | Select |
 |---|---|---|---|---|---|---|---|---|---|
-| P1 | arrows | Z | X | C | V | A or B | S or N | Enter | Shift |
+| P1 | arrows | Z | X | C | V | Q | E | Enter | Shift |
 | P2 (co-op) | WASD | G | F | H | T | R | Y | P | O |
 
-In co-op A/S belong to P2, so P1 uses B/N for L/R. F5 saves and F7 loads one
+P1 L/R are Q/E. F5 saves and F7 loads one
 in-memory slot (gone on reload). Hold Tab to fast-forward (audio muted).
 
 ## Timing and audio

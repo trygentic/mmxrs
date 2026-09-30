@@ -19,10 +19,8 @@ const KEYS: &[(&str, u8, u16)] = &[
     ("KeyX", 1, BTN_Y),
     ("KeyC", 1, BTN_A),
     ("KeyV", 1, BTN_X),
-    ("KeyA", 1, BTN_L), // solo only: P2's A/S win in co-op
-    ("KeyS", 1, BTN_R),
-    ("KeyB", 1, BTN_L), // always-on alias so P1 keeps L/R in co-op
-    ("KeyN", 1, BTN_R),
+    ("KeyQ", 1, BTN_L),
+    ("KeyE", 1, BTN_R),
     ("Enter", 1, BTN_START),
     ("ShiftLeft", 1, BTN_SELECT),
     ("ShiftRight", 1, BTN_SELECT),
@@ -41,13 +39,11 @@ const KEYS: &[(&str, u8, u16)] = &[
 ];
 
 /// Map a `KeyboardEvent.code` to `(player << 16) | pad_bit`, 0 if unbound.
-/// With `coop` off the player-2 keys are ignored; with it on, A/S go to P2.
+/// With `coop` off the player-2 keys are ignored. The two tables are disjoint.
 #[wasm_bindgen]
 pub fn key_to_pad(code: &str, coop: bool) -> u32 {
-    // Co-op prefers the P2 binding for shared codes (A/S), solo only sees P1.
     KEYS.iter()
-        .filter(|(c, p, _)| *c == code && (coop || *p == 1))
-        .max_by_key(|(_, p, _)| *p)
+        .find(|(c, p, _)| *c == code && (coop || *p == 1))
         .map_or(0, |&(_, p, bit)| (u32::from(p) << 16) | u32::from(bit))
 }
 
@@ -172,8 +168,9 @@ mod tests {
     fn solo_keys_are_player_one() {
         assert_eq!(key_to_pad("ArrowLeft", false), 0x1_0000 | u32::from(BTN_LEFT));
         assert_eq!(key_to_pad("KeyZ", false), 0x1_0000 | u32::from(BTN_B));
-        assert_eq!(key_to_pad("KeyA", false), 0x1_0000 | u32::from(BTN_L));
-        assert_eq!(key_to_pad("KeyS", false), 0x1_0000 | u32::from(BTN_R));
+        assert_eq!(key_to_pad("KeyQ", false), 0x1_0000 | u32::from(BTN_L));
+        assert_eq!(key_to_pad("KeyE", false), 0x1_0000 | u32::from(BTN_R));
+        assert_eq!(key_to_pad("KeyA", false), 0);
         assert_eq!(key_to_pad("ShiftRight", false), 0x1_0000 | u32::from(BTN_SELECT));
         assert_eq!(key_to_pad("KeyW", false), 0, "P2 keys ignored solo");
         assert_eq!(key_to_pad("F5", false), 0);
@@ -185,7 +182,11 @@ mod tests {
         assert_eq!(key_to_pad("KeyS", true), 0x2_0000 | u32::from(BTN_DOWN));
         assert_eq!(key_to_pad("KeyP", true), 0x2_0000 | u32::from(BTN_START));
         assert_eq!(key_to_pad("KeyY", true), 0x2_0000 | u32::from(BTN_R));
-        assert_eq!(key_to_pad("KeyB", true), 0x1_0000 | u32::from(BTN_L));
+        assert_eq!(key_to_pad("KeyQ", true), 0x1_0000 | u32::from(BTN_L));
+        // the two tables never share a key
+        for &(c, p, _) in KEYS {
+            assert!(!KEYS.iter().any(|k| k.0 == c && k.1 != p), "{c}");
+        }
         assert_eq!(key_to_pad("Enter", true), 0x1_0000 | u32::from(BTN_START));
     }
 

@@ -12,8 +12,8 @@ pub const P1_KEYS: &[(KeyCode, u16)] = &[
     (KeyCode::KeyX, BTN_Y),
     (KeyCode::KeyC, BTN_A),
     (KeyCode::KeyV, BTN_X),
-    (KeyCode::KeyA, BTN_L),
-    (KeyCode::KeyS, BTN_R),
+    (KeyCode::KeyQ, BTN_L),
+    (KeyCode::KeyE, BTN_R),
     (KeyCode::Enter, BTN_START),
     (KeyCode::ShiftLeft, BTN_SELECT),
     (KeyCode::ShiftRight, BTN_SELECT),
@@ -61,8 +61,6 @@ pub const HOTKEYS: &[(KeyCode, Hotkey)] = &[
     (KeyCode::Digit9, Hotkey::Slot(9)),
     (KeyCode::F11, Hotkey::Fullscreen),
     (KeyCode::Escape, Hotkey::Quit),
-    (KeyCode::KeyP, Hotkey::Pause),
-    // P is P2 Start in co-op, so pause also lives on F6.
     (KeyCode::F6, Hotkey::Pause),
     (KeyCode::Period, Hotkey::FrameStep),
 ];
@@ -78,9 +76,9 @@ fn find<T: Copy>(t: &[(KeyCode, T)], k: KeyCode) -> Option<T> {
     t.iter().find(|(c, _)| *c == k).map(|(_, v)| *v)
 }
 
-/// What a key does. The P2 table is live only in co-op, and there it wins
-/// over P1 and hotkeys: A/S (P1 L/R) and P (pause) collide with WASD/P2 Start.
-// ponytail: collisions resolved by priority, not by a rebinding UI.
+/// What a key does. The P2 table is live only in co-op. The three tables are
+/// disjoint (pinned by a test), so priority never matters.
+// ponytail: no rebinding UI.
 pub fn map_key(k: KeyCode, coop: bool) -> Option<KeyAction> {
     if coop {
         if let Some(b) = find(P2_KEYS, k) {
@@ -198,7 +196,11 @@ mod tests {
             Some(KeyAction::Hot(Hotkey::Pause))
         );
         assert_eq!(map_key(KeyCode::KeyA, true), Some(KeyAction::P2(BTN_LEFT)));
-        assert_eq!(map_key(KeyCode::KeyA, false), Some(KeyAction::P1(BTN_L)));
+        assert_eq!(map_key(KeyCode::KeyA, false), None);
+        // the three tables never share a key
+        for &(k, _) in P2_KEYS {
+            assert!(find(P1_KEYS, k).is_none() && find(HOTKEYS, k).is_none(), "{k:?}");
+        }
     }
 
     #[test]
