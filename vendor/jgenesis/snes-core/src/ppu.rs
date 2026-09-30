@@ -361,15 +361,17 @@ pub struct Ppu {
 /// row, tiles `$30-$3F`, wraps to row 0: `P2_PAGE_TILES` modulo).
 pub const P2_PAGE_WORDS: usize = 768;
 pub const P2_PAGE_TILES: u16 = 48;
-/// Three pages back to back: page 1 is for slots also set in `page1` (a second
-/// Zero, mmx-core's P1), page 2 for slots set in `page2` (the saber waves).
-pub const P2_PAGES: usize = 3;
+/// Four pages back to back: page 1 is for slots also set in `page1` (a second
+/// Zero, mmx-core's P1), page 2 for slots set in `page2` (the saber waves),
+/// page 3 for slots set in both (HUD icons).
+pub const P2_PAGES: usize = 4;
 
 /// A sprite whose OAM slot bit is set in `slots` reads its tiles from `page`
 /// (index `(tile_number & 0x3F) % 48`) instead of VRAM. The host writes `next_*`;
 /// they go live on the next OAMDATA write (the game's OAM upload), so the page
 /// and mask switch together with the OAM they describe. A slot also set in
-/// `page1` reads the second page, one set in `page2` the third.
+/// `page1` reads the second page, one set in `page2` the third, one in both
+/// the fourth.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct P2Tiles {
     pub page: Box<[u16; P2_PAGE_WORDS * P2_PAGES]>,

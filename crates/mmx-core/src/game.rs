@@ -26,7 +26,8 @@ const CALL_ISOLATED_BUDGET: u32 = 2_000_000;
 /// marker) had a 512-word page; its tail is ignored (empty page). v2
 /// (`P2T2`) had one 768-word page: it loads as page 0. v3 (`P2T3`) had two
 /// pages (no wave page): they load as pages 0 and 1.
-const P2_TILES_MAGIC: &[u8; 4] = b"P2T4";
+const P2_TILES_MAGIC: &[u8; 4] = b"P2T5";
+const P2_TILES_MAGIC_V4: &[u8; 4] = b"P2T4";
 const P2_TILES_MAGIC_V3: &[u8; 4] = b"P2T3";
 const P2_TILES_MAGIC_V2: &[u8; 4] = b"P2T2";
 
@@ -439,8 +440,8 @@ impl Game {
 
     /// The shadow sprite tile pages (pending; live on the next OAM upload):
     /// page 0 is P2's, page 1 (`P2_PAGE_WORDS..`) a Zero P1's, page 2 the
-    /// saber slash arcs (P2's in columns 0-7, P1's in 8-15). See
-    /// `p2tiles.rs`. Part of the save state.
+    /// saber slash arcs (P2's in columns 0-7, P1's in 8-15), page 3 the HUD
+    /// icon (`coop_hud.rs`). See `p2tiles.rs`. Part of the save state.
     pub fn p2_tile_page_mut(&mut self) -> &mut [u16; P2_PAGE_WORDS * P2_PAGES] {
         self.emu.p2_tile_page_mut()
     }
@@ -451,10 +452,11 @@ impl Game {
         self.emu.set_p2_tile_slots(mask, 0, 0);
     }
 
-    /// Add `mask` to the pending slot mask, reading shadow page `page` (0-2).
+    /// Add `mask` to the pending slot mask, reading shadow page `page` (0-3:
+    /// bit 0 = the `page1` mask, bit 1 = `page2`).
     pub fn add_p2_tile_slots(&mut self, mask: u128, page: u8) {
         let t = self.emu.p2_tiles();
-        let on = |p: u8, bits: u128| if page == p { bits | mask } else { bits & !mask };
+        let on = |bit: u8, bits: u128| if page & bit != 0 { bits | mask } else { bits & !mask };
         self.emu.set_p2_tile_slots(t.next_slots | mask, on(1, t.next_page1), on(2, t.next_page2));
     }
 
@@ -600,6 +602,15 @@ impl Game {
         self.emu.load_state(state);
         if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC.as_slice()) {
             let (t, _) = bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
+            self.emu.set_p2_tiles(t);
+        } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V4.as_slice()) {
+            const W3: usize = P2_PAGE_WORDS * 3;
+            type V4 = (Box<[u16; W3]>, u128, Box<[u16; W3]>, u128, bool, u128, u128, u128, u128);
+            let ((page, slots, next, next_slots, pending, page1, next_page1, page2, next_page2), _): (V4, _) =
+                bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
+            let mut t = P2Tiles { slots, next_slots, pending, page1, next_page1, page2, next_page2, ..P2Tiles::default() };
+            t.page[..W3].copy_from_slice(&page[..]);
+            t.next_page[..W3].copy_from_slice(&next[..]);
             self.emu.set_p2_tiles(t);
         } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V3.as_slice()) {
             const W2: usize = P2_PAGE_WORDS * 2;

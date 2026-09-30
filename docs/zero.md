@@ -134,17 +134,23 @@ Code: `crates/mmx-core/src/p2tiles.rs`, PPU patch in
   `verify --coop-off` parity run stays identical).
 - **Save state.** The page is inside the PPU, so `to_save_state` clones it.
   Its bincode encoding inside `SnesEmulator` is empty (`P2TilesSlot`), and
-  `Game::save_state` appends the marker `P2T4` and the `P2Tiles` after
+  `Game::save_state` appends the marker `P2T5` and the `P2Tiles` after
   `(emu, frame_count, fired_at)`. States written before the patch (no tail)
   or with the old 512-word page (tail without the marker) load with an empty
   page; `P2T2` states (one 768-word page) load it as page 0, `P2T3` states
-  (two pages) as pages 0 and 1.
-- **Three pages.** `page` holds three 768-word pages back to back; a slot
-  also set in `page1: u128` reads the second, one set in `page2` the third
-  (`Game::add_p2_tile_slots(mask, page)`, which never sets both). Page 0 is
-  P2's, page 1 a Zero P1's ("Playing as Zero"), page 2 the saber slash arcs
-  (P2's in columns 0-7, P1's in 8-15; "The saber"). Netplay rollback states wrap
+  (two pages) as pages 0 and 1, `P2T4` states (three) as pages 0-2.
+- **Four pages.** `page` holds four 768-word pages back to back; a slot
+  also set in `page1: u128` reads the second, one set in `page2` the third,
+  one set in both the fourth (`Game::add_p2_tile_slots(mask, page)`, page =
+  the two bits). Page 0 is P2's, page 1 a Zero P1's ("Playing as Zero"),
+  page 2 the saber slash arcs (P2's in columns 0-7, P1's in 8-15; "The
+  saber"), page 3 the HUD's "Z" icon (below). Netplay rollback states wrap
   `Game::save_state`, so they carry the pages.
+- **Why a fourth page.** Over all frames, X3 Zero's body uses all 48 cells
+  of pages 0/1, and the slash arc (repacked, 4 16x16 + 6 8x8 in its
+  biggest frames 3 and 9) all of columns 0-7 in rows 0-1 plus 0-5 of row 2;
+  the only free cells, row 2 columns 6-7 / 14-15, cannot hold a 16x16 (its
+  lower half, row 3, wraps to row 0).
 - **Filling the page.** P2 keeps X's `+$18` (anchor copies X's block and only
   sets `+$17 |= $80` to force a reload), so the emitter writes X's tile numbers
   for P2. Two `Observe` traps on the streamer: at `$84:8FCA`, if the call runs
@@ -852,6 +858,31 @@ dash, wall, hurt, beam-in, ...) instead of X's tiles in Zero's colours, and
 P2's X swings the saber (above). Physics, HP, hit boxes and the buster are
 X's. Netplay: both peers must load it; the handshake id includes "X3 loaded",
 so a mismatch refuses to start (docs/netplay.md).
+
+### The HUD icon
+
+With X3 loaded, the life bar icon of a Zero (P2's, the down marker, and a
+Zero P1's own, OAM slot 0) is X3's own "Z" emblem instead of X's "X"
+(`coop_hud.rs`; placement of P2's bar: docs/coop.md "P2 HP bar and
+revive"). X3 draws it while Zero plays (`x3-zero-stand`): OAM slot 0, X 8,
+Y 80, tile `$86` 16x16, attr `$34` (palette 2). Tiles `$86 $87 $96 $97`
+(sprite base `$6000`) are uncompressed in the ROM at `$AC:8D20`,
+`$AC:8D40`, `$AC:8DE0`, `$AC:8E00`; the HUD palette (CGRAM 160..175) is at
+`$8C:B0E0` (also `$8C:E828`): `3DF2 7FFF 5FBF 1F1F 325E 1D9F 0CBB 5294
+7F45 61E5 5903 031F 555F 6318 4631 0C63`. `zero_data::extract_x3_hud_icon`
+-> `ZeroSet::hud_icon` (tiles + palette); test `zero_data_x3_hud_icon`
+checks both against VRAM and CGRAM.
+
+The emblem draws with 1 (white plate), 13-15 (greys), 11 (yellow body) and
+6 (red stroke ends). `coop_hud::HUD_ON_ZERO` remaps it onto Zero's palette
+(which P2's palette 3 and a Zero P1's palette 1 hold): body -> red 7, ends
+-> gold 13 (all red read as an X at 16 px), plate 4, greys 5, 6, 15. The
+four tiles go into shadow page 3 at cells 6, 7, 22, 23, where the PPU's
+`(t & $3F) % 48` puts tile `$86`, so the OAM entries keep X's tile number
+and only their slots are flagged for page 3 (`add_p2_tile_slots(.., 3)`).
+Written every HUD frame (64 words), so loaded states need nothing. P1:
+slot 0 gets palette 1 and the flag each frame the bar is shown. Without X3
+nothing changes: X's icon, recoloured to palette 3 for P2.
 
 ### Player 1 as Zero (`--zero`)
 

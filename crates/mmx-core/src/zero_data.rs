@@ -62,6 +62,16 @@ pub struct ZeroSet {
     pub slash: Option<WaveSet>,
     /// X3's saber sound (`None` for X1). See [`extract_x3_sounds`].
     pub sounds: Option<ZeroSounds>,
+    /// X3's "Z" HUD icon (`None` for X1). See [`extract_x3_hud_icon`].
+    pub hud_icon: Option<HudIcon>,
+}
+
+/// A 16x16 HUD icon: 4 tiles (top-left, top-right, bottom-left,
+/// bottom-right, 32 B each) and the palette they draw with.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HudIcon {
+    pub tiles: Vec<u8>,
+    pub palette: [u16; 16],
 }
 
 /// An X3 effect set drawn next to Zero: the saber wave (2-row pages,
@@ -256,7 +266,7 @@ pub fn extract_x1(rom: &[u8]) -> Result<ZeroSet, String> {
     tiles.resize(tiles.len().div_ceil(32) * 32, 0);
     frames.extend(self::frames(rom, PORTRAIT_SET, PORTRAIT_DMA, &PORTRAIT_NAMES, base)?);
     let palette = std::array::from_fn(|i| rw(rom, ZERO_PALETTE + 2 * i as u32).unwrap_or(0));
-    Ok(ZeroSet { tiles, palette, frames, wave: WaveSet::default(), slash: None, sounds: None })
+    Ok(ZeroSet { tiles, palette, frames, wave: WaveSet::default(), slash: None, sounds: None, hud_icon: None })
 }
 
 /// X action (`+$02`) and frame (`+$17 & $7F`) -> the X1 Zero frame to draw,
@@ -444,7 +454,26 @@ pub fn extract_x3(rom: &[u8]) -> Result<ZeroSet, String> {
         wave: extract_x3_wave(rom)?,
         slash: Some(extract_x3_slash(rom)?),
         sounds: Some(extract_x3_sounds(rom)?),
+        hud_icon: Some(extract_x3_hud_icon(rom)?),
     })
+}
+
+/// X3's HUD icon while Zero plays: the "Z" under the life bar (OAM slot 0,
+/// tile `$86`, 16x16, palette 2 at X 8, Y 80 in `x3-zero-stand`). Tiles
+/// `$86 $87 $96 $97` come raw from these ROM addresses; the palette is X3's
+/// HUD sprite palette (CGRAM 160..175). The Z itself is colours 11 (yellow
+/// `031F`) and 6 (red `0CBB`) on a white / grey (1, 13, 14, 15) plate.
+pub const X3_HUD_ICON: [u32; 4] = [0xAC8D20, 0xAC8D40, 0xAC8DE0, 0xAC8E00];
+pub const X3_HUD_PALETTE: u32 = 0x8CB0E0;
+
+/// See [`X3_HUD_ICON`]. Pure.
+pub fn extract_x3_hud_icon(rom: &[u8]) -> Result<HudIcon, String> {
+    let tiles = X3_HUD_ICON.iter().flat_map(|&a| (0..32).map(move |k| rd(rom, a + k))).collect::<Result<_, _>>()?;
+    let mut palette = [0; 16];
+    for (i, c) in palette.iter_mut().enumerate() {
+        *c = rw(rom, X3_HUD_PALETTE + 2 * i as u32)?;
+    }
+    Ok(HudIcon { tiles, palette })
 }
 
 /// The saber wave: X3 object set `$4D` (spawned by Zero's charged attack,
@@ -917,6 +946,32 @@ mod tests {
             }
         }
         assert!(used.iter().filter(|&&t| t != NO_TILE).count() >= 25);
+    }
+
+    /// decode(ROM) == what X3 shows: the icon's tiles in VRAM (sprite base
+    /// `$6000`, tiles `$86 $87 $96 $97`) and CGRAM palette 2.
+    #[test]
+    fn zero_data_x3_hud_icon() {
+        let Some(path) = std::env::var_os("MMX_X3_ROM") else {
+            eprintln!("MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let mut g = crate::Game::from_rom_any(std::fs::read(path).expect("read MMX_X3_ROM")).expect("load X3");
+        let icon = extract_x3(g.rom_bytes()).unwrap().hud_icon.unwrap();
+        assert_eq!(icon.tiles.len(), 128);
+        assert_eq!((icon.palette[6], icon.palette[11]), (0x0CBB, 0x031F));
+        let state = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/x3-zero-stand.state");
+        let Ok(s) = std::fs::read(state) else {
+            eprintln!("{state} missing; VRAM check skipped");
+            return;
+        };
+        g.load_state(&s).unwrap();
+        for (k, t) in [0x86, 0x87, 0x96, 0x97].into_iter().enumerate() {
+            let v = 0x6000 + t * 16;
+            let vram: Vec<u8> = g.vram()[v..v + 16].iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert_eq!(icon.tiles[k * 32..][..32], vram[..], "tile {t:02X}");
+        }
+        assert_eq!(g.cgram()[160..176], icon.palette);
     }
 
     #[test]
