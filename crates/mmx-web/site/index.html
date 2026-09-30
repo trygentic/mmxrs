@@ -11,6 +11,7 @@
   canvas { width: min(100vw - 24px, 768px); aspect-ratio: 8 / 7; background: #000;
            image-rendering: pixelated; image-rendering: crisp-edges; }
   body.drag canvas { outline: 2px dashed #4af; }
+  #netBox { text-align: center; } #netStatus { font-family: ui-monospace, monospace; font-size: 12px; }
   #status { white-space: pre; font-family: ui-monospace, monospace; font-size: 12px; }
   kbd { font-family: ui-monospace, monospace; }
 </style>
@@ -19,6 +20,14 @@
   <div>
     <input type="file" id="rom" accept=".sfc,.smc,.bin">
     <label><input type="checkbox" id="coop"> local co-op</label>
+  </div>
+  <div id="netBox">
+    <input id="netSignal" value="ws://127.0.0.1:3536" size="22" title="signal server (mmx-signal)">
+    <input id="netRoom" placeholder="room" size="10" title="room: 1-32 of A-Z a-z 0-9 _ -">
+    <input id="netIce" placeholder="ICE (default STUN; none on a LAN)" size="24">
+    <select id="netDelay" title="input delay (frames)"><option>0</option><option>1</option><option selected>2</option><option>3</option></select>
+    <button id="netHost">Host</button> <button id="netJoin">Join</button> <button id="netLeave" disabled>Leave</button>
+    <div id="netStatus">netplay: idle — enter a room, then Host (player 1) or Join (player 2)</div>
   </div>
   <canvas id="screen" width="256" height="224"></canvas>
   <div id="status">Drop your Mega Man X (USA) ROM here, or pick it above. Nothing is uploaded.</div>

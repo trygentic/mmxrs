@@ -2,6 +2,8 @@
 
 pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--scale N] [--fullscreen] [--coop-local]
+       mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
+             [--ice 'stun:.. turn:.. username=U credential=C' | none] [--delay 0-3]
        mmxrs --headless --frames N [--rom PATH] [--dump-at F=out.png,...]
              [--hold P1MASK] [--p2-hold MASK] [--coop-local]
 ROM defaults to $MMX_ROM. Masks are SNES pad words (hex 0x.. or decimal).";
@@ -20,6 +22,11 @@ pub struct Args {
     pub p2_hold: u16,
     // ponytail: --movie is parsed but unused until mmx-verify's bk2 parser lands.
     pub movie: Option<String>,
+    /// Online co-op: (host?, room).
+    pub net: Option<(bool, String)>,
+    pub signal: String,
+    pub ice: Option<String>,
+    pub delay: u8,
 }
 
 impl Default for Args {
@@ -35,6 +42,10 @@ impl Default for Args {
             hold: 0,
             p2_hold: 0,
             movie: None,
+            net: None,
+            signal: mmx_net::DEFAULT_SIGNAL_URL.into(),
+            ice: None,
+            delay: mmx_net::DEFAULT_ROLLBACK_DELAY,
         }
     }
 }
@@ -86,12 +97,31 @@ pub fn parse<I: IntoIterator<Item = String>>(
             "--hold" => a.hold = parse_u16(&val("--hold")?)?,
             "--p2-hold" => a.p2_hold = parse_u16(&val("--p2-hold")?)?,
             "--movie" => a.movie = Some(val("--movie")?),
+            "--coop-host" | "--coop-join" => {
+                let room = val(&flag)?;
+                if !mmx_net::room_name_valid(&room) {
+                    return Err(format!("bad room {room:?}: 1-32 of A-Z a-z 0-9 _ -"));
+                }
+                a.net = Some((flag == "--coop-host", room));
+            }
+            "--signal" => a.signal = val("--signal")?,
+            "--ice" => a.ice = Some(val("--ice")?),
+            "--delay" => {
+                let v = val("--delay")?;
+                a.delay = v.parse().map_err(|_| format!("bad --delay {v:?}"))?;
+                if a.delay > mmx_net::MAX_ROLLBACK_DELAY {
+                    return Err(format!("--delay must be 0-{}", mmx_net::MAX_ROLLBACK_DELAY));
+                }
+            }
             "-h" | "--help" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
         }
     }
     if a.rom.is_none() {
         a.rom = env_rom.filter(|s| !s.is_empty());
+    }
+    if a.net.is_some() && (a.headless || a.coop_local) {
+        return Err("--coop-host/--coop-join cannot be combined with --headless or --coop-local".into());
     }
     if a.headless && a.frames == 0 {
         return Err("--headless needs --frames N".into());
@@ -142,6 +172,19 @@ mod tests {
         );
         let a = parse(vec!["--rom".into(), "cli.sfc".into()], env).unwrap();
         assert_eq!(a.rom.as_deref(), Some("cli.sfc"));
+    }
+
+    #[test]
+    fn netplay_flags() {
+        let a = p("--coop-join room_1 --signal ws://h:1 --ice none --delay 0").unwrap();
+        assert_eq!(a.net, Some((false, "room_1".into())));
+        assert_eq!((a.signal.as_str(), a.ice.as_deref(), a.delay), ("ws://h:1", Some("none"), 0));
+        let a = p("--coop-host r").unwrap();
+        assert_eq!(a.net, Some((true, "r".into())));
+        assert_eq!((a.signal.as_str(), a.delay), ("ws://127.0.0.1:3536", 2));
+        assert!(p("--coop-host bad/room").is_err());
+        assert!(p("--coop-host r --delay 4").is_err());
+        assert!(p("--coop-host r --coop-local").is_err());
     }
 
     #[test]

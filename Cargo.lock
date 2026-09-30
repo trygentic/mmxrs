@@ -2550,6 +2550,7 @@ dependencies = [
  "crc",
  "getrandom 0.4.3",
  "jgenesis-common",
+ "mmx-net",
  "sha2",
  "snes-config",
  "snes-core",
@@ -2563,9 +2564,12 @@ dependencies = [
  "cpal",
  "gilrs",
  "mmx-core",
+ "mmx-net",
+ "mmx-signal",
  "pixels",
  "png",
  "sha2",
+ "tokio",
  "winit",
 ]
 
@@ -2604,6 +2608,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "mmx-core",
+ "mmx-net",
  "wasm-bindgen",
 ]
 

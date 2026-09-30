@@ -12,6 +12,18 @@ locally from the file picker or a drop; nothing is uploaded.
 
 Checks: `cargo test -p mmx-web`, `cargo check -p mmx-web --target wasm32-unknown-unknown`.
 
+## Online co-op (feature `netplay`)
+
+    wasm-pack build crates/mmx-web --target web --release --out-dir site/pkg -- --features netplay
+    cargo check -p mmx-web --features netplay --target wasm32-unknown-unknown
+
+The panel above the screen: signal URL (default `ws://127.0.0.1:3536`, run
+`cargo run --release -p mmx-signal`), room, ICE (`none` on one machine / LAN,
+empty = default STUN), input delay 0-3, *Host* (player 1) / *Join* (player 2) /
+*Leave*. `?signal=&room=&ice=&delay=` prefill it. Each peer plays with the P1
+keys; F5/F7/Tab are off during a session; only B/Y/A/Start/d-pad travel.
+Details: `docs/netplay.md` "Frontend wiring".
+
 ## Keys (`KeyboardEvent.code`, table in `src/lib.rs`)
 
 | | D-pad | B | Y | A | X | L | R | Start | Select |

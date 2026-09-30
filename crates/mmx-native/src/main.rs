@@ -6,6 +6,7 @@ mod audio;
 mod cli;
 mod headless;
 mod keys;
+mod netplay;
 
 use mmx_core::Game;
 
@@ -25,12 +26,21 @@ fn main() {
         eprintln!("{rom_path}: {e}");
         std::process::exit(1);
     });
+    let net = args.net.as_ref().map(|(host, room)| {
+        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.delay)
+            .unwrap_or_else(|e| {
+                eprintln!("netplay: {e}");
+                std::process::exit(2);
+            })
+    });
     let mut game = Game::from_rom(rom).unwrap_or_else(|e| {
         eprintln!("{rom_path}: {e}");
         std::process::exit(1);
     });
-    game.coop.enabled = args.coop_local;
-    if args.coop_local {
+    // Online sessions rebuild the game with co-op on at `Running`; the local
+    // game played while connecting gets the same traps.
+    game.coop.enabled = args.coop_local || net.is_some();
+    if game.coop.enabled {
         mmx_core::coop::register_coop_traps(&mut game);
     }
 
@@ -44,7 +54,7 @@ fn main() {
         }
         return;
     }
-    if let Err(e) = app::run(game, &args) {
+    if let Err(e) = app::run(game, &args, net) {
         eprintln!("{e}");
         std::process::exit(1);
     }

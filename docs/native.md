@@ -13,10 +13,25 @@ device (~50 ms buffered); without an output device a 60.0988 Hz timer drives it.
 
 P1 L/R are Q/E; pause is F6. The P1, P2 and hotkey tables never share a key.
 
+Online co-op (rollback over WebRTC, see `docs/netplay.md` "Frontend wiring"):
+
+```
+mmxrs --rom mmx.sfc (--coop-host ROOM | --coop-join ROOM)
+      [--signal ws://HOST:3536] [--ice none|'stun:.. turn:.. username=U credential=C'] [--delay 0-3]
+```
+
+Host is player 1, guest player 2; both play with the P1 keys / first pad.
+Needs `mmx-signal` running (`cargo run --release -p mmx-signal`). The title
+shows the connect stage, then `f= d= rtt= rollbacks= pred=`, or why it closed.
+Pause, fast-forward, frame-step and save states are off during a session; Esc
+sends a goodbye. Online, only B/Y/A/Start/d-pad travel (X, L, R, Select are
+dropped: 8-bit wire pads). Cargo feature `netplay` (default) carries the
+WebRTC transport; `--no-default-features` builds without it.
+
 Hotkeys: Tab hold fast-forward (8 frames per present, muted), F5 save state,
 F7 load state, 1-9 pick slot, F11 fullscreen, P or F6 pause, `.` single-step
 while paused, Esc quit. States live in `$HOME/.mmxrs/slotN.state`.
-Title bar: fps, `[coop]`, `[SLOT n]`, `[PAUSED]`, `[FF]`.
+Title bar: fps, `[coop]` or `[NET ...]`, `[SLOT n]`, `[PAUSED]`, `[FF]`.
 
 Gamepads (gilrs, standard mapping): the pad that last pressed a button is P1;
 with `--coop-local` a different pad that presses becomes P2.

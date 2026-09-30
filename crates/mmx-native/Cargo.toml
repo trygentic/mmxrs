@@ -9,8 +9,15 @@ description = "Mega Man X desktop frontend (winit/pixels/cpal/gilrs) and headles
 name = "mmxrs"
 path = "src/main.rs"
 
+[features]
+# Online co-op (--coop-host/--coop-join) over WebRTC. On by default; pulls
+# webrtc-rs + ring (needs a C compiler). --no-default-features drops it.
+default = ["netplay"]
+netplay = ["mmx-net/matchbox"]
+
 [dependencies]
 mmx-core = { path = "../mmx-core" }
+mmx-net = { path = "../mmx-net" }
 winit = { version = "0.30", features = ["rwh_06"] }
 pixels = "0.15"
 cpal = "0.15"
@@ -19,3 +26,8 @@ sha2 = "0.10"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 gilrs = "0.11"
+
+[dev-dependencies]
+# In-process signalling server for the localhost rollback end-to-end test.
+mmx-signal = { path = "../../tools/mmx-signal" }
+tokio = { version = "1", features = ["rt-multi-thread"] }

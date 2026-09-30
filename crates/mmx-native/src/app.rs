@@ -4,6 +4,7 @@
 use crate::audio::Audio;
 use crate::cli::Args;
 use crate::keys::{self, Hotkey, KeyAction};
+use crate::netplay::Net;
 use mmx_core::{Game, Pads};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,13 +43,18 @@ struct App {
     fps_frames: u32,
     fps: f64,
     title: String,
+    /// Online co-op session (`--coop-host/--coop-join`).
+    net: Option<Net>,
 }
 
-pub fn run(mut game: Game, args: &Args) -> Result<(), String> {
+pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), String> {
     let audio = Audio::open();
     match &audio {
         Some(a) => game.set_audio_rate(a.rate),
         None => eprintln!("audio: no output device, pacing by timer"),
+    }
+    if let (Some(n), Some(a)) = (net.as_mut(), &audio) {
+        n.play.audio_rate = Some(a.rate);
     }
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     let mut app = App {
@@ -76,6 +82,7 @@ pub fn run(mut game: Game, args: &Args) -> Result<(), String> {
         fps_frames: 0,
         fps: 0.0,
         title: String::new(),
+        net,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
@@ -144,14 +151,38 @@ impl App {
             p2: self.kb[1] | self.pad_bits(self.pad2),
         };
         self.game.step(pads);
+        self.push_audio();
+        self.fps_frames += 1;
+    }
+
+    fn push_audio(&mut self) {
         let samples = self.game.take_audio();
         if let (Some(a), false) = (&self.audio, self.fast) {
             a.push(&samples);
         }
-        self.fps_frames += 1;
+    }
+
+    /// One online tick (this peer's pad is always the P1 keys / first pad).
+    fn net_tick(&mut self) -> u32 {
+        let pad = self.kb[0] | self.pad_bits(self.pad1);
+        let Some(net) = self.net.as_mut() else { return 0 };
+        let n = net.tick(&mut self.game, pad);
+        self.push_audio();
+        n
+    }
+
+    fn quit(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(net) = self.net.as_mut() {
+            net.close_and_flush();
+        }
+        event_loop.exit();
     }
 
     fn hotkey(&mut self, h: Hotkey, pressed: bool, event_loop: &ActiveEventLoop) {
+        // Pause, fast-forward and save states would desync an online session.
+        if self.net.is_some() && !matches!(h, Hotkey::Quit | Hotkey::Fullscreen) {
+            return;
+        }
         if h == Hotkey::FastForward {
             self.fast = pressed;
             return;
@@ -192,7 +223,7 @@ impl App {
                     w.set_fullscreen(fs);
                 }
             }
-            Hotkey::Quit => event_loop.exit(),
+            Hotkey::Quit => self.quit(event_loop),
             Hotkey::Pause => {
                 self.paused = !self.paused;
                 if let Some(a) = &self.audio {
@@ -205,7 +236,9 @@ impl App {
 
     fn update_title(&mut self) {
         let mut t = format!("mmxrs - {:.0} fps", self.fps);
-        if self.coop {
+        if let Some(net) = &self.net {
+            t += &net.title();
+        } else if self.coop {
             t += " [coop]";
         }
         t += &format!(" [SLOT {}]", self.slot);
@@ -283,7 +316,7 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.quit(event_loop),
             WindowEvent::Resized(s) => {
                 if let Some(p) = self.pixels.as_mut() {
                     if s.width > 0 && s.height > 0 {
@@ -320,7 +353,27 @@ impl ApplicationHandler for App {
         self.last = now;
 
         let mut stepped = 0;
-        if self.paused {
+        // Online: pump the network every wake-up; once the session is live it
+        // drives the game at 60 Hz (one tick = one advance, timer-paced).
+        let was_live = self.net.as_ref().is_some_and(|n| n.play.live());
+        if self.net.is_some() && !was_live {
+            self.net_tick(); // connecting / closed: network only
+        }
+        let live = self.net.as_ref().is_some_and(|n| n.play.live());
+        if live {
+            if was_live {
+                self.acc = (self.acc + dt * NTSC_HZ).min(f64::from(MAX_CATCHUP));
+                while self.acc >= 1.0 {
+                    self.acc -= 1.0;
+                    let n = self.net_tick();
+                    stepped += n;
+                    self.fps_frames += n.min(1);
+                }
+            } else {
+                self.acc = 0.0; // `Running` just rebuilt the game: start clean
+                stepped = 1;
+            }
+        } else if self.paused {
             if std::mem::take(&mut self.frame_step) {
                 self.step();
                 stepped = 1;
