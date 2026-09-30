@@ -1,7 +1,8 @@
 //! When does a second player make sense? Pure predicates over raw WRAM,
 //! established by scripted runs through the Highway stage (docs/coop-qa.md,
 //! `scripts/coop-qa.sh`). "M<n>" below names the milestone in that table
-//! that showed the condition. The coordinator wires these into `coop.rs`.
+//! that showed the condition. `coop.rs` uses them: `p2_should_exist` and
+//! `p2_anchor_ok` in the update slice, `p2_lost` in the physics slice.
 
 use crate::ram::{self, wram_index as ix};
 
@@ -84,11 +85,14 @@ pub fn in_view_y(y: u16, cam_y: u16) -> bool {
 
 /// P2 has left the playfield vertically and will not come back on its own:
 /// fell into a pit (M0: P2 sank to Y 895 with the camera at 256 and never
-/// died; P1's pit death fires at `y - cam_y = 257`), or the camera scrolled up
-/// without it (M5: P1 wall-climbed out of the Bee Blader crash, camera Y
-/// 479 -> 256, P2 stranded at Y 575). Either way: down it / re-anchor it.
+/// died), or the camera scrolled up without it (M5: P1 wall-climbed out of
+/// the Bee Blader crash, camera Y 479 -> 256, P2 stranded at Y 575), or
+/// scrolled down 64+ px past it. Either way: P2 down, respawn next to P1.
+/// The "below" half is the ROM's own pit rule for X (camera code
+/// `$80:E14A`): `Y - $20 >= cam Y + $E0`, signed like its `CMP`/`BMI`; X
+/// moves several px a frame, so P1 is seen dying at `y - cam_y = 257`.
 pub fn p2_lost(p2_y: u16, cam_y: u16) -> bool {
-    p2_y >= cam_y.saturating_add(257) || p2_y.saturating_add(64) < cam_y
+    (p2_y.wrapping_sub(0x20).wrapping_sub(cam_y.wrapping_add(0xE0)) as i16) >= 0 || p2_y.saturating_add(64) < cam_y
 }
 
 #[cfg(test)]
@@ -173,8 +177,9 @@ mod tests {
     fn coop_stages_lost() {
         assert!(!p2_lost(367, 256)); // on the road
         assert!(p2_lost(895, 256)); // M0: sank through the pit
-        assert!(p2_lost(513, 256)); // where P1's pit death fires
-        assert!(!p2_lost(512, 256));
+        assert!(p2_lost(513, 256)); // where P1's pit death was seen
+        assert!(p2_lost(512, 256) && !p2_lost(511, 256)); // the ROM's threshold
+        assert!(!p2_lost(0x10, 0)); // signed: near the top of the level
         assert!(p2_lost(575, 256) && !p2_lost(575, 479)); // M5: stranded below after the climb
         assert!(p2_lost(100, 256) && !p2_lost(200, 256)); // far above the window
         assert!(in_view_y(256, 256) && !in_view_y(480, 256));

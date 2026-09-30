@@ -10,7 +10,7 @@ use crate::traps::TrapReturn;
 use crate::Game;
 
 /// OAM build entry (`JSR` from the object master); once per gameplay frame,
-/// before the coop display slice at `$80:D5FA`.
+/// before the coop display slice at `$80:9A86`.
 pub const HOOK_OAM_BUILD: u32 = 0x80D544;
 /// CGRAM mirror in WRAM, uploaded by the NMI when [`CGRAM_DIRTY`] is set.
 pub const CGRAM_BUF: usize = 0x0300;

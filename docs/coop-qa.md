@@ -25,6 +25,15 @@ to A/B single co-op hooks; the dump line also prints `$D4`, camera Y and
 
 ## Milestones
 
+Re-run after the B1-B5 fixes (same day). `check` now gives P1
+parity idle / mirror: M0 yes/yes, M1 yes/yes, M2 yes/yes, M3 **no**/no,
+M4 yes/no, M5 yes/yes, M6 yes/**yes**, M7 yes/no, M8 yes/yes. M3 idle is no
+longer B4 (see B4b); the mirror "no"s are P2's shots and contacts changing
+the fight. The table below is J's original run; the P2 column changes are:
+M0 mirror P2 dies in the first pit (f560) and respawns; M3 P2 no longer
+sinks to Y 895; M5 P2 is taken out at f~570 and re-anchored at f760; M6
+mirror kills the boss.
+
 Mode = `$D1/$D2/$D3/$D4`. World X of the milestone start in brackets.
 
 | # | state (script name) | frames | mode bytes seen | PNG | P2 | P1 parity idle / mirror |
@@ -49,21 +58,31 @@ shooting, standing still, or standing mid-screen. The trigger is unknown
 
 ## Bugs
 
-**B1. P2 never dies in a pit.** P1's pit death fires at `y - cam_y = 257`
+**B1. P2 never dies in a pit.** FIXED (`fell_off` on main, now
+`coop_stages::p2_lost` in the physics slice; P2 down at Y 517 by f590,
+respawn after 120 frames; docs/coop.md "QA fixes"). P1's pit death fires at `y - cam_y = 257`
 (Y 513 with the camera at 256) from code P2's slices don't run. P2 keeps
 falling to Y 895, lands on something below the level, stays "walking" off
 screen and is only hidden when P1 dies.
 `cargo run --release -q -p xtask -- dump --load states/highway-start.state --out target/qa/b1 --frames 600 --at 500,560,600 --hold 0100 --p2-hold 0100 --coop`
 (P2 at `(950,895)` by f600). Fix: treat `coop_stages::p2_lost` as a death.
 
-**B2. P2 is left behind by vertical scrolling.** No vertical clamp or
+**B2. P2 is left behind by vertical scrolling.** FIXED (`p2_lost`: P2 down
+at f~570 when the camera passes Y 319, re-anchored at f760 next to P1). No vertical clamp or
 re-anchor: when P1 climbs out of the Bee Blader crash the camera goes from Y
 479 to 256 and P2 stays at Y 575, off screen with 0 OAM slots, for good.
 `scripts/coop-qa.sh check`, milestone m5-climb (P2 stays at `(2648,575)`,
 `count 0`, while the camera ends at Y 256).
 Fix: `p2_lost` -> re-anchor next to P1 when `p2_anchor_ok`.
 
-**B3. P2's shots block damage to the mid-boss.** Bee Blader 2 (enemy id
+**B3. P2's shots block damage to the mid-boss.** FIXED. Cause: X's live
+shot count `$0BDD` (block `+$35`) is incremented by the fire routine through
+direct page (P2's copy) but decremented by the shot's despawn with an
+absolute `DEC $0BDD` from the shot loop (P1's copy). P2 hit the cap, P1's
+count wrapped to `$FF`. Coop now tracks P2's shot slots (`$1228`) and gives
+each despawn back (docs/coop.md "Shots"). Repro below now: P1 taps -> 24,
+P2 taps -> 24; 1500 frames of shooting kill the boss at f~700 with P1, P2
+or both. Bee Blader 2 (enemy id
 `$22`, HP at `+$27` = 29): P1 shooting alone takes it to 7 by f600; P2
 shooting alone takes it to 28 (one hit) and then nothing; both shooting and
 it never dies (2400 frames), while P1 alone kills it in ~800. So P2's shots
@@ -73,7 +92,11 @@ Repro (ten Y taps each; read the boss's HP at `$0E68+$27` in the `.wram`):
 `dump --load states/hw-bee2.state --out target/qa/b3 --frames 200 --at 200 --refill --coop --p1tap 4000@10:2,4000@22:2,4000@34:2,4000@46:2,4000@58:2,4000@70:2,4000@82:2,4000@94:2,4000@106:2,4000@118:2 --wram` -> HP 24;
 the same with `--p2tap` instead of `--p1tap` -> HP 28.
 
-**B4. Co-op changes lag frames, so P1 drifts even with P2 idle.** In heavy
+**B4. Co-op changes lag frames, so P1 drifts even with P2 idle.** FIXED:
+the display slice moved to `$80:9A86` (after `JSR $80:D544`), P2 goes into
+the slots after the game's and `$E3`/`$E4` are left as the game had them;
+P2's old slots are hidden at `$80:D545`. Repro below: 1918/1960 with
+`--coop` too. In heavy
 scenes the solo run lags a frame the co-op run doesn't (`$0B9B` is one ahead
 in co-op at M3 f270, M4 f782), P1's position then differs by a few pixels.
 Cause, confirmed with `--untrap 80D5FA`: the P2 display slice advances the
@@ -84,7 +107,16 @@ back with the display hook off. Fix idea: emit P2 after the ROM's hide loop
 Repro: `dump --load states/hw-a.state --out target/qa/b4 --frames 300 --at 270,300 --hold 0100 --refill`
 gives P1 X 1918/1960; add `--coop` -> 1919/1962; add `--coop --untrap 80D5FA` -> 1918/1960 again.
 
-**B5 (minor). Idle P2 drawn half off the left edge.** The clamp window
+**B4b (open). P2's tile DMA shifts lag frames.** M3 idle after the B4
+fix: P2 is hit at f272 (the clamp drags it into the road attackers), its
+new poses queue tiles in the `$0500` VRAM queue, the NMI DMA gets longer and
+P1 lags a frame earlier (4-5 px behind solo from f275). Dropping P2's queue
+entries restores parity (throwaway check). Needs the shadow tile page
+(docs/zero.md A').
+
+**B5 (minor). Idle P2 drawn half off the left edge.** FIXED: clamp
+`[cam+8, cam+248]`, applied in the display slice against the camera the
+ROM scrolled to this frame (M0 f120: camera 171, P2 179). The clamp window
 `[cam, cam+240]` is on the sprite anchor (centre), so a P2 pushed by the
 camera shows half a sprite. `[cam+8, cam+248]` would keep it whole. Also the
 clamp runs one frame behind the camera (P2 169 vs camera 171 at M0 f120).
@@ -94,14 +126,17 @@ M7), P2 shots change the fight (every mirror NO above except B3's size).
 
 ## What `p2_should_exist` / `p2_anchor_ok` encode
 
-`crates/mmx-core/src/coop_stages.rs`:
+`crates/mmx-core/src/coop_stages.rs`, wired into `coop.rs` (update slice:
+hide on `!p2_should_exist`, except pause only freezes; anchor on
+`p2_anchor_ok`. Physics slice: `p2_lost` -> P2 down):
 
 - `p2_should_exist`: `$D2 == 4` && `$D3 == 4` && `$1F24 == 0` && X action
   `!= $0C` && X HP `& $7F != 0`.
 - `p2_anchor_ok`: `p2_should_exist` && X action in {`$00` stand, `$02`
   ready/landed, `$04` walk} && X vy == 0 && P1's Y inside the camera window.
-- `p2_lost(p2_y, cam_y)`: P2 at or below `cam_y + 257` (pit) or 64+ px above
-  the window (left behind). For B1/B2.
+- `p2_lost(p2_y, cam_y)`: the ROM's pit rule for X (`$80:E14A`: `Y - $20 >=
+  cam_y + $E0`, signed; P1 is seen dying at `y - cam_y = 257` because X
+  falls several px a frame) or 64+ px above the window. For B1/B2.
 
 X actions seen: `$00` stand/push, `$02` ready, `$04` walk, `$06` jump, `$08`
 fall, `$0A` land, `$0C` death, `$0E` hurt, `$10` wall kick, `$12` wall slide,

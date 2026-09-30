@@ -29,12 +29,61 @@ The disassembly's bank-`$80` PCs drift from this cartridge by up to `0x41`
 | addr | what | P2 body |
 |---|---|---|
 | `$80:D1EF` | instruction after the object master's `JSL $81:812E` (P1's action/input phase has just returned) | update slice: ROM input remap `$80:E518` on pad 2, then `$81:812E` |
-| `$80:D241` | instruction after `JSL $81:9D67` (P1's terrain/physics phase, run after the enemy loops) | physics slice: `$81:9D67`, clamp into the camera window, death check |
-| `$80:D5FA` | OAM lists 3-5, right after the player emitter `$80:D671` inside the OAM build `$80:D544` | display slice: `$80:D671` on P2's block through the OAM cursor `$E4`, then the Zero palette |
+| `$80:D241` | instruction after `JSL $81:9D67` (P1's terrain/physics phase, run after the enemy and shot loops) | physics slice: shot bookkeeping (B3), `$81:9D67`, `$80:D292`, then `coop_stages::p2_lost` (pit / left behind) |
+| `$80:D545` | second instruction of the OAM build `$80:D544` (`PHB`; `$D544` is Zero's palette trap) | hide last frame's P2 slots (Y = `$E0`) |
+| `$80:9A86` | instruction after `JSR $80:D544` at `$80:9A83` in the per-frame stage code: the whole OAM build (and its hide loop) is done, the camera is final | display slice: clamp X into `[cam+8, cam+248]`, `$80:D640` + `$80:D671` on P2's block into the slots past the game's, Zero palette, direct page put back |
 | `$84:9B03` | entry of the enemy-vs-X contact routine; every enemy's AI `JSL`s it with `D` = the enemy (154 call sites) | contact pass: the same routine again, isolated, with P2's block swapped in |
 
 Per-frame order in the object master `$80:D1C2`: player phase 1 (`$81:812E`)
 -> item/shot/enemy loops -> player phase 2 (`$81:9D67`) -> camera `$80:DDB0`.
+The per-frame stage code then runs `JSR $80:D544` (OAM build) at `$80:9A83`.
+
+When P2 exists (`coop_stages`): `p2_update` hides P2 (re-anchor later) when
+`!p2_should_exist` (not `$D2=4/$D3=4`, P1 dead or HP 0); on the pause flag
+`$1F24` it only skips the slice, so P2 comes back where it was. A hidden P2
+anchors next to P1 only when `p2_anchor_ok` (P1 standing/ready/walking,
+vy 0, on screen).
+
+## Display slice and lag frames (B4)
+
+The OAM build `$80:D544` ends with a hide loop: Y = `$E0` on slots `$E4`
+(this frame's count) up to `$E3` (last frame's), then `$E3 = $E4`, `$E4..$EB
+= 0`. The old display hook sat inside the build (`$80:D5FA`) and advanced
+`$E4`, so that loop ran fewer iterations and a heavy frame finished before
+the NMI where solo lagged: P1 drifted a pixel with P2 idle.
+
+Now P2 is emitted at `$80:9A86`, after the build:
+
+```
+cargo run --release -q -p xtask -- trace --load states/hw-a.state --frames 270 --hold 0100 --calls
+  $80D544 x1     first from $809A83
+```
+
+The build's disassembly (cartridge bytes): `$D563 SEP #$30`, flush of the
+partial high-table byte, `$D57B LDA $E3; SEC; SBC $E4` .. `$D594 LDA #$E0;
+STA $0701,X` loop, `$D5A1 LDA $E4; STA $E3; STZ $E4 $E6 $E8 $EA $EB; PLB;
+PLP; RTS`. A full PC trace of frame 270 (throwaway `TRACE_PCS` hack in
+`xtask trace`) shows no instruction with operand `$E3`/`$E4`/`$E5`/`$E6`
+outside `$80:D544..$D7xx` (only branch offsets / `LDA $0BE3` / `JSR $81E3`
+false positives); after `$9A86` the frame runs `$9A86..$9ACE` and the
+scheduler's idle loop. Paused frames reach the build by `JMP $D544` at
+`$80:9AD2` and never return to `$9A86`, hence the separate hide hook at
+`$D545`.
+
+The slice: P2 goes into slots from `$E3` rounded up to 4 (P2 owns whole
+high-table bytes; the padding gets Y = `$E0`); the partial last byte is
+flushed like the build's tail, keeping any game bits above P2's. The
+emitter's overflow exit (`$80:D739`, after slot 127's byte: `PLX; PLX; JMP
+$D5A1`) would unwind through `call_isolated`'s sentinel, so P2's sprite
+count is read from its frame layout first (`$8D:8000[+$16*3]` -> `[+$17*3]`
+-> first byte) and when the game left too few slots P2 takes the game's last
+(lowest priority) ones. M3 (hw-a f240..300) uses 100-128 slots; `$E3 = 128`
+when the build itself ran out. Registers forced to M=1, X=0, D=0, DB=`$8D`
+(at `$9A86`: `D=0000 DB=86 P=32`); all of direct page `$00..$FF` is put back
+after, so `$E3..$EB` and the scratch are exactly as the game left them.
+ponytail: P2 now sorts behind every game sprite. The emit runs isolated
+(zero cycles), so its own CPU cost can't matter, and doesn't: see the parity
+runs below.
 Both player phases must run for P2: with only the first, P2 kept a stale
 ground flag (`$0BD3` bit 2, cleared by phase 2) and "landed" at the apex of
 every jump.
@@ -91,9 +140,14 @@ e.g. `$81:B091`, `$82:A611`); these still hit only P1.
 - **Pits** are not decided by the player code: the camera code (`$80:E14A`,
   listing PC, run on P1 only) kills X when `Y - $20 >= camera Y + $E0` (by
   `$84:9F2A` with `$0BCE=$7F`). P2 never ran that, and fell to the floor
-  below the screen (Y 895) and stood there. `p2_physics` now applies the same
-  rule (`fell_off`) to P2 with the live camera and marks P2 down (action
-  `$0C`, HP `$80`); no ROM death code runs for P2.
+  below the screen (Y 895) and stood there (B1).
+- **Left behind vertically** (B2): nothing drags P2 along a vertical scroll;
+  after the Bee Blader 1 climb P2 stayed at Y 575 with the camera at 256.
+- One rule for both, `coop_stages::p2_lost(y, cam_y)`: the ROM's pit rule
+  above, or 64+ px above the window. `p2_physics` applies it after P2's
+  physics and marks P2 down (action `$0C`, HP `$80`): hidden for
+  `P2_DOWN_FRAMES`, then re-anchored next to P1, no life lost; no ROM death
+  code runs for P2.
 - **Spikes** (tile `$3F`) go through `$81:96CB` inside P2's update slice, so
   they are the HP-0 case. unverified: Highway has no spikes.
 - The WRAM diff (`MMX_COOP_DIFF=1`, below) on the pit and HP-0 death frames
@@ -116,6 +170,28 @@ Option (a) (a few lines): the three slots are swapped with the block
 `$80:D640` runs in P2's display slice before `$80:D671`. P2 gets its own
 armour parts, positioned on P2.
 
+## Shots (B3)
+
+X's shots live in `$1228` (8 slots of `$40`, `+0` = active; `ram::ITEMS_BASE`).
+The fire routine (`$81:93A8` / `$81:943D`) refuses when `$0BDD` (X's live
+shot count, block `+$35`) `>=` the cap `+$67`, and does `INC $35` (direct
+page: P2's copy in P2's slice). The shot's despawn does `DEC $0BDD`
+(absolute; `$81:A2C0`, `$81:A3FD`, `$81:A4BA`, `$81:A541`) from the shot
+loop, where P1's block is live. So each P2 shot took one from P1's count:
+P2 hit the cap after a couple of shots (Bee Blader 2: one hit, then P2's
+Y presses spawned nothing, `MMX_COOP_DIFF` shows no `$1228` write) and P1's
+count wrapped to `$FF` (`>=` the cap, so P1 couldn't fire either; "both
+shooting, never dies"). The boss itself has no player-keyed state.
+
+Fix: `p2_update` records the `$1228` slots that became active during P2's
+slice when P2's `+$35` went up (`CoopState::p2_shots`); the physics hook
+(after the shot loop, before anyone can fire into a freed slot) gives each
+P2 slot that went inactive back to P1's `$0BDD` and takes it off P2's
+`+$35`. A (re)spawned P2 starts with `+$35 = 0`. unverified: charged shots
+and special weapons use the same count and despawns (same `DEC $0BDD`
+sites); `$84:9DE0` also does `DEC $0C20` (block `+$78`) for weapon `$08`,
+not handled.
+
 ## Sound
 
 P2's actions enqueue on the shared ring `$0B72` (16 x {cmd, param}, write
@@ -136,10 +212,11 @@ sounds panned by `$80:88A2` pan relative to whoever is swapped in.
 ## v1: what P2 can and can't do
 
 P2 can:
-- Run, jump, dash, wall-kick and shoot, using the ROM's own code.
+- Run, jump, dash, wall-kick and shoot (its own shot count), using the ROM's own code.
 - Switch weapons. The energy pool is shared.
 - Take enemy contact damage (knockback, i-frames, death at HP 0).
-- Die in pits; respawn next to P1 after 120 frames at max HP, no life lost.
+- Die in pits, or be taken out when the camera scrolls away vertically;
+  respawn next to P1 after 120 frames at max HP, no life lost.
 
 P2 can't:
 - Take damage from enemy shots or hazards that go through `$84:9F2A`.
@@ -178,7 +255,7 @@ Other v1 limits:
   are byte-identical to the untrapped oracle (`cargo xtask verify --coop-off`).
 - [x] `call_isolated_ret` runs `$80:D671` (JSR/RTS) and `$80:E518` (JSR/RTS);
   `call_isolated` runs `$81:812E` and `$81:9D67` (JSL/RTL).
-- [x] `D=0`, `DB=$8D`, `P=$22` at the display hook.
+- [x] `D=0`, `DB=$8D`, `P=$22` at the old display hook `$80:D5FA`; at `$80:9A86` it is `D=0`, `DB=$86`, `P=$32`, so the slice sets M=1, X=0, `DB=$8D` itself.
 - [x] `$A7` holds the raw `$4218/$4219` word in the `Pads` layout. On P2
   (dump `in` = `$0BDE`,`$0BDF`): B -> `$0BDF=$80` (jump), Y -> `$0BDF=$40`,
   A -> `$0BDE=$80`. No dash on Highway: X has no leg parts yet.
@@ -246,8 +323,95 @@ cargo run --release -q -p xtask -- dump --load $S --frames 545 --out /tmp/d --at
   --coop-off --tap 200,400,600,800,1000 --hold 0100` prints `OK 2400 frames
   identical (4 traps registered on DUT)`.
 
+### QA fixes B1-B5 (2026-09-30)
+
+States from `scripts/coop-qa.sh states` (in the worktree's `states/`), dump
+lines shortened to mode, X, action, HP, camera and P2's pos/action/HP/OAM.
+
+- [x] **B4, lag-frame parity.** J's repro, no `--untrap`:
+
+  ```
+  cargo run --release -q -p xtask -- dump --load states/hw-a.state --out target/qa/b4 --frames 300 --at 270,300 --hold 0100 --refill [--coop]
+  solo    frame 270 X=(1918,351) cam (1790,259)   frame 300 X=(1960,351) cam (1832,256)
+  --coop  frame 270 X=(1918,351) cam (1790,259) / P2 pos=(1798,351) act 0E hp 12 oam base 116 count 9
+          frame 300 X=(1960,351) cam (1832,256) / P2 pos=(1840,351) act 0E hp 12 oam base 92 count 9
+  ```
+
+  (before: 1919/1962 with `--coop`). `scripts/coop-qa.sh check`: P1 parity
+  "yes" in the idle column on every milestone but M3, and M3's cause is
+  another one (see "Still open": P2's tile DMA). Mirror column: yes on M0,
+  M1, M2, M5, M6 (was no, B3), M8; no on M3, M4, M7 (P2's shots and
+  contacts change the fight, e.g. M4's Bee Blader dies sooner and the road
+  collapses earlier). `cargo xtask verify --frames 2400 --coop-off --tap
+  200,400,600,800,1000 --hold 0100`: `OK 2400 frames identical (6 traps
+  registered on DUT)`.
+- [x] **B1, pit.** J's repro with P1 stopping at the edge (`--p1tap` holds
+  Right for 540 frames), P2 walking on:
+
+  ```
+  cargo run --release -q -p xtask -- dump --load states/highway-start.state --out target/qa/b1 --frames 800 --at 540,580,590,700,710,800 --p1tap 0100@1:540 --p2-hold 0100 --coop
+  frame 540 X=(782,367) act 04 hp 11 cam (654,256) / P2 pos=(800,367) act 04 hp 11
+  frame 580 X=(782,367) act 00 hp 11 cam (654,256) / P2 pos=(857,499) act 08 vy -1472 hp 11
+  frame 590 X=(782,367) act 00 hp 11 cam (654,256) / P2 (hidden) pos=(862,517) act 0C hp 0
+  frame 700 X=(782,367) act 00 hp 11 cam (654,256) / P2 (hidden) pos=(862,517) act 0C hp 0
+  frame 710 X=(782,367) act 00 hp 11 cam (654,256) / P2 pos=(804,367) act 04 hp 16
+  frame 800 X=(782,367) act 00 hp 11 cam (654,256) / P2 (hidden) pos=(856,512) act 0C hp 0
+  ```
+
+  P2 dies in the pit, comes back next to P1 at full HP 120 frames later
+  (and, still holding Right, dies again); mode stays `02/04/04`, P1 and lives
+  untouched. With J's original `--hold 0100 --p2-hold 0100`, P2 is down
+  (Y 517, act `0C`, hidden) at f600 and P1, falling into the same pit, sets
+  `$D3=6` by f700 (was: P2 standing at `(950,895)`).
+- [x] **B2, vertical scroll.** M5 route (`hw-c`, wall kicks up the Bee
+  Blader crash, `--p1tap 8000@20:25,8000@80:25,8000@140:25,8000@200:25,` +
+  `8000@F:8` every 16 frames from 330 to 698, `--hold 0100 --refill --coop`):
+
+  ```
+  frame 500 X=(2769,466) act 10 cam (2641,366) / P2 pos=(2649,575) act 00 hp 16
+  frame 560 X=(2767,420) act 10 cam (2639,324) / P2 pos=(2648,575) act 00 hp 16 oam count 0
+  frame 580 X=(2776,418) act 08 cam (2648,299) / P2 (hidden) pos=(2648,575) act 0C hp 0
+  frame 700 X=(2773,344) act 08 cam (2645,256) / P2 (hidden)
+  frame 760 X=(2861,351) act 04 cam (2733,256) / P2 pos=(2797,351) act 00 hp 16
+  ```
+
+  P2 is taken out once the camera is 288 px above it and re-anchors on the
+  first grounded P1 frame after the 120-frame wait. M4 (P2 falling with the
+  collapsing road to Y 591 while the camera lags) is not a false positive.
+- [x] **B5, clamp.** `dump --load states/highway-start.state --frames 240
+  --at 120,240 --hold 0100 --coop`: f120 camera 171, P2 179; f240 camera
+  346, P2 354: P2 = camera + 8, same frame, whole sprite on screen
+  (`target/qa/m0-walk-idle/frame_000240.png`).
+- [x] **B3, shots.** Bee Blader 2 (`hw-bee2`, enemy slot 0 `$0E68`, HP
+  `+$27`), Y tapped every 12 frames from f10 for 1500 frames, HP every 50
+  frames (`x` = slot freed):
+
+  ```
+  dump --load states/hw-bee2.state --out target/qa/kp2 --frames 1500 --at 50,100,.. --refill --coop --p2tap 4000@10:2,4000@22:2,.. --wram
+  P1  28 24 24 24 22 19 18 18 15 11 10 7 3 0 0 x0 ..
+  P2  28 24 24 24 22 19 19 19 16 12 11 8 4 0 0 x0 ..
+  both 28 24 24 24 22 19 18 18 15 11 10 7 3 0 0 x0 ..
+  ```
+
+  (before: P2 alone stuck at 28, both never killed it.) P2 shooting vs
+  nobody shooting: P1's block `$0BA8..$0C38` identical at every 50th frame
+  to f400. Both together are no faster than P1 alone here (boss i-frames
+  after a hit, `+$3E`; unverified). P1's `$0BDD` stays in 0..3.
+- [x] Pause (M2): P2 frozen and not drawn in the weapon menu (hide hook at
+  `$D545`), `target/qa/m2-pause-idle/frame_000160.png`; back where it was
+  after the fade.
+
 Still open:
 
+- [ ] **P2's tile DMA can still shift P1's lag frames** (M3 idle: P2 is hit
+  at f272, P1 is 4-5 px behind solo from f275). P2's animation changes
+  queue its tiles into the `$0500` VRAM queue (`$0510`/`$0518`, `$A3`,
+  `$1F25` in `MMX_COOP_DIFF`); the NMI runs that DMA in real time, so the
+  NMI is longer and the main loop lags earlier. Throwaway check: dropping
+  P2's queue entries after its update slice (restore `$0500..$057F`, `$A3`,
+  `$1F25`) gives M3 idle parity over 800 frames. The fix is the shadow tile
+  page (docs/zero.md route A': P2's tiles written outside emulated time),
+  the earlier work.
 - [ ] Enemy shots / hazards through `$84:9F2A` hit only P1.
 - [ ] Enemies that die on contact die only on P1.
 - [ ] Shared player tiles (`$0500` upload queue) and charge palette (`$0422..`).
