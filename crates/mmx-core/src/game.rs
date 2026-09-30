@@ -415,7 +415,7 @@ impl Game {
 
     /// The shadow sprite tile pages (pending; live on the next OAM upload):
     /// page 0 is P2's, page 1 (`P2_PAGE_WORDS..`) a Zero P1's, page 2 the
-    /// saber waves (P2's in columns 0-7, P1's in 8-15). See
+    /// saber slash arcs (P2's in columns 0-7, P1's in 8-15). See
     /// `p2tiles.rs`. Part of the save state.
     pub fn p2_tile_page_mut(&mut self) -> &mut [u16; P2_PAGE_WORDS * P2_PAGES] {
         self.emu.p2_tile_page_mut()
