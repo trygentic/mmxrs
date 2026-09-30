@@ -2,10 +2,25 @@
 resolver = "2"
 members = [
     "crates/mmx-core",
+    "crates/mmx-net",
+    "tools/mmx-signal",
 ]
 # Vendored third-party sources (vendor/jgenesis, vendor/matchbox_socket) are
 # path dependencies, not workspace members: not linted or formatted as ours.
 exclude = ["vendor"]
+
+# matchbox_socket 0.14.0 (MIT OR Apache-2.0) with three small patches, each
+# marked `mmxrs patch (from z2rs)` in the source:
+#   * browser: ICE gathering waits at most 1 s before the offer/answer is
+#     sent, then trickles the rest (upstream waits for gathering to complete,
+#     which one unresponsive STUN server stretches to ~40 s);
+#   * browser + native: an empty ICE URL list means no ICE servers;
+#   * the default signaller builder is exported so mmx-net can observe
+#     signalling progress (connecting / waiting for peer / negotiating).
+# See docs/netplay.md "Why matchbox is vendored". Drop the patch once upstream
+# ships equivalent behaviour.
+[patch.crates-io]
+matchbox_socket = { path = "vendor/matchbox_socket" }
 
 [workspace.package]
 edition = "2021"
