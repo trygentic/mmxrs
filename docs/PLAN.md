@@ -101,12 +101,13 @@ probe), so an NMI landing on a trapped entry does not double-fire it. `mmx-core`
 - RNG `$0BA6-$0BA7`
 - pads: P1 held `$A7`, prev `$A9`, pressed `$AB`; P2 held `$AD`, prev `$AF`, pressed `$B1`; X's remapped input held `$0BDE`, prev `$0BE0`, pressed `$0BE2` (built by `$80:E559`)
 - **X object `$0BA8..$0C38`** (player code runs with `D=$0BA8`): `+02 $0BAA` action (`$0C` death, `$0E` hurt), `+05 $0BAD` X pos, `+08 $0BB0` Y pos, `+04/+07` subpixels, `+1A $0BC2` vx, `+1C $0BC4` vy, `+27 $0BCF` HP (bit7 = HUD redraw), `+33 $0BDB` weapon, `+6B $0C13` i-frames, `+11 $0BB9` facing bit 6
+- armour-part overlays `$0C38-$0C98` (`$20`×3; dust/sparks live in the shared `$1928` pool)
 - enemies `$0E68-$1227` stride `$40` × 15 (`+00` active, `+0A` id, `+05/+08` pos, `+26` contact damage, `+27` HP); shots `$0C98` `$20`×12; items/enemy shots `$1228` `$40`×8; effects `$1928` `$20`×31
 - camera BG1 `$1E4D` X / `$1E50` Y; level `$1F7A`; lives `$1F80`; sub-tanks `$1F83-$1F86`; weapon energy `$1F88+2i`; max HP `$1F9A`; armor `$1F99`; heart tanks `$1F9C`; pause `$1F24`; boss object ptr `$1F0E`
 - OAM buffer `$0700` (544 B), CGRAM buffer `$0300`; sound queue ring `$0B72` (16×{cmd,param}), enqueue `$80:888F`
 - anti-piracy counter `$1F9F` (SRAM probes at `$70:xxxx`; no SRAM mapped = pass)
 
-## Routine map (v1.0; bank `$80` PCs from the disassembly drift by up to `0x41` on the real cartridge, bank `$81`/`$84` matched; trust `cargo xtask trace --calls`)
+## Routine map (v1.0; the disassembly's PCs drift on this cartridge: bank `$80` by up to `0x41`, bank `$84` by `+5` after `$84:9D07`, bank `$81` by `+$0A` near `$81:9D7E`; trust `cargo xtask trace --calls`)
 
 reset `$80:8000`; main loop / scheduler `$80:8099`; NMI `$80:8168`; IRQ `$80:84A1`;
 in-stage per-frame (calls at `$80:9A52..9A83`): input remap **`$80:E518`** → RNG `$84:9086` →
@@ -114,7 +115,7 @@ in-stage per-frame (calls at `$80:9A52..9A83`): input remap **`$80:E518`** → R
 `$80:D3B2 D40F D462 D2B3 D4BF`, **player phase 2 `$81:9D67` at `$80:D23D`**, camera `$80:DDB0`) →
 spawn by camera `$80:DC0B` → pause check `$80:9E3D` → **OAM build + HUD `$80:D544`** (health bar
 `$80:D7A3`, weapon bar `$80:D8CA`, boss bar `$80:D9E3`, lists `$80:D5B4`, effects `$80:D640`,
-**player emitter `$80:D671`**, lists 3-5 `$80:D5FA`). All confirmed by trace on 2026-09-30. Player damage `$84:9D07` (enemy contact), death `$81:96CB`,
+**player emitter `$80:D671`**, lists 3-5 `$80:D5FA`). All confirmed by trace on 2026-09-30. Enemy contact on X `$84:9B03` (154 `JSL` sites, `D` = enemy; box test `$84:9C0E`, damage at `$84:9D07`), pit death in the camera code (`Y - $20 >= camY + $E0`, listing `$80:E14A`), death `$81:96CB`,
 hurt `$81:967C`; enemy spawn `$82:8321`; title `$80:91AA`.
 
 ## Co-op hooks (see docs/coop.md for the verified table)

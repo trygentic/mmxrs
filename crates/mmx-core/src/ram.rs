@@ -36,6 +36,9 @@ pub const MAX_HP: u32 = 0x7E1F9A;
 pub const PAUSE: u32 = 0x7E1F24;
 pub const OAM_BUF: u32 = 0x7E0700;
 pub const SOUND_QUEUE: u32 = 0x7E0B72;
+/// Sound ring write / read indices (16 entries of {cmd, param}; no full check).
+pub const SND_WRITE: u32 = 0x7E0BA3;
+pub const SND_READ: u32 = 0x7E0BA4;
 
 // Scheduler: 7 task slots of $10 bytes; current slot index.
 pub const TASK_SLOTS: u32 = 0x7E0030;
