@@ -29,27 +29,37 @@ use crate::{Game, BTN_SELECT, BTN_START};
 
 // ------------------------------------------------------------ addresses
 
-/// P2 update slice hook: shots loop (`JSR` from `$80:D24A`, only when the
-/// freeze flag `$1F13` is 0; the `$1F13 != 0` path runs `$80:D46D` instead,
-/// so P2 freezes whenever the game freezes objects). Confidence: high.
-pub const HOOK_UPDATE: u32 = 0x80D450;
-/// P2 display slice hook: `$80:D63B` (OAM lists 3-5). Runs right after the
-/// player emitter, before the low-priority lists. Confidence: high.
-pub const HOOK_DISPLAY: u32 = 0x80D63B;
+/// P2 update slice hook: the instruction after the object master's
+/// `JSL $81:812E` at `$80:D1EB`, i.e. the moment P1's update has returned.
+/// Unconditional. Address confirmed by `cargo xtask trace --calls` on the
+/// real ROM (the disassembly's bank-`$80` PCs drift from this ROM by up to
+/// `0x41`; bank `$81`/`$84` PCs matched).
+pub const HOOK_UPDATE: u32 = 0x80D1EF;
+/// P2 physics slice hook: the instruction after `JSL $81:9D67` at `$80:D23D`
+/// (the object master, after the enemy loops). Confirmed by trace.
+pub const HOOK_PHYSICS: u32 = 0x80D241;
+/// P2 display slice hook: `$80:D5FA` (OAM lists 3-5), the call right after the
+/// player emitter inside the OAM build `$80:D544`. Confirmed by trace.
+pub const HOOK_DISPLAY: u32 = 0x80D5FA;
 /// Enemy contact damage on X (tail of `$84:9B03` after the hit test
 /// `$84:9C0E` with `X=$0BA8`). Entered by `JMP`, starts with an SRAM probe.
 pub const HOOK_CONTACT: u32 = 0x849D07;
 /// Player update: `PHP/PHD`, sets `D=$0BA8` itself, ends `RTL` (JSL entry).
 pub const PLAYER_UPDATE: u32 = 0x81812E;
-/// Player OAM emitter: `LDX #$0BA8; LDA $0E,X; BEQ; JSR $D6BD`, ends `RTS`.
-/// Needs `M=1, X=0, D=0` (true at [`HOOK_DISPLAY`]).
-pub const PLAYER_OAM: u32 = 0x80D6B2;
+/// Player terrain/physics phase (`JSL` from `$80:D23D`, ends `RTL`): collision
+/// against the layout, ground flag, camera requests. Confirmed by trace.
+pub const PLAYER_PHYSICS: u32 = 0x819D67;
+/// Input remapper (`JSR` from `$80:9A52` in the per-frame stage code, ends
+/// `RTS`): pad 1 (`$A7`) + button config -> the block's `$0BDE..$0BE3`.
+/// Confirmed by trace.
+pub const INPUT_REMAP: u32 = 0x80E518;
+/// Player OAM emitter (`JSR` from `$80:D55D`, ends `RTS`). Needs
+/// `M=1, X=0, D=0` (true at [`HOOK_DISPLAY`]). Confirmed by trace.
+pub const PLAYER_OAM: u32 = 0x80D671;
 
 /// Direct-page OAM cursor: next free OAM slot (`AND #$7F`, `*4` = byte
 /// offset into `$0700`). `$E5` = high-table byte index, `$E6` = accumulator.
 const OAM_CURSOR: usize = 0x00E4;
-/// Button config, 6 bytes, masks in `$80:E559`'s button-byte layout.
-const INPUT_CFG: u32 = 0x7EFFC0;
 /// `$D2` / `$D3` values for "in stage" / "gameplay".
 const MODE_IN_STAGE: u8 = 4;
 const PHASE_GAMEPLAY: u8 = 4;
@@ -64,6 +74,24 @@ const P1_OWNED: [(u32, usize); 2] = [
     (0x7E1E48, 0x1E8A - 0x1E48), // camera requests / limits ($1E5E..$1E88 written)
     (0x7E1F13, 7),               // object freeze flags $1F13..$1F19
 ];
+
+/// Per-player scratch outside the block that the player update writes and
+/// reads back next frame (collision / landing state, from the disassembly's
+/// write list). Swapped with a P2 shadow around every slice like the block;
+/// without this P2 read P1's grounded state and "landed" at its jump apex.
+// unverified: exact extent; these two ranges fixed the apex landing on the real ROM.
+const P2_SWAPPED: [(u32, usize); 2] = [(0x7E1F31, 7), (0x7E1FA1, 16)];
+const P2_SWAPPED_LEN: usize = 7 + 16;
+
+fn swap_scratch(w: &mut [u8; 0x20000], shadow: &mut [u8; P2_SWAPPED_LEN]) {
+    let mut o = 0;
+    for &(a, n) in &P2_SWAPPED {
+        for k in 0..n {
+            std::mem::swap(&mut w[ix(a) + k], &mut shadow[o + k]);
+        }
+        o += n;
+    }
+}
 
 // ------------------------------------------------------------ block layout
 
@@ -102,6 +130,14 @@ pub struct CoopState {
     pub p2_hidden: bool,
     /// First OAM slot P2 got this frame (diagnostic).
     pub p2_oam_base: usize,
+    /// P1's Y on the previous frame while P2 waits to be anchored.
+    pub last_p1_y: Option<u16>,
+    /// P2's copy of [`P2_SWAPPED`].
+    pub p2_scratch: [u8; P2_SWAPPED_LEN],
+    /// OAM slots the emitter wrote for P2 this frame (diagnostic).
+    pub p2_oam_count: usize,
+    /// `(D, DB, P)` seen at the display hook (diagnostic).
+    pub dbg_regs: (u16, u8, u8),
     /// Sprite palette (0-7) forced onto P2's OAM entries.
     pub zero_palette: u8,
     /// Frames left while P2 is down.
@@ -117,6 +153,10 @@ impl Default for CoopState {
             p2: [0; X_BLOCK_LEN],
             p2_hidden: true,
             p2_oam_base: 0,
+            last_p1_y: None,
+            p2_scratch: [0; P2_SWAPPED_LEN],
+            p2_oam_count: 0,
+            dbg_regs: (0, 0, 0),
             zero_palette: ZERO_PALETTE,
             down_frames: 0,
             contact_hits: 0,
@@ -137,28 +177,6 @@ pub fn swap_block(wram: &mut [u8; 0x20000], shadow: &mut [u8; X_BLOCK_LEN]) {
 /// tighter window may look better once seen on screen.
 pub fn clamp_p2_x(x: u16, camera_x: u16) -> u16 {
     x.clamp(camera_x, camera_x.saturating_add(256 - 16))
-}
-
-/// Port of `$80:E559` for pad 2: `pad` in [`crate::Pads`] layout (the
-/// little-endian word at `$AD`), `cfg` the six masks at `$7E:FFC0`, `prev`
-/// P2's previous held pair. Returns `(held, pressed)` for `$0BDE` / `$0BE2`.
-///
-/// E559 packs the buttons into `B Y A X L R Sel St` (bit7..0); config entry
-/// `c` fires when `c != 0 && buttons & c == c`. Output:
-/// `$0BDE = c2<<7 | c3<<5 | c4<<4`, `$0BDF = c1<<7 | c0<<6 | c5<<4 | dpad`,
-/// pressed = `!prev & held`. Pause (`$80:9E7E`) tests `$0BE3 & $10` = c5,
-/// the menu action. P2 loses Start/Select and the menu bit so it can't pause.
-pub fn p2_input_from_pad(pad: u16, prev: [u8; 2], cfg: &[u8; 6]) -> ([u8; 2], [u8; 2]) {
-    let pad = pad & !(BTN_START | BTN_SELECT);
-    let (lo, hi) = (pad as u8, (pad >> 8) as u8);
-    let buttons = ((lo >> 2) & 0x3C) | (hi & 0xC0) | ((hi >> 4) & 0x03);
-    let hit = |c: u8| u8::from(c != 0 && buttons & c == c);
-    let held = [
-        hit(cfg[2]) << 7 | hit(cfg[3]) << 5 | hit(cfg[4]) << 4,
-        hit(cfg[1]) << 7 | hit(cfg[0]) << 6 | (hi & 0x0F), // c5 (menu) masked
-    ];
-    let pressed = [!prev[0] & held[0], !prev[1] & held[1]];
-    (held, pressed)
 }
 
 /// Force sprite palette `pal` (0-7) on one 4-byte OAM entry (attribute byte
@@ -191,6 +209,7 @@ pub fn p2_is_down(p2: &[u8; X_BLOCK_LEN]) -> bool {
 /// Register the co-op trap group. Not part of any verification trap set.
 pub fn register_coop_traps(game: &mut Game) {
     game.traps.register(HOOK_UPDATE, "coop_p2_update", TrapReturn::Observe, p2_update);
+    game.traps.register(HOOK_PHYSICS, "coop_p2_physics", TrapReturn::Observe, p2_physics);
     game.traps.register(HOOK_DISPLAY, "coop_p2_display", TrapReturn::Observe, p2_display);
     game.traps.register(HOOK_CONTACT, "coop_contact", TrapReturn::Observe, contact);
 }
@@ -220,7 +239,25 @@ fn p2_update(game: &mut Game) {
         return;
     }
     if game.coop.p2_hidden {
+        // Anchor only once P1 stands still vertically: a copy taken during the
+        // stage-entry drop inherits an action that never lands (seen on the
+        // real ROM: P2 fell through the floor).
+        let y = word(game.wram(), ram::X_POS_Y);
+        let grounded = word(game.wram(), ram::X_VEL_Y) == 0 && Some(y) == game.coop.last_p1_y;
+        game.coop.last_p1_y = Some(y);
+        if !grounded {
+            return;
+        }
         game.coop.p2 = respawn_anchor(game.wram());
+        // Scratch starts as a copy of P1's (grounded) state.
+        let mut copy = [0u8; P2_SWAPPED_LEN];
+        let w = game.wram();
+        let mut o = 0;
+        for &(a, n) in &P2_SWAPPED {
+            copy[o..o + n].copy_from_slice(&w[ix(a)..ix(a) + n]);
+            o += n;
+        }
+        game.coop.p2_scratch = copy;
         game.coop.p2_hidden = false;
     }
     if p2_is_down(&game.coop.p2) {
@@ -228,39 +265,67 @@ fn p2_update(game: &mut Game) {
         return go_down(game);
     }
 
-    let mut cfg = [0u8; 6];
-    cfg.copy_from_slice(&game.wram()[ix(INPUT_CFG)..ix(INPUT_CFG) + 6]);
-    let pad = word(game.wram(), PAD2_HELD);
+    let pad = word(game.wram(), PAD2_HELD) & !(BTN_START | BTN_SELECT);
+    with_p2_swapped(game, |game| {
+        // Run the ROM's own input remapper (`$80:E518`, JSR/RTS) with pad 2
+        // in pad 1's slot: it reads `$A7` and the block's previous input and
+        // writes the block's `$0BDE..$0BE3`, so P2 gets P1's button config.
+        let w = game.wram_mut();
+        let i = ix(ram::PAD1_HELD);
+        let saved_pad1 = [w[i], w[i + 1]];
+        w[i..i + 2].copy_from_slice(&pad.to_le_bytes());
+        game.call_isolated_ret(INPUT_REMAP, crate::TrapReturn::Rts);
+        let w = game.wram_mut();
+        w[i..i + 2].copy_from_slice(&saved_pad1);
+        game.call_isolated(PLAYER_UPDATE);
+    });
+}
+
+/// `$80:D241` (after the object master's `JSL $81:9D67`): P2's terrain /
+/// physics phase, the second half of the player's frame that runs after the
+/// enemy loops. Without it P2 kept a stale ground flag (`$0BD3` bit 2) and
+/// "landed" at the apex of every jump. Then clamp P2 into the camera window
+/// and check for death.
+fn p2_physics(game: &mut Game) {
+    if !game.coop.enabled || game.coop.p2_hidden || p2_is_down(&game.coop.p2) {
+        return;
+    }
+    with_p2_swapped(game, |game| {
+        game.call_isolated(PLAYER_PHYSICS);
+        let w = game.wram_mut();
+        let cam = word(w, ram::CAMERA_X);
+        let x = word(w, ram::X_POS_X);
+        let cx = clamp_p2_x(x, cam);
+        if cx != x {
+            // ponytail: no collision check; a clamp can push P2 into a wall.
+            w[ix(ram::X_POS_X)..ix(ram::X_POS_X) + 2].copy_from_slice(&cx.to_le_bytes());
+            w[ix(ram::X_VEL_X)..ix(ram::X_VEL_X) + 2].fill(0);
+        }
+    });
+    if p2_is_down(&game.coop.p2) {
+        go_down(game);
+    }
+}
+
+/// Swap P2's block and scratch in, run `f`, swap out, and put back every
+/// P1-owned byte the slice may have touched (camera requests, freeze flags).
+fn with_p2_swapped(game: &mut Game, f: impl FnOnce(&mut Game)) {
     let saved: Vec<Vec<u8>> =
         P1_OWNED.iter().map(|&(a, n)| game.wram()[ix(a)..ix(a) + n].to_vec()).collect();
-
     let mut p2 = game.coop.p2;
+    let mut scratch = game.coop.p2_scratch;
     let w = game.wram_mut();
     swap_block(w, &mut p2);
-    let i = ix(ram::X_INPUT_HELD);
-    let prev = [w[i], w[i + 1]];
-    let (held, pressed) = p2_input_from_pad(pad, prev, &cfg);
-    w[i..i + 6].copy_from_slice(&[held[0], held[1], prev[0], prev[1], pressed[0], pressed[1]]);
-
-    game.call_isolated(PLAYER_UPDATE);
-
+    swap_scratch(w, &mut scratch);
+    f(game);
     let w = game.wram_mut();
-    let cam = word(w, ram::CAMERA_X);
-    let x = word(w, ram::X_POS_X);
-    let cx = clamp_p2_x(x, cam);
-    if cx != x {
-        // ponytail: no collision check; a clamp can push P2 into a wall.
-        w[ix(ram::X_POS_X)..ix(ram::X_POS_X) + 2].copy_from_slice(&cx.to_le_bytes());
-        w[ix(ram::X_VEL_X)..ix(ram::X_VEL_X) + 2].fill(0);
-    }
     swap_block(w, &mut p2);
+    swap_scratch(w, &mut scratch);
     for (&(a, n), s) in P1_OWNED.iter().zip(&saved) {
         w[ix(a)..ix(a) + n].copy_from_slice(s);
     }
     game.coop.p2 = p2;
-    if p2_is_down(&game.coop.p2) {
-        go_down(game);
-    }
+    game.coop.p2_scratch = scratch;
 }
 
 /// `$80:D63B`: P2 display slice. Runs the ROM's own player emitter on P2's
@@ -271,6 +336,8 @@ fn p2_display(game: &mut Game) {
     if !game.coop.enabled || game.coop.p2_hidden {
         return;
     }
+    let r = game.regs();
+    game.coop.dbg_regs = (r.d, r.dbr, r.p);
     let first = game.wram()[OAM_CURSOR] & 0x7F;
     if first > 128 - P2_MAX_SPRITES {
         return;
@@ -288,6 +355,7 @@ fn p2_display(game: &mut Game) {
         set_oam_palette(&mut w[o..o + 4], pal);
     }
     game.coop.p2_oam_base = usize::from(first);
+    game.coop.p2_oam_count = usize::from(last.max(first) - first);
 }
 
 /// `$84:9D07`: enemy touched P1. v1 stub: count only; P2 takes no contact
@@ -302,16 +370,10 @@ fn contact(game: &mut Game) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BTN_A, BTN_B, BTN_L, BTN_R, BTN_RIGHT, BTN_X, BTN_Y};
 
     fn wram() -> Box<[u8; 0x20000]> {
         vec![0u8; 0x20000].into_boxed_slice().try_into().unwrap()
     }
-
-    /// ponytail: a plausible config (shot Y, jump B, dash A, L, R, menu Start)
-    /// in E559's button byte `B Y A X L R Sel St`. unverified: the ROM
-    /// default table `$86:EE20` and which slot means which action.
-    const CFG: [u8; 6] = [0x40, 0x80, 0x20, 0x08, 0x04, 0x01];
 
     #[test]
     fn coop_default_off() {
@@ -352,38 +414,8 @@ mod tests {
         assert_eq!(clamp_p2_x(0xFFFF, 0xFFF0), 0xFFFF);
     }
 
-    #[test]
-    fn coop_input_remap_matches_e559() {
-        // Nothing held.
-        assert_eq!(p2_input_from_pad(0, [0, 0], &CFG), ([0, 0], [0, 0]));
-        // Y (c0) -> $0BDF bit6, B (c1) -> $0BDF bit7, A (c2) -> $0BDE bit7.
-        let (h, p) = p2_input_from_pad(BTN_Y | BTN_B | BTN_A | BTN_RIGHT, [0, 0], &CFG);
-        assert_eq!(h, [0x80, 0xC1]);
-        assert_eq!(p, h);
-        // L (c3) -> $0BDE bit5, R (c4) -> bit4; X unmapped.
-        let (h, _) = p2_input_from_pad(BTN_L | BTN_R | BTN_X, [0, 0], &CFG);
-        assert_eq!(h, [0x30, 0x00]);
-        // Pressed is the rising edge only.
-        let (h, p) = p2_input_from_pad(BTN_A | BTN_L, [0x80, 0], &CFG);
-        assert_eq!((h, p), ([0xA0, 0], [0x20, 0]));
-    }
 
-    #[test]
-    fn coop_p2_cannot_pause() {
-        let (h, p) = p2_input_from_pad(BTN_START | BTN_SELECT, [0, 0], &CFG);
-        assert_eq!((h, p), ([0, 0], [0, 0]));
-        // Even when menu is bound to a normal button: c5 never reaches $0BE3.
-        let cfg = [0, 0, 0, 0, 0, 0x80];
-        let (h, _) = p2_input_from_pad(BTN_B, [0, 0], &cfg);
-        assert_eq!(h[1] & 0x10, 0);
-    }
 
-    #[test]
-    fn coop_multi_button_config_needs_all() {
-        let cfg = [0xC0, 0, 0, 0, 0, 0]; // c0 = B+Y chord
-        assert_eq!(p2_input_from_pad(BTN_B, [0, 0], &cfg).0[1] & 0x40, 0);
-        assert_eq!(p2_input_from_pad(BTN_B | BTN_Y, [0, 0], &cfg).0[1] & 0x40, 0x40);
-    }
 
     #[test]
     fn coop_oam_palette() {

@@ -76,6 +76,8 @@ impl Game {
     pub fn call_isolated(&mut self, addr: u32);                                  // JSL/RTL routine, zero emulated cycles, traps fire inside
     pub fn call_isolated_ret(&mut self, addr: u32, ret: TrapReturn);            // Rts form for JSR routines
     pub fn rom_read(&self, addr: u32) -> u8;                                    // LoROM 24-bit address
+    pub fn trace_frame(&mut self, pads: Pads) -> Vec<u32>;                      // debug: every opcode PC of one frame
+    pub isolated_trace: Option<Vec<u32>>;                                       // debug: PCs fetched inside call_isolated*
     pub fn save_state(&self) -> Vec<u8>; pub fn load_state(&mut self, s: &[u8]) -> Result<(), String>;
     pub traps: TrapTable; pub traplog: TrapLog; pub coop: CoopState;
 }
@@ -104,17 +106,18 @@ probe), so an NMI landing on a trapped entry does not double-fire it. `mmx-core`
 - OAM buffer `$0700` (544 B), CGRAM buffer `$0300`; sound queue ring `$0B72` (16×{cmd,param}), enqueue `$80:888F`
 - anti-piracy counter `$1F9F` (SRAM probes at `$70:xxxx`; no SRAM mapped = pass)
 
-## Routine map (v1.0)
+## Routine map (v1.0; bank `$80` PCs from the disassembly drift by up to `0x41` on the real cartridge, bank `$81`/`$84` matched; trust `cargo xtask trace --calls`)
 
 reset `$80:8000`; main loop / scheduler `$80:8099`; NMI `$80:8168`; IRQ `$80:84A1`;
-in-stage per-frame `$80:9A6A` → input remap `$80:E559` → RNG `$84:9086` →
-**object update master `$80:D203`** (player `$81:812E`, shots loop `$80:D450`,
-enemies loop `$80:D500`, camera `$80:DDF1`) → spawn by camera `$80:DC4C` →
-pause check `$80:9E7E` → **OAM build + HUD `$80:D585`** (health bar `$80:D7E4`,
-boss bar `$80:DA24`). Player damage `$84:9D07` (enemy contact), death `$81:96CB`,
+in-stage per-frame (calls at `$80:9A52..9A83`): input remap **`$80:E518`** → RNG `$84:9086` →
+**object update master `$80:D1C2`** (player phase 1 `$81:812E` at `$80:D1EB`, item/shot/enemy loops
+`$80:D3B2 D40F D462 D2B3 D4BF`, **player phase 2 `$81:9D67` at `$80:D23D`**, camera `$80:DDB0`) →
+spawn by camera `$80:DC0B` → pause check `$80:9E3D` → **OAM build + HUD `$80:D544`** (health bar
+`$80:D7A3`, weapon bar `$80:D8CA`, boss bar `$80:D9E3`, lists `$80:D5B4`, effects `$80:D640`,
+**player emitter `$80:D671`**, lists 3-5 `$80:D5FA`). All confirmed by trace on 2026-09-30. Player damage `$84:9D07` (enemy contact), death `$81:96CB`,
 hurt `$81:967C`; enemy spawn `$82:8321`; title `$80:91AA`.
 
-## Co-op hooks (mirrors z2rs `coop.rs`)
+## Co-op hooks (see docs/coop.md for the verified table)
 
 1. `$80:D450` (shots loop, runs right after the player update) in `Observe`
    mode: swap in P2 block, build P2's remapped input from pad 2 (`$AD`), run
@@ -134,7 +137,10 @@ hurt `$81:967C`; enemy spawn `$82:8321`; title `$80:91AA`.
   runs both), lockstep harness, `.bk2` parser, xtask verify, native app with
   headless `--frames/--dump-at`, `mmx-net` copy, web cdylib skeleton, co-op
   scaffold with unit tests on the swap logic.
-- M1 (needs `MMX_ROM`): boot to title, record SHA-256 / version, first
-  lockstep replay, find OAM hook, P2 visible.
+- M1 (done 2026-09-30 with the ROM in `roms/`, gitignored): boots, v1.0,
+  SHA-256 `1c41bb11…af3ab`, 2400-frame lockstep clean, both co-op hooks found by
+  trace, P2 visible, walking, jumping, landing. Debug tooling: `cargo xtask
+  trace --calls`, `cargo xtask cooptrace --frame F`, input script flags
+  `--tap/--hold/--p2-hold/--from/--p1tap/--p2tap` shared by verify/dump/trace.
 - M2: port the bank-`$80` frame driver and player routines register-exact
   behind traps; separate HP bar + revive; real Zero sprites; Android.

@@ -60,3 +60,19 @@ ticking a *clone* of the CPU against a side-effect-free probe bus, the same
 trick upstream uses for `next_cpu_cycle_mclk`. It costs one clone per hit on
 a trapped address, not per instruction. Keeping the CPU pristine keeps the
 oracle (traps disabled) and the DUT on exactly the same interpreter.
+
+## Isolated calls and DMA
+
+`run_cpu_isolated` (vendored patch) drains the general-purpose DMA unit after
+every CPU tick, so a routine that starts a DMA (`$420B`) sees the transfer
+complete before its next instruction, as on hardware. The PPU, APU and master
+clock still do not advance.
+
+## Debugging traps
+
+- `cargo xtask trace --frames F --calls`: every call target of frame F with
+  its first caller. This is how the real hook addresses were found; the
+  disassembly's bank-`$80` PCs drift from the cartridge.
+- `Game::isolated_trace = Some(vec![])` records every PC fetched inside
+  `call_isolated*`; `cargo xtask cooptrace --frame F` diffs P1's and P2's
+  player update and prints each branch that went a different way.

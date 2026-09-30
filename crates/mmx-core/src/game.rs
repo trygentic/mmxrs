@@ -27,6 +27,9 @@ pub struct Game {
     pub traps: TrapTable,
     pub traplog: TrapLog,
     pub coop: coop::CoopState,
+    /// Debug: when `Some`, every opcode fetched inside `call_isolated*` is
+    /// appended as `PBR:PC`.
+    pub isolated_trace: Option<Vec<u32>>,
     emu: SnesEmulator,
     // ponytail: own copy of the ROM for rom_read (~1.5 MiB); jgenesis only
     // exposes cartridge reads through &mut (open-bus side effect).
@@ -167,6 +170,7 @@ impl Game {
             audio: Audio::default(),
             frame_count: 0,
             fired_at: None,
+            isolated_trace: None,
         })
     }
 
@@ -197,6 +201,27 @@ impl Game {
             rendered |= effect == TickEffect::FrameRendered;
         }
         self.frame_count += 1;
+    }
+
+    /// Debug aid: one frame like [`Game::step`], returning `PBR:PC` of every
+    /// opcode fetched (traps still fire). Big (~100k entries per frame).
+    pub fn trace_frame(&mut self, pads: Pads) -> Vec<u32> {
+        let inputs = SnesInputs { p1: joypad(pads.p1), p2: joypad(pads.p2) };
+        let mut out = Vec::with_capacity(120_000);
+        let mut rendered = false;
+        while !(rendered && self.emu.at_instruction_boundary()) {
+            self.dispatch_traps();
+            if self.emu.at_instruction_boundary() && self.emu.next_tick_fetches_opcode() {
+                out.push(self.regs().pbr_pc());
+            }
+            let effect = self
+                .emu
+                .tick(&mut self.video, &mut self.audio, &mut ConstantInputPoller(&inputs), &mut NoSave)
+                .expect("frontend sinks are infallible and there is no SRAM");
+            rendered |= effect == TickEffect::FrameRendered;
+        }
+        self.frame_count += 1;
+        out
     }
 
     /// Fire the trap at `PBR:PC` once per boundary visit. Loops because an
@@ -361,6 +386,15 @@ impl Game {
             }
             assert!(budget > 0, "call_isolated(${addr:06X}) did not return");
             budget -= 1;
+            if self.isolated_trace.is_some()
+                && self.emu.at_instruction_boundary()
+                && self.emu.next_tick_fetches_opcode()
+            {
+                let pc = self.regs().pbr_pc();
+                if let Some(t) = self.isolated_trace.as_mut() {
+                    t.push(pc);
+                }
+            }
             // One CPU tick (the sentinel check inside is the same as ours).
             self.emu.run_cpu_isolated(sentinel, 1);
         }

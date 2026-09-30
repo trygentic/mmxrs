@@ -5,10 +5,12 @@
 
 [meta]
 disassembly = "MarkAlarm Mega Man X disassembly (USA v1.0)"
-# ponytail: URL not recorded in PLAN.md; fill in the exact repo when known.
 url = "https://github.com/MarkAlarm/MMX1-Disassembly"
 commit = "e6d6130"
 rom_version = "USA v1.0"
+# The listing's bank-$80 PCs drift from the real cartridge by up to 0x41
+# (bank $81/$84 matched). Entries with `trace = true` were confirmed with
+# `cargo xtask trace --calls`; the others are the listing's numbers, unverified.
 
 [[routine]]
 name = "reset"
@@ -23,6 +25,7 @@ status = "unported"
 [[routine]]
 name = "nmi"
 addr = "80:8168"
+trace = true
 status = "unported"
 
 [[routine]]
@@ -42,62 +45,74 @@ status = "unported"
 
 [[routine]]
 name = "stage_frame"
-addr = "80:9A6A"
+addr = "80:9A29"
+# entry not seen directly; its calls sit at 80:9A52..9A83 (trace)
 status = "unported"
 
 [[routine]]
 name = "pause_check"
-addr = "80:9E7E"
+addr = "80:9E3D"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "object_update"
-addr = "80:D203"
+addr = "80:D1C2"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "shots_loop"
-addr = "80:D450"
+addr = "80:D40F"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "enemies_loop"
-addr = "80:D500"
+addr = "80:D4BF"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "oam_build_hud"
-addr = "80:D585"
+addr = "80:D544"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "hud_health_bar"
-addr = "80:D7E4"
+addr = "80:D7A3"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "hud_boss_bar"
-addr = "80:DA24"
+addr = "80:D9E3"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "spawn_by_camera"
-addr = "80:DC4C"
+addr = "80:DC0B"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "camera"
-addr = "80:DDF1"
+addr = "80:DDB0"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "input_remap"
-addr = "80:E559"
+addr = "80:E518"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "player_update"
 addr = "81:812E"
+trace = true
 status = "unported"
 
 [[routine]]
@@ -118,9 +133,22 @@ status = "unported"
 [[routine]]
 name = "rng"
 addr = "84:9086"
+trace = true
 status = "unported"
 
 [[routine]]
 name = "player_contact_damage"
 addr = "84:9D07"
+status = "unported"
+
+[[routine]]
+name = "player_physics"
+addr = "81:9D67"
+trace = true
+status = "unported"
+
+[[routine]]
+name = "player_oam"
+addr = "80:D671"
+trace = true
 status = "unported"

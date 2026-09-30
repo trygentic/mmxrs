@@ -49,3 +49,7 @@ Every source change carries a `// mmxrs patch` comment.
 
 No change to the CPU crates: routine traps are dispatched by `mmx-core`
 between `SnesEmulator::tick` calls (see `docs/traps.md`).
+
+- `snes-core/src/api.rs` `run_cpu_isolated`: after each CPU tick the DMA unit
+  is ticked until idle, so a GP-DMA started by the isolated routine completes
+  before its next instruction (2026-09-30).

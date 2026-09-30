@@ -320,6 +320,21 @@ impl SnesEmulator {
             if let Some((address, value)) = bus.pending_write {
                 bus.apply_write(address, value);
             }
+            // A general-purpose DMA the routine starts ($420B) must complete
+            // before its next instruction reads the destination, as on
+            // hardware (the CPU is halted). Run it to completion here; the PPU
+            // and APU still do not advance.
+            loop {
+                let mut bus = new_bus!(self);
+                match self.dma_unit.tick(
+                    &mut bus,
+                    self.total_master_cycles,
+                    bus::next_cpu_cycle_mclk(&self.main_cpu),
+                ) {
+                    DmaStatus::None => break,
+                    DmaStatus::InProgress { .. } => {}
+                }
+            }
         }
         false
     }

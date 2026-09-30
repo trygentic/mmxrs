@@ -52,3 +52,14 @@ Exit codes: 0 clean, 1 divergence, 2 setup error (e.g. `MMX_ROM` unset).
   reported frame, and use the trace logger / memory breakpoint on the
   diverging address to see which instruction writes it. Mesen2 is external,
   not embedded; it settles "is our core or our port wrong" questions.
+
+## Input scripts and the co-op parity check
+
+`verify`, `dump` and `trace` share one input script: `--tap F,..` (Start on
+pad 1 for 4 frames at F), `--hold HEX` / `--p2-hold HEX` (OR'd every frame,
+from `--from F` on), `--p1tap HEX@F` / `--p2tap HEX@F`. Reaching the intro
+stage without a movie: `--tap 200,400,600,800,1000`; gameplay starts around
+frame 1250 and P1 is grounded by 1400.
+
+`verify --coop-off` registers the co-op trap group on the DUT with the flag
+off; the run must stay identical to the oracle (the parity rule).
