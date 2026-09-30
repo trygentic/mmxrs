@@ -11,13 +11,13 @@ const USAGE: &str = "usage: cargo xtask <command>
   verify [--movie F.bk2|F.lsmv] [--frames N] [--no-frame] [--coop-off] [--tap F,..] [--hold HEX] [--p2-hold HEX]
   trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..]   bank histogram of frame N's opcode fetches
   dump --frames N --out DIR [--at F,F,...] [--movie F] [--tap F,F,...] [--hold HEX] [--p2-hold HEX] [--coop]
-       [--rom-any PATH] [--poke ADDR=VAL@A[-B],..] [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..]  start from / write a save state (P2 re-anchors after a load)
+       [--rom-any PATH] [--x3 PATH] [--poke ADDR=VAL@A[-B],..] [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..]  start from / write a save state (P2 re-anchors after a load)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
   ledger
   rominfo
   zerosheet [--x3 PATH] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data) -> DIR/NN_name.png + DIR/sheet.png
-env: MMX_ROM=path/to/Mega Man X (USA).sfc";
+env: MMX_ROM=path/to/Mega Man X (USA).sfc, MMX_X3_ROM=path/to/Mega Man X3 (USA).sfc (P2 as X3 Zero; = --x3)";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -70,6 +70,11 @@ fn game_scripted(args: &[String]) -> Game {
     if let Some(p) = flag(args, "--load") {
         let s = std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")));
         g.load_state(&s).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+    }
+    // `--x3 PATH` (or MMX_X3_ROM): draw P2 as X3 Zero (docs/zero.md "Playing as Zero").
+    if let Some(p) = flag(args, "--x3").map(PathBuf::from).or_else(|| std::env::var_os("MMX_X3_ROM").map(PathBuf::from)) {
+        let rom = std::fs::read(&p).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+        g.set_x3_rom(&rom).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
     }
     g
 }
@@ -285,9 +290,9 @@ fn dump(args: &[String]) -> i32 {
                 let p2 = &g.coop.p2;
                 let p16 = |o: usize| u16::from_le_bytes([p2[o], p2[o + 1]]);
                 println!(
-                    "    P2 pos=({},{}) act {:02X} vy {} hp {} in {:02X}{:02X} f2B {:02X} f2C {:02X} (P1 f2B {:02X} f2C {:02X}) vis {:02X} oam base {} count {} hook D={:04X} DB={:02X} P={:02X}",
+                    "    P2 pos=({},{}) act {:02X} vy {} hp {} in {:02X}{:02X} f2B {:02X} f2C {:02X} (P1 f2B {:02X} f2C {:02X}) vis {:02X} oam base {} count {} zf {} hook D={:04X} DB={:02X} P={:02X}",
                     p16(0x05), p16(0x08), p2[0x02], p16(0x1C) as i16, p2[0x27] & 0x7F, p2[0x36], p2[0x37], p2[0x2B], p2[0x2C], b(ram::X_BASE + 0x2B), b(ram::X_BASE + 0x2C), p2[0x0E], g.coop.p2_oam_base, g.coop.p2_oam_count,
-                    g.coop.dbg_regs.0, g.coop.dbg_regs.1, g.coop.dbg_regs.2
+                    g.coop.zero_frame as i16, g.coop.dbg_regs.0, g.coop.dbg_regs.1, g.coop.dbg_regs.2
                 );
             }
         }

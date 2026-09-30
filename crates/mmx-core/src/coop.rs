@@ -190,6 +190,9 @@ pub struct CoopState {
     pub in_contact: bool,
     /// Slots of the shot table ([`X_SHOTS`]) holding P2's shots (bit n = slot n).
     pub p2_shots: u8,
+    /// X3 Zero frame whose tiles are in the PPU's P2 page (`u16::MAX`: none
+    /// yet). Only used with `Game::set_zero_set`.
+    pub zero_frame: u16,
 }
 
 impl Default for CoopState {
@@ -207,6 +210,7 @@ impl Default for CoopState {
             contact_hits: 0,
             in_contact: false,
             p2_shots: 0,
+            zero_frame: u16::MAX,
         }
     }
 }
@@ -508,12 +512,32 @@ fn p2_display(game: &mut Game) {
     // the game left too few slots, P2 takes the game's last (lowest priority)
     // ones. Measured at M3 (hw-a f240..300): the game uses 100-128 slots.
     let used = dp[OAM_USED].min(128);
+    let zero = game.zero_set.clone();
     let fx = &game.coop.p2_scratch[P2_SWAPPED_LEN - 0x60..];
-    let need = layout_len(game, &game.coop.p2)
-        + (0..3).map(|k| &fx[k * 0x20..k * 0x20 + 0x20]).filter(|o| o[0] != 0).map(|o| layout_len(game, o)).sum::<usize>();
+    let need = match &zero {
+        Some(z) => crate::zero::x3_frame(z, &game.coop.p2).map_or(0, |f| z.frames[f].sprites.len()),
+        None => {
+            layout_len(game, &game.coop.p2)
+                + (0..3).map(|k| &fx[k * 0x20..k * 0x20 + 0x20]).filter(|o| o[0] != 0).map(|o| layout_len(game, o)).sum::<usize>()
+        }
+    };
     let Some(room) = 127usize.checked_sub(need) else { return };
     let first = ((used + 3) & !3).min(room as u8 & !3);
     let pal = game.coop.zero_palette;
+    if let Some(z) = zero {
+        // X3 Zero: a Rust emitter writes P2's slots and the page (zero.rs).
+        let last = crate::zero::emit_x3(game, &z, first, pal);
+        let w = game.wram_mut();
+        for slot in usize::from(used)..usize::from(first) {
+            w[ix(ram::OAM_BUF) + slot * 4 + 1] = OAM_HIDDEN_Y; // alignment padding
+        }
+        let base = used.min(first);
+        game.coop.p2_oam_base = usize::from(base);
+        game.coop.p2_oam_count = usize::from(last - base);
+        let mask = (u128::from(first)..u128::from(last)).fold(0u128, |m, s| m | 1 << s);
+        game.set_p2_tile_slots(mask);
+        return;
+    }
     let w = game.wram_mut();
     w[OAM_CURSOR] = first;
     w[OAM_HI_INDEX] = first / 4;

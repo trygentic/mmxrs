@@ -491,3 +491,44 @@ walk/jump and their shooting twins swapped; corrected there.)
 **Unfinished.** Ladder/weak/alt frames
 are named from the sheet only; X1 frames 75-80 and 82-84 have no measured
 meaning, so they fall back.
+
+## Drawing P2 as X3 Zero
+
+Code: `zero::emit_x3` (called from the co-op display slice), `Game::set_zero_set`
+/ `Game::set_x3_rom`. With a set loaded the display slice does not run the ROM
+emitters (`$80:D640`/`$80:D671`) for P2; the Rust emitter writes P2's OAM
+entries into the same slots (from `$E3` rounded up to 4, padding hidden):
+
+- frame `f = zero_x3_frame_for(+02, +17)` (an action X3 has no pose for:
+  stand, frame 0); nothing drawn while `+0E = 0` (the i-frame blink).
+- origin `(+05 - $1E4D, +08 + (i8)+19 - $1E50 - 8)`: the ROM emitter's
+  (`$80:D67C`) plus `X3_Y_OFFSET = -8` (Zero's X3 stand frame has his feet at
+  `+24`, X's at `+16`, in both ROMs; P2 runs X's physics).
+- per sprite (`zero::oam_entry`, the ROM's `$80:D6EA`/`$D73F`): facing right
+  (`+11` bit 6) mirrors `x' = -x - 8` (or `-16`) and toggles hflip; culled when
+  `x + 16 >= $10F` or `y + 15 >= $EF` (unsigned); attr = `+11 & $30`
+  (priority) | palette 3 | the layout's flips; high table: x bit 8 and size,
+  P2 owns whole bytes. Checked against the ROM emitter on X's own layouts in
+  both facings (test `zero_emitter_matches_rom`, walk/jump from `highway-start`).
+- tiles: `set.page(f)` (48 tiles, 1.5 KiB) into the shadow page when `f`
+  changes (`CoopState::zero_frame`, reset by `Game::load_state`); every P2
+  slot gets its mask bit. The X1 streamer interception still runs for P2 but
+  copies nothing (`p2tiles::stream_exit`).
+- palette: `ZeroSet.palette` into sprite palette 3 through `$0300`/`$A1`
+  (replaces `palette_for`). X's armour parts are not drawn on Zero.
+
+Checked on the real ROMs (PNGs in `target/z/`; `--x3 PATH` or `MMX_X3_ROM`,
+`xtask` = `cargo run --release -q -p xtask --`):
+
+```
+xtask dump --load states/highway-start.state --frames 130 --out target/z/walk --at 20,50,58,96,110,120 --p2-hold 0100 --p2tap 8000@90:20 --coop   # walk 8/10/11, jump 23-25, fall 27
+xtask dump --load states/highway-start.state --frames 50 --out target/z/dash08 --at 40,44,48 --poke 7E1F99=08@1-50 --p2tap 0080@38:12 --coop   # $1F99 bit 3 = legs: dash 55/56
+xtask dump --load states/hw-c.state --frames 500 --out target/z/wall --at 340-440/20 --hold 0100 --p1tap "$T" --p2-hold 0100 --p2tap "$T" --refill --coop   # T = coop-qa's m5 route: wall slide 39/41, kick 42/43
+xtask dump --load states/hw-spiky.state --frames 60 --out target/z/hurt --at 32,34,38,44 --p2-hold 0100 --coop   # hurt 51-53
+xtask dump --load states/hw-pit.state --frames 100 --out target/z/pit --at 60,75,85 --p2-hold 0100 --coop   # wall slide down the pit, then down
+xtask dump --load states/octopus-start.state --frames 300 --out target/z/octo --at 100-300/50 --hold 0100 --p2-hold 0100 --p2tap 8000@140:20 --coop
+```
+
+`hw-spiky`/`hw-pit` are made as in docs/coop.md. Death: P2 hides on the
+frame it goes down (co-op's rule), so Zero's death frame 135 is never shown.
+P2 still sorts behind every game sprite (behind X and enemies).

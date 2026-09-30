@@ -37,6 +37,9 @@ pub struct Game {
     pub(crate) isolated_depth: u32,
     /// `p2tiles`: `($A3, $1F25)` at the entry of P2's streamer call.
     pub(crate) p2_stream: Option<(u8, u16)>,
+    /// X3 Zero art for P2 (static, not in save states; the frame shown is
+    /// `coop.zero_frame`). See [`Game::set_zero_set`].
+    pub(crate) zero_set: Option<std::sync::Arc<crate::zero_data::ZeroSet>>,
     emu: SnesEmulator,
     // ponytail: own copy of the ROM for rom_read (~1.5 MiB); jgenesis only
     // exposes cartridge reads through &mut (open-bus side effect).
@@ -189,7 +192,27 @@ impl Game {
             isolated_trace: None,
             isolated_depth: 0,
             p2_stream: None,
+            zero_set: None,
         })
+    }
+
+    /// Draw P2 as X3 Zero (`Some`, from [`crate::zero_data::extract_x3`]) or
+    /// as X's tiles in Zero's colours (`None`). Static art: both netplay
+    /// peers must load the same set (see `netgame`).
+    pub fn set_zero_set(&mut self, set: Option<crate::zero_data::ZeroSet>) {
+        self.zero_set = set.map(std::sync::Arc::new);
+        self.coop.zero_frame = u16::MAX; // refill the page on the next draw
+    }
+
+    /// [`Game::set_zero_set`] from a Mega Man X3 (USA) image (copier header ok).
+    pub fn set_x3_rom(&mut self, rom: &[u8]) -> Result<(), String> {
+        let rom = if rom.len() % 0x8000 == 512 { &rom[512..] } else { rom };
+        self.set_zero_set(Some(crate::zero_data::extract_x3(rom)?));
+        Ok(())
+    }
+
+    pub fn zero_set(&self) -> Option<&crate::zero_data::ZeroSet> {
+        self.zero_set.as_deref()
     }
 
     pub fn rom_info(&self) -> &RomInfo {
@@ -486,6 +509,7 @@ impl Game {
         }
         self.frame_count = frame_count;
         self.fired_at = fired_at;
+        self.coop.zero_frame = u16::MAX; // the page came from the state: refill it
         Ok(())
     }
 }

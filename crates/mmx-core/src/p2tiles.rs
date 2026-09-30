@@ -86,6 +86,7 @@ fn stream_enter(game: &mut Game) {
 /// Take P2's entries back out of the queue and into the page.
 fn stream_exit(game: &mut Game) {
     let Some((start, budget)) = game.p2_stream.take() else { return };
+    let zero = game.zero_set.is_some(); // X3 Zero fills the page itself (zero::emit_x3)
     let w = game.wram();
     let end = w[DMA_INDEX];
     let entries: Vec<QueueEntry> = (usize::from(start)..usize::from(end))
@@ -97,7 +98,7 @@ fn stream_exit(game: &mut Game) {
     w[DMA_INDEX] = start;
     w[DMA_BUDGET..DMA_BUDGET + 2].copy_from_slice(&budget.to_le_bytes());
     for e in entries {
-        if let Some(o) = page_offset(&e, window) {
+        if let Some(o) = page_offset(&e, window).filter(|_| !zero) {
             let bytes: Vec<u8> = (0..u32::from(e.size)).map(|i| game.rom_read(e.src + i)).collect();
             fill_page(game, o, &bytes);
         }
