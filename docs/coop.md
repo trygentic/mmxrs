@@ -350,23 +350,56 @@ already grounded (`$0BD3|$0BD4` bit 2), X moves by the object's delta
 from the side -> `$0BAD` pushed out, `$0BD4 |= 1/2`. Companion `$84:AB56`
 (listing `$84:AB4C`): box test only, `$0BD4 |= $80/$40`. On the Highway the
 user is the collapsing road chunk (`$1428` table type 9, `$82:E720`, call
-sites `$82:E7A5`/`$82:E7AE`; states `r2-2`, `r3-0`, `hw-f`). The
-Highway's road-attacker cars (types `$11`/`$12`) are not platforms: X can't
-stand on them, they hurt through `$84:9B03`.
-Rechecked for the "P2 can't ride the cars" report (`r3-10`, cars drive at
-Y 435 on the road at 431): P1 alone, 26 jump timings standing, walking
-right and walking left: never stands above Y 427. Jump at f75: X comes down
-on car 0 and is hit at f102 (hp 16 -> 14, act `$0E`). X poked onto car 0's
-roof at f60 (`--poke 7E0BAD=38@60,7E0BAE=19@60,7E0BB0=90@60,7E0BB1=01@60`):
-falls through it to the road (Y 400 -> 431 by f77). Per car, the frame runs
-the car `$81:D551` and its driver `$81:DCD0` (from the dispatch at
-`$80:F9DD`), which call only `$84:9B03`/`$84:9B43` (contact) and their own
-terrain code; `$84:AB81`/`$84:AB56`: 0 hits (`trace --calls --find`), and
-the listing around them only reads `$0BAD`/`$0BB0` (aiming). Nothing in
-the ROM carries X on a car, so there is nothing to rerun for P2. The trucks
-are not in the enemy or `$1428` tables on `highway-start`/`hw-a` (level art).
+sites `$82:E7A5`/`$82:E7AE`; states `r2-2`, `r3-0`, `hw-f`).
 
-P2's pass: an `Observe` trap on both entries reruns the routine isolated
+**Road attackers.** A road attacker is two enemy slots at the same spot:
+id `$11` (update `$81:D551`, the shooter) and id `$12` (update `$81:DCD0`,
+listing `$81:DCC0`, the car body). With the driver alive neither carries X
+(the old recheck: 26 jump timings on `r3-10`, X never above Y 427, hit on
+landing; `$84:AB81`: 0 hits). Kill the driver (`+$01` goes to 4, or 6 when
+the car stops) and the car body `JSR`s its own copy of the solid-object
+routine: listing `$81:DE0C` = cartridge **`$81:DE1C`** (`RTS`, called from
+`$81:DD16` when `+$01 >= 4` and `!= $0A`). Same code as `$84:AB81`: `+$2C`
+= "X stood on me last frame", carry by `+$05 - +$22` / `+$08 - +$24` into
+`$0BAD`/`$0BB0` unless `$0BD3|$0BD4` bit 2, box test vs `$0BA8`, on top ->
+`+$2C = 1`, `$0BD4 |= 4`; side -> push-out. Extras: `+$3A` = last frame's
+`+$2C` (copied at entry), and on a fresh landing `+$37 = 2`, the 2 px dip;
+the caller also lowers the car by `+$2C` px. `$84:AB81` stays at 0 hits:
+that's why the first search found nothing. A parked driverless car (`+$01
+= 6`) is solid too.
+
+State `hw-car` (from `r3-10`, `--p1tap 4000@40-400/10:3 --refill`, saved
+at f112): driver of car slot 0/1 dead, the car drives left at 1.5 px/f,
+X in knockback just above it. P1 alone, no input: X lands on it at f7 and
+rides at car `+$05` - 4, Y 418, to f100+ (then the car drives into the pit
+at ~f120).
+
+P2 gets it with the same trap body as `$84:AB81` (`coop_objects::HOOK_CAR`,
+P2's `+$2C` in `p2_on_obj`, run with `call_isolated_ret(.., Rts)`). `+$3A`/`+$37` are left as
+P2's pass wrote them: P1's pass recopies `+$3A` at entry, and the dip on
+P2's landing is fine. Check (`dump --load states/hw-car.state --coop
+--refill --p1tap 0100@1:60,0200@62:40 --p2tap 8000@70:15,0200@70:33`):
+P1 walks off the car's rear and stays on the road (Y 431, car `+$2C` 0);
+P2, spawned at f25 on the car, rides at `+$05` - 2, jumps at f70 (holding
+Left, air speed = car speed), lands back at f104 (dip: `+$08` 436, 437),
+then rides at `+$05` - 1 through f130, down into the pit with the car
+(P2 Y 417 -> 439 as `+$08` 435 -> 457). `--untrap 81DE1C`: P2 spawns on
+the car and falls through it to the road (Y 420 -> 431 by f31), the bug.
+Strip: `target/qa/car-p2/strip.png` (f66, 80, 96, 106, 114, 124). P1 with
+P2 on board too: both carried (`--coop`, no input: P1 at `+$05` - 4, P2 at
+`+$05` - 2).
+
+Other carriers in the Highway (enemy ids seen in all the Highway states:
+`$0F $11 $12 $15 $19 $1A $1B $22 $27 $32 $36`; their update ranges in the
+listing grepped for `$0BAD`/`$0BB0`/`$0BD4` writes, `LDX #$0BA8`, calls to
+`$84:AB77`): only `$12` (above), `$22` Bee Blader, whose dead state
+(`+$01 = $0E`, listing `$82:BA90`) calls the generic `$84:AB77` (so the
+falling wreck is solid, already covered by `HOOK_PLATFORM`; unverified in
+play), and `$32` Vile, whose `$0BAD`/`$0BB0` writes are the grab (X held,
+`$0C26` bit 7), not a carrier. The trucks are level art (not in the enemy
+or `$1428` tables).
+
+P2's pass: an `Observe` trap on each entry reruns the routine isolated
 with P2's block swapped in (`with_p2_swapped`), the guard `in_contact` set.
 The object's `+$2C` is per player: P2's copy is `CoopState::p2_on_obj` (one
 bit per object slot `$0E68 + n * $40`, n < 43), put in place only for P2's
@@ -433,8 +466,8 @@ P1's lines in the second run are identical to the solo run.
 Not covered: other pickups (heart tanks, sub-tanks, armour capsules: their
 own routines, e.g. listing `$81:E4AB`, `$81:EB2A`), weapon energy and the
 1-up are hooked but were not seen on the Highway; platform code outside
-`$84:AB81` (enemy-specific carriers such as listing `$82:C599`, `$82:A5FE`
-the grabber); the ride armour.
+`$84:AB81` and the road attacker's `$81:DE1C` (enemy-specific carriers
+such as listing `$82:C599`, `$82:A5FE` the grabber); the ride armour.
 
 ## Sound
 
