@@ -193,6 +193,8 @@ pub struct CoopState {
     /// X3 Zero frame whose tiles are in the PPU's P2 page (`u16::MAX`: none
     /// yet). Only used with `Game::set_zero_set`.
     pub zero_frame: u16,
+    /// P2's saber swing (X3 set only), see `saber.rs`.
+    pub saber: crate::saber::Saber,
 }
 
 impl Default for CoopState {
@@ -211,6 +213,7 @@ impl Default for CoopState {
             in_contact: false,
             p2_shots: 0,
             zero_frame: u16::MAX,
+            saber: crate::saber::Saber { slot: 0xFF, ..Default::default() },
         }
     }
 }
@@ -285,6 +288,7 @@ pub fn register_coop_traps(game: &mut Game) {
     game.traps.register(HOOK_OAM_HIDE, "coop_p2_oam_hide", TrapReturn::Observe, oam_hide);
     game.traps.register(HOOK_DISPLAY, "coop_p2_display", TrapReturn::Observe, p2_display);
     game.traps.register(HOOK_CONTACT, "coop_contact", TrapReturn::Observe, contact);
+    game.traps.register(crate::saber::HOOK_SHOTS_DONE, "coop_saber_shot", TrapReturn::Observe, crate::saber::shots_done);
 }
 
 fn word(w: &[u8; 0x20000], addr: u32) -> u16 {
@@ -345,7 +349,11 @@ fn p2_update(game: &mut Game) {
         return go_down(game);
     }
 
-    let pad = word(game.wram(), PAD2_HELD) & !(BTN_START | BTN_SELECT);
+    let mut pad = word(game.wram(), PAD2_HELD) & !(BTN_START | BTN_SELECT);
+    if game.zero_set.is_some() {
+        // X swings the saber; during a swing the ROM gets a masked pad.
+        pad = crate::saber::update(&mut game.coop.saber, game.coop.p2[OFF_ACTION], pad);
+    }
     let (live, fired) = (shots_live(game.wram()), game.coop.p2[OFF_SHOTS]);
     with_p2_swapped(game, |game| {
         // Run the ROM's own input remapper (`$80:E518`, JSR/RTS) with pad 2
@@ -401,6 +409,7 @@ fn p2_physics(game: &mut Game) {
         return;
     }
     shot_books(game);
+    crate::saber::take_back(game);
     if game.coop.p2_hidden || p2_is_down(&game.coop.p2) {
         return;
     }
@@ -515,7 +524,7 @@ fn p2_display(game: &mut Game) {
     let zero = game.zero_set.clone();
     let fx = &game.coop.p2_scratch[P2_SWAPPED_LEN - 0x60..];
     let need = match &zero {
-        Some(z) => crate::zero::x3_frame(z, &game.coop.p2).map_or(0, |f| z.frames[f].sprites.len()),
+        Some(z) => crate::zero::x3_frame(&game.coop).map_or(0, |f| z.frames[f].sprites.len()),
         None => {
             layout_len(game, &game.coop.p2)
                 + (0..3).map(|k| &fx[k * 0x20..k * 0x20 + 0x20]).filter(|o| o[0] != 0).map(|o| layout_len(game, o)).sum::<usize>()

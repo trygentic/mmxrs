@@ -531,4 +531,66 @@ xtask dump --load states/octopus-start.state --frames 300 --out target/z/octo --
 
 `hw-spiky`/`hw-pit` are made as in docs/coop.md. Death: P2 hides on the
 frame it goes down (co-op's rule), so Zero's death frame 135 is never shown.
-P2 still sorts behind every game sprite (behind X and enemies).
+P2 still sorts behind every game sprite (behind X and enemies). A dump PNG
+after step N shows the OAM and page built in step N-1 (the NMI uploads them
+at the end of the frame), so the `zf` printed next to it is one frame ahead.
+
+## The saber
+
+Code: `crates/mmx-core/src/saber.rs`, state `CoopState::saber` (rollback
+carries it). Only with the X3 set; without it X does nothing (buster-only Zero).
+
+- **Swing.** Pad 2's X (`$0040`, unused by X1's default button config) starts
+  a swing when P2 stands, walks, lands or dashes (actions `00 02 04 0A 14`:
+  X3 frames 86-90) or jumps/falls (`06 08`: 95-98), 4 frames per pose (20 /
+  16 frames). No swing on walls or while hurt; hurt or death cancels it.
+- **Mechanism: P2's own update keeps running with a masked pad.** On the
+  ground the ROM gets no buttons, so X's code stops Zero (stand); in the air
+  only left/right pass, so the jump arc and air control are the ROM's. The
+  display shows the saber pose instead of the ROM frame. No X1 action was
+  borrowed: `$0A` (land) and hurt without knockback both change physics or
+  i-frames, the mask doesn't. Y (buster) works outside swings.
+- **Damage: a shot that only the enemy loop sees.** On the arc pose (88/97),
+  after the shot loop (`$80:D1FF`, the instruction after `JSR $80:D3B2`;
+  new trap `coop_saber_shot`) a shot is written into a free `$1228` slot:
+  `+00 = 1`, id `+0A = 2`, position `+05/+08` = P2 + (16 in front, -16),
+  `+11` = P2's, box `+20 = $BF56` (bank `$86`: `00 00 14 14`, 40 x 40 px),
+  `+30 = 0`. Enemies test it in their AI with the ROM's enemy-vs-shot
+  routine `$84:9B43` (shot active, `+30 = 0`, box test `$84:9C0E`), and
+  `$84:9E15` applies the damage: the enemy's row `$86:EEDB[+28]` at the shot
+  id. Id 2 is X's full charge (Highway row 3: lemon 1, half charge 2, full
+  charge 4); the task's "damage `+26`" is not what X1 reads. The physics hook
+  takes the slot out again (zeroed), after the enemy loop. The shot's update
+  (`$80:F666[+0A]`) never runs, it is never drawn and never counted, so the
+  `$0BDD` bookkeeping (docs/coop.md "Shots (B3)") never sees it. The damage
+  routine does `INC +30` on the shot: that ends the swing's damage (one hit
+  per swing).
+- **Checked.** `hw-spiky`, P2 walks right 20 frames, X at 22: the arc (frame
+  30) takes the Spiky from 2 HP to dead (test `saber_kills_spiky`, P1's
+  `$0BDD` stays 0). `hw-bee2`, P2 jumps every 40 frames and taps X 8 frames
+  into the jump: Bee Blader (`$0E68+$27`) 29 -> 25 -> 21 -> 17 -> 13 -> ... -> 5,
+  4 per connecting swing, until it drifts out of reach (x 3363, P2 at 3452).
+
+```
+xtask dump --load states/hw-spiky.state --frames 40 --out target/z/saber --at 27,32 --p2tap 0100@1:20,0040@22:2 --coop --wram
+T=$(seq 10 40 1190 | awk '{printf "8000@%d:20,0040@%d:2,", $1, $1+8}' | sed 's/,$//')
+xtask dump --load states/hw-bee2.state --frames 1200 --out target/z/bee --at 50-1200/50 --refill --coop --p2tap "$T" --wram
+```
+
+## Playing as Zero
+
+Supply your own Mega Man X3 (USA) image (CRC32 `FA0FE671`, copier header
+ok); it is only read, never stored, and like the X1 ROM it stays out of the
+repository:
+
+- native: `mmxrs --rom mmx.sfc --x3-rom mmx3.sfc --coop-local` (or
+  `MMX_X3_ROM`);
+- web: the "Mega Man X3 ROM (optional, enables Zero's sprites and saber)"
+  picker (`Emu::set_x3_rom`);
+- scripted runs: `xtask dump --x3 PATH` (or `MMX_X3_ROM`).
+
+What changes: P2 is drawn with X3 Zero's frames and palette (walk, jump,
+dash, wall, hurt, beam-in, ...) instead of X's tiles in Zero's colours, and
+P2's X swings the saber (above). Physics, HP, hit boxes and the buster are
+X's. Netplay: both peers must load it; the handshake id includes "X3 loaded",
+so a mismatch refuses to start (docs/netplay.md).

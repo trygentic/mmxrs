@@ -9,6 +9,7 @@ mod game;
 pub mod netgame;
 pub mod p2tiles;
 pub mod ram;
+pub mod saber;
 pub mod traps;
 pub mod zero;
 pub mod zero_data;

@@ -7,6 +7,7 @@
 //! CGRAM when `$A1 != 0`, then clears it).
 
 use crate::ram::{self, wram_index as ix};
+use crate::coop::CoopState;
 use crate::traps::TrapReturn;
 use crate::zero_data::{zero_x3_frame_for, Sprite, ZeroSet};
 use crate::Game;
@@ -58,11 +59,14 @@ pub fn sprite_palette_offset(pal: u8) -> usize {
 
 // ------------------------------------------------------------ X3 Zero emitter
 
-/// X3 Zero frame for P2's block (`+$02` action, `+$17` frame), `None` when
-/// the block is invisible (`+$0E = 0`, the i-frame blink). An action X3 has
-/// no pose for draws the stand frame.
-pub fn x3_frame(_set: &ZeroSet, obj: &[u8]) -> Option<usize> {
-    (obj[0x0E] != 0).then(|| zero_x3_frame_for(obj[0x02], obj[0x17]).unwrap_or(0))
+/// X3 Zero frame for P2 (a saber swing's pose, else from the block's `+$02`
+/// action and `+$17` frame), `None` when the block is invisible (`+$0E = 0`,
+/// the i-frame blink). An action X3 has no pose for draws the stand frame.
+pub fn x3_frame(c: &CoopState) -> Option<usize> {
+    let obj = &c.p2;
+    (obj[0x0E] != 0).then(|| {
+        crate::saber::frame(&c.saber).unwrap_or_else(|| zero_x3_frame_for(obj[0x02], obj[0x17]).unwrap_or(0))
+    })
 }
 
 /// Screen origin the ROM emitter `$80:D67C` uses for an object:
@@ -96,7 +100,7 @@ pub fn oam_entry(s: &Sprite, (ox, oy): (i16, i16), right: bool, attr: u8) -> Opt
 /// the high table `$0900`. Returns the slot past P2's last one.
 pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
     let p2 = game.coop.p2;
-    let Some(f) = x3_frame(set, &p2) else { return first };
+    let Some(f) = x3_frame(&game.coop) else { return first };
     if game.coop.zero_frame != f as u16 {
         crate::p2tiles::fill_page(game, 0, &set.page(f));
         game.coop.zero_frame = f as u16;
