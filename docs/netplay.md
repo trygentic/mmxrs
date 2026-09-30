@@ -146,10 +146,12 @@ Time only enters through `now_ms`, and all ordered state uses `BTreeMap` or
   the emulator must step `W + 1` frames within a 16 ms frame budget at worst.
   Raise `D` on slow machines: each frame of delay removes one frame of
   rollback depth.
-- The remote player can visibly "snap" after a correction: their X jumps to
-  where the real input put him. Repeat-last prediction is right while a pad is
-  held; it is wrong mainly at presses and releases, and Mega Man X is fast, so
-  expect more corrections than a slow game would see.
+- The remote player would visibly "snap" after a correction: their X jumps
+  to where the real input put him. Repeat-last prediction is right while a pad
+  is held; it is wrong mainly at presses and releases, and Mega Man X is fast,
+  so expect more corrections than a slow game would see. [Rollback
+  smoothing](#rollback-smoothing) glides the correction in over a few frames
+  instead (display only).
 - **Audio.** Replayed frames must not be heard again: drop the samples of
   `Advance { replay: true }` frames. Sound a frame produced from a wrong
   prediction was already played and cannot be taken back, so a mispredicted
@@ -162,6 +164,56 @@ Time only enters through `now_ms`, and all ordered state uses `BTreeMap` or
   before enabling rollback in a frontend.
 - Pausing, fast-forward, save states and movies stay disabled during a
   session, exactly as with lockstep.
+
+### Rollback smoothing
+
+A correction moves the remote player (P2 on the host, P1 on the guest) from
+where it was drawn to where the re-simulation puts it, up to ~30 px at 300 ms
+RTT, in one frame. `NetPlay` hides that jump with a display offset
+(`netgame::Smoothing`), per presented frame, right before the new frame's
+step:
+
+- **correction**: the remote player's screen position on the frame on screen
+  (as it was presented) minus the same frame after this tick's re-simulation;
+  added to the offset. Taking the frame already on screen, not the new one,
+  keeps the corrected velocity: the drawn player moves as the re-simulation
+  says, only from where it was.
+- **decay**: the offset shrinks toward 0 by `min(5, 2 + |offset| / 3)` px a
+  frame (`SMOOTH_STEP_MAX` = 5: a 30 px correction is drawn off for 7 more
+  frames: 25, 20, 15, 10, 5, 1, 0). On an axis where the player itself moves
+  the decay's way at `v` px/frame, by at most `max(5 - 2v, 2)`
+  (`SMOOTH_STEP_MIN`): that motion may itself be a misprediction, and the two
+  add up on screen.
+- **teleports**: a correction (or offset) over 96 px (`SMOOTH_TELEPORT`: a
+  warp, a respawn) is drawn at once, and the offset is dropped while the
+  player is not drawn (P2 down or hidden).
+- Only the remote player; the local player is never touched. Lockstep never
+  smooths (every frame shown is final). `NetPlay::smoothing = false` (netsim
+  `--no-smoothing`) turns it off.
+
+**Display only.** The offset lives in `NetPlay`, never in `CoopState`, WRAM,
+OAM or any save state, so checksums, the rollback states and the
+plain-run invariant are untouched. It is applied at render time by the
+vendored PPU (`Ppu::set_sprite_offset(slots, dx, dy)`, `// mmxrs patch`):
+the masked OAM slots' X/Y are shifted when sprites are scanned and fetched
+(a slot pushed off screen is skipped rather than wrapped); the field encodes
+as nothing, so a loaded state renders unshifted until it is set again.
+`Game::set_display_offset(player, dx, dy)` resolves the mask from the last
+OAM build (display.rs): P1's slots are `$E4` at `$80:D55A` (`JSR $80:D640`,
+armour parts) up to `$E4` at `$80:D560` (after `JSR $80:D671`, the player;
+a Zero P1 goes through the same cursor), two Observe traps confirmed with
+`trace --calls`; P2's are the range its display slice emitted (HUD bar
+excluded); hidden slots (Y = `$E0`) are left out. A step renders the OAM
+built by the previous step (`display_offset_moves_one_player` checks it), so
+`NetPlay` sets the offset after the last replay step, right before the new
+frame's step: replayed frames render unshifted (they are never presented),
+the presented one with the offset. When the session ends the offset is
+cleared (`NetPlay::tick` while not live, `Emu::net_drop` on the web).
+
+Measured with `xtask netsim` (see [Testing the netcode](#testing-the-netcode)):
+dozens of snaps over 6 px become none, at the price of about twice the mean
+drawn-vs-settled error (the player catches up over a few frames instead of
+jumping).
 
 ### Driving a rollback session
 
@@ -282,7 +334,8 @@ RTT/2 each way), `--jitter MS` (extra 0..=MS per packet, reorders),
 `--loss PCT` (unreliable packets), `--frames N` (settled frames to run),
 `--seed N` (link RNG), `--load STATE` (loaded into both session games right
 after `Running`, before frame 0), `--x3 PATH` / `$MMX_X3_ROM`, `--zero`,
-`--timing ntsc|pal` / `$MMX_TIMING`. The pads come from the usual input
+`--timing ntsc|pal` / `$MMX_TIMING`, `--no-smoothing` (rollback smoothing off
+in both peers; the simulation is the same either way). The pads come from the usual input
 script (`--hold`, `--tap`, `--p1tap` for pad 1 = the host; `--p2-hold`,
 `--p2tap` for pad 2 = the guest; frame numbers count from the session
 start, 1-based, and name the tick where that frame is next, so the pad lands
@@ -294,19 +347,46 @@ settled frame that differs from the plain run.
 Result of the command above (PAL ROM, 50.007 fps):
 
 ```
-netsim: rollback delay 3 prediction 20, RTT 300 ms, jitter 40 ms, loss 3%, 3600 frames, 72.8 s virtual, 298 packets dropped
+netsim: rollback delay 3 prediction 20, RTT 300 ms, jitter 40 ms, loss 3%, 3600 frames, 72.8 s virtual, 298 packets dropped, smoothing on
 desync: no
 host : 3605 frames, 3600 settled, 49.67 fps of 50.01 (0.2% ticks stalled), 61 checks ok
        rollbacks 60 (max depth 15, 348 frames replayed), prediction window full 0 times, 2 wait recommendations
        remote player first drawn vs settled: max 21 px, mean 0.35 px, 3.0% of frames > 4 px
+       remote player drawn: 0 snaps > 6 px (jerk max 5 px), 5 teleports, vs settled max 20 px mean 0.98 px, 0 clipping, left play 2x
+       remote player raw  : 23 snaps > 6 px (jerk max 20 px), 5 teleports, vs settled max 20 px mean 0.50 px, 0 clipping, left play 2x
        audio: queue max 70 ms, dropped 0 ms, starved 2 ms
 guest: 3605 frames, 3600 settled, 49.77 fps of 50.01 (0.0% ticks stalled), 61 checks ok
        rollbacks 176 (max depth 8, 1131 frames replayed), prediction window full 0 times, 0 wait recommendations
        remote player first drawn vs settled: max 31 px, mean 2.38 px, 17.8% of frames > 4 px
+       remote player drawn: 0 snaps > 6 px (jerk max 6 px), 4 teleports, vs settled max 27 px mean 3.79 px, 0 clipping, left play 0x
+       remote player raw  : 136 snaps > 6 px (jerk max 27 px), 4 teleports, vs settled max 27 px mean 1.69 px, 0 clipping, left play 0x
        audio: queue max 70 ms, dropped 0 ms, starved 2 ms
 plain single-Game run: identical for all 3600 settled frames on both peers
 recommendation: at 300 ms RTT (+40 ms jitter) lockstep needs delay >= 11 (max 8): use rollback with --prediction >= 16
 ```
+
+With `--no-smoothing` everything is the same except that the `drawn` lines
+equal the `raw` ones (23 and 136 snaps). Before and after rollback smoothing,
+on this baseline and on a ledge-and-pit scenario on `hw-e` (P1 runs right
+jumping every 40 frames and falls into the pit twice, dying; P2 walks left
+off the ledge into the pit, is down, respawns at P1, then follows jumping;
+2400 frames, same link):
+
+```sh
+target/release/xtask netsim --load states/hw-e.state --frames 2400 \
+  --rtt 300 --jitter 40 --loss 3 --mode rollback --delay 3 --prediction 20 \
+  --hold 0100 --p1tap 8000@1-2400/40:12 \
+  --p2tap 0200@1:200,0100@800-2400/120:60,8000@800-2400/60:10
+```
+
+| scenario, peer (remote player) | snaps > 6 px off / on | jerk max off / on | drawn vs settled mean off / on | max | clipping | teleports |
+|---|---|---|---|---|---|---|
+| hw-spiky, host (P2) | 23 / **0** | 20 / 5 px | 0.50 / 0.98 px | 20 px | 0 | 5 |
+| hw-spiky, guest (P1) | 136 / **0** | 27 / 6 px | 1.69 / 3.79 px | 27 px | 0 | 4 |
+| hw-e, host (P2) | 8 / **0** | 23 / 6 px | 0.93 / 1.93 px | 23 px | 0 | 0 (left play 3x: pit, down) |
+| hw-e, guest (P1) | 70 / **0** | 27 / 6 px | 1.18 / 2.61 px | 27 px | 0 | 8 (2 pit deaths and respawns) |
+
+No desync and identical to the plain run in all of them.
 
 The same link and script in lockstep at its largest delay
 (`--mode lockstep --delay 8`, no `--prediction`):
@@ -327,8 +407,10 @@ recommendation: this run stalled 14% of ticks; at 300 ms RTT (+40 ms jitter) loc
 So across the world lockstep is smooth (nothing snaps) but runs 43 of 50
 fps even at delay 8, and at the default delay 3 about a third of full speed
 (the synthetic-ROM test measures 20 of 60 fps at 300 ms RTT). Rollback keeps
-full speed; the guest sees P1 (who jumps) drawn up to 31 px from where it
-settles on 18 % of frames, the host sees P2 (who only walks) snap much less.
+full speed; the guest's first prediction of P1 (who jumps) is up to 31 px
+from where it settles on 18 % of frames, the host's of P2 (who only walks)
+much less, and rollback smoothing turns the corrections into glides instead
+of snaps.
 
 What each line means:
 
@@ -353,6 +435,20 @@ What each line means:
   frame was drawn, against where it ended up once the frame settled, as
   max(|dx|, |dy|) in pixels. That is the bouncing / clipping players report.
   Always 0 in lockstep.
+- **remote player drawn / raw**: what the eye sees, per presented frame. A
+  presented frame shows the previous frame's OAM (display.rs), so frame
+  `f`'s picture is the remote player's screen position just before the step
+  of `f + 1` (after that tick's rollback, if any), plus the smoothing offset
+  (`drawn`) or without it (`raw`, what the picture was before smoothing),
+  against the settled frame `f`. **snaps**: presented frames whose
+  correction jerk, `|drawn delta - settled delta|` between consecutive
+  presented frames (max of |dx|, |dy|), is over 6 px; **jerk max** is the
+  largest. **teleports**: frame pairs where the settled or the raw position
+  jumped over 96 px (a warp, a death and respawn), left out of the jerk: drawn
+  at once on purpose. **vs settled**: drawn minus settled position, max and
+  mean. **clipping**: frames where the settled player stands on a floor
+  (`$0BD3|$0BD4` bit 2) and is drawn more than 2 px below it. **left play**:
+  times the settled remote player went out of play (P2 down or hidden).
 - **audio**: the fake device's deepest queue, audio dropped at the 200 ms
   cap (dropping is what sped the music up before `tick_audio`), and audio the
   device found missing.
@@ -373,8 +469,10 @@ The JSON (`--report`) holds the same numbers: `desync`, `desync_frame`,
 and per peer `fps`, `game_fps`, `stall_pct`, `checks_ok`, `rollbacks`,
 `max_rollback_depth`, `replayed_frames`, `prediction_full`,
 `wait_recommendations`, `remote_err_max_px`, `remote_err_mean_px`,
-`remote_err_over4_pct`, `audio_queue_max_ms`, `audio_dropped_ms`,
-`audio_starved_ms`.
+`remote_err_over4_pct`, `drawn` and `raw` (each `frames`, `snaps`,
+`jerk_max_px`, `teleports`, `err_max_px`, `err_mean_px`, `clipping`,
+`left_play`), `audio_queue_max_ms`, `audio_dropped_ms`, `audio_starved_ms`;
+top level `smoothing`.
 
 ### Session logs: recording a real session
 
@@ -472,7 +570,17 @@ input tracks differ.
   150: both modes report `desync: YES` within a few check intervals),
   `netreplay_on_netsim_logs` (netsim `--record` logs replay cleanly and agree
   with each other; a tampered checksum is pinned to its frame and to the peer
-  that was right).
+  that was right), `netsim_motion_metrics_synthetic` (the drawn/raw fields).
+  With `MMX_ROM` (debug build: a few minutes each): `smoothing_removes_snaps_at_300ms`
+  (the baseline above: no desync, plain run identical, at least 12 raw snaps
+  per peer, 0 drawn, no clipping, drawn mean error at most 2.5x the raw one)
+  and `smoothing_hw_e_pit_and_respawn` (the hw-e run above: the same checks,
+  and P2 left play at least once).
+- `cargo test -p mmx-core smoothing_math` (the offset's decay, clamp,
+  teleport and hidden rules, no ROM) and `display` (`display_slots_mask`;
+  with `MMX_ROM`, `display_offset_moves_one_player`: a step shows the OAM the
+  previous step built, P1's and P2's slot masks are found and disjoint, an
+  offset moves only pixels near that player and changes no state).
 - `cargo test -p mmx-core netlog`: `log_round_trips` (header, run-length
   pads settled out of order, every event kind), `stalls_and_time_marks`.
 - `cargo test -p mmx-native netplay`: the localhost matchbox pairs record
@@ -490,7 +598,7 @@ Both frontends run either mode through one driver,
 | session | `RollbackSession` | `Session` (input-delay lockstep) |
 | input delay | 0-3 frames, default 2 | 0-8 frames, default 3 (50 ms) |
 | late remote pad | predicted (last pad repeated); corrected by re-simulating | the game waits; status shows `waiting for peer` |
-| what you see | never waits, but the remote player **snaps** when a prediction was wrong (measured up to 15 px horizontally / 31 px vertically, see `rollback_invisible_to_p2`) | smooth: every frame shown is final |
+| what you see | never waits; a wrong prediction is corrected up to ~30 px, which [rollback smoothing](#rollback-smoothing) glides in over a few frames (0 snaps over 6 px at 300 ms RTT in `xtask netsim`, was 23 / 136) | smooth: every frame shown is final |
 | pick it for | lossy or long-distance links (RTT well above 50 ms) | same-region links (RTT under ~2x the delay) |
 
 **Recommended for playtests on a good link: `--mode lockstep --delay 3`** on
