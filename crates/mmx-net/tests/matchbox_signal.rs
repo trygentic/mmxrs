@@ -201,8 +201,10 @@ fn stages_progress_in_order_and_no_ice_servers_connects_fast() {
         &mut stages,
         |a, b| a.state() == LinkState::Connected && b.state() == LinkState::Connected,
     );
+    // 10 s, same as the pump: under a loaded machine (parallel builds)
+    // a localhost link took over 5 s while still being correct.
     assert!(
-        linked.elapsed() < Duration::from_secs(5),
+        linked.elapsed() < Duration::from_secs(10),
         "a loopback link with no ICE servers took {:?}",
         linked.elapsed()
     );
