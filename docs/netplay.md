@@ -234,12 +234,75 @@ message loop on its own thread. On the web, call it from the
 
 ## Frontend wiring
 
-TODO: desktop (`mmx-native`) and browser (`mmx-web`) netplay
-wiring, their flags/panel, the rollback tick with `StateRing` over the real
-game, status lines, and the browser e2e harness. z2rs's `docs/netplay.md`
-describes its versions of these (`--coop-host`, `--coop-join`, `--net-mode`,
-`--net-delay`, `--ice`, `make netplay-e2e*`, `make netplay-play`) and is the
-model to follow.
+Both frontends run **rollback** (no lockstep option yet) through one driver,
+`mmx_core::netgame::NetPlay` (`crates/mmx-core/src/netgame.rs`):
+
+- `NetPlay::config(rom, host, delay)` builds the Hello: ROM CRC32
+  (`rom_info().crc32`), trap-set id (FNV over the sorted trap addresses of a
+  session game, co-op traps included, plus a revision constant), co-op flags
+  `COOP_TWO_PLAYERS`, input delay. No WRAM is sent (MMX has no SRAM; both
+  peers start from power-on).
+- `tick(game, pad, now_ms)` once per 60 Hz frontend tick: pumps the network;
+  once live, adds the local pad, advances, and runs the requests. Save states
+  are `Game::save_state` **plus the co-op state** (`CoopState`, bincode),
+  because `save_state` alone would not rewind P2. Checksums are FNV-1a over
+  WRAM `$7E:0000..$2000` and P2's shadow block. Replayed frames' audio is
+  dropped. On `Running` it replaces the game with a power-on game with the
+  co-op traps registered and `coop.enabled` set from the flags.
+- `status()` is the one-line status both frontends show.
+- **Wire pad**: `mmx-net` carries one byte per pad, so only B, Y, A, Start and
+  the d-pad travel (`netgame::WIRE_BUTTONS`). X, L, R and Select are dropped
+  online; pick weapons from the Start menu. Widening `mmx-net`'s pads to
+  `u16` lifts this.
+
+Host = player 1, guest = player 2; each peer plays with its own P1 keys / first
+gamepad. Pause, fast-forward, frame-step and save states are disabled while a
+session exists. The game keeps running locally while connecting.
+
+### Desktop (`mmxrs`)
+
+```sh
+cargo run --release -p mmx-signal                     # once, anywhere reachable
+mmxrs --rom mmx.sfc --coop-host myroom                 # player 1
+mmxrs --rom mmx.sfc --coop-join myroom                 # player 2
+      [--signal ws://HOST:3536] [--ice none|'stun:.. turn:.. username=U credential=C'] [--delay 0-3]
+```
+
+`--signal` defaults to `ws://127.0.0.1:3536`, `--ice` to the Google STUN pair,
+`--delay` to 2 (host's value wins). The window title shows
+`[NET rollback host: 2/4 waiting for the other player in myroom]`, then
+`[NET rollback host: f=.. d=.. rtt=..ms rollbacks=.. pred=cur/max]`
+(` INTERRUPTED` when the peer goes quiet), or `closed (reason)`; each connect
+stage is printed to stderr once. `Esc` / closing the window sends a goodbye
+and waits 200 ms. The transport is cargo feature `netplay` (default on; it
+pulls webrtc-rs + ring, which need a C compiler); `--no-default-features`
+builds without it and `--coop-host/--coop-join` then fail with a message.
+
+### Browser (`mmx-web`, feature `netplay`)
+
+Build the bundle with `--features netplay` (e.g. `wasm-pack build
+crates/mmx-web --target web --release --out-dir site/pkg -- --features netplay`).
+The panel above the screen has the signal URL, room, ICE text, delay and
+*Host* / *Join* / *Leave*; the status line under it shows the same text as the
+desktop title. `?signal=`, `?room=`, `?ice=`, `?delay=` prefill it. The `Emu`
+API: `net_connect(signal, room, host, delay, ice)`, `net_tick(pad, now_ms)`
+(frames simulated; present when > 0), `net_live()`, `net_active()`,
+`net_status()`, `net_leave()` then `net_drop()` ~200 ms later,
+`Emu.net_default_ice()`. A bundle without the feature has none of these and
+the panel says so.
+
+### Tests
+
+- `cargo test -p mmx-core netgame`: `SyncTestSession` over the synthetic ROM
+  (a 32 KiB LoROM whose loop sums both pads into WRAM,
+  `netgame::synthetic_rom`), and two `Game`s through `NetPlay` over a lossy
+  (15 %), jittery loopback link with delay 0 for 300 settled frames: no
+  desync, >= 25 checksum matches, real rollbacks.
+- `cargo test -p mmx-native netplay`: in-process mmx-signal, two
+  `NetPlay<MatchboxTransport>` over 127.0.0.1 (ICE `none`, delay 0), 300
+  settled frames on the synthetic ROM, then a quit the guest must see. With
+  `MMX_ROM` set the same runs on the real ROM with co-op on (120 frames in
+  debug, 600 in release).
 
 ## Connecting: stages, ICE servers and timeouts
 
