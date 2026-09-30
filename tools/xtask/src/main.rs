@@ -11,7 +11,7 @@ const USAGE: &str = "usage: cargo xtask <command>
   verify [--movie F.bk2|F.lsmv] [--frames N] [--no-frame] [--coop-off] [--tap F,..] [--hold HEX] [--p2-hold HEX]
   trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..]   bank histogram of frame N's opcode fetches
   dump --frames N --out DIR [--at F,F,...] [--movie F] [--tap F,F,...] [--hold HEX] [--p2-hold HEX] [--coop]
-       [--load STATE] [--save F=PATH,..]  start from / write a save state (P2 re-anchors after a load)
+       [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..]  start from / write a save state (P2 re-anchors after a load)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
   ledger
   rominfo
@@ -102,14 +102,16 @@ fn scripted(args: &[String]) -> impl Fn(usize, Pads) -> Pads {
     let hex = |k: &str| flag(args, k).map(|h| u16::from_str_radix(h.trim_start_matches("0x"), 16).unwrap_or_else(|_| die(&format!("{k}: bad hex {h}")))).unwrap_or(0);
     let (hold1, hold2) = (hex("--hold"), hex("--p2-hold"));
     let from = num(args, "--from").unwrap_or(0);
-    // `--p1tap HEX@F,HEX@F` / `--p2tap`: hold HEX for 4 frames from F.
-    let taps_for = |k: &str| -> Vec<(u16, usize)> {
+    let to = num(args, "--to").unwrap_or(usize::MAX);
+    // `--p1tap HEX@F,HEX@F:N` / `--p2tap`: hold HEX for 4 (or N) frames from F.
+    let taps_for = |k: &str| -> Vec<(u16, usize, usize)> {
         flag(args, k)
             .map(|s| {
                 s.split(',')
                     .map(|t| {
                         let (m, f) = t.split_once('@').unwrap_or_else(|| die(&format!("{k}: want HEX@FRAME, got {t}")));
-                        (u16::from_str_radix(m.trim().trim_start_matches("0x"), 16).unwrap_or_else(|_| die(k)), f.trim().parse().unwrap_or_else(|_| die(k)))
+                        let (f, n) = f.split_once(':').unwrap_or((f, "4"));
+                        (u16::from_str_radix(m.trim().trim_start_matches("0x"), 16).unwrap_or_else(|_| die(k)), f.trim().parse().unwrap_or_else(|_| die(k)), n.trim().parse().unwrap_or_else(|_| die(k)))
                     })
                     .collect()
             })
@@ -117,17 +119,17 @@ fn scripted(args: &[String]) -> impl Fn(usize, Pads) -> Pads {
     };
     let (t1, t2) = (taps_for("--p1tap"), taps_for("--p2tap"));
     move |f, mut pads| {
-        if f >= from {
+        if f >= from && f < to {
             pads.p1 |= hold1;
             pads.p2 |= hold2;
         }
-        for &(m, t) in &t1 {
-            if (t..t + 4).contains(&f) {
+        for &(m, t, n) in &t1 {
+            if (t..t + n).contains(&f) {
                 pads.p1 |= m;
             }
         }
-        for &(m, t) in &t2 {
-            if (t..t + 4).contains(&f) {
+        for &(m, t, n) in &t2 {
+            if (t..t + n).contains(&f) {
                 pads.p2 |= m;
             }
         }
@@ -187,9 +189,22 @@ fn dump(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--coop") {
         g.coop.enabled = true;
         mmx_core::coop::register_coop_traps(&mut g);
+        // `--untrap HEX,..`: A/B one co-op hook at a time.
+        for a in flag(args, "--untrap").map(|s| s.split(',').collect::<Vec<_>>()).unwrap_or_default() {
+            g.traps.set_untrapped(u32::from_str_radix(a.trim_start_matches('$'), 16).unwrap_or_else(|_| die("--untrap")), true);
+        }
     }
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("{}: {e}", out.display())));
+    let refill = args.iter().any(|a| a == "--refill");
     for f in 1..=frames {
+        if refill {
+            // QA cheat: keep a living X at max HP (pits still kill).
+            let w = g.wram_mut();
+            let (hp, max) = (ram::wram_index(ram::X_HP), w[ram::wram_index(ram::MAX_HP)] & 0x7F);
+            if (1..max).contains(&(w[hp] & 0x7F)) {
+                w[hp] = max;
+            }
+        }
         g.step(script(f, inputs.get(f - 1).copied().unwrap_or_default()));
         for (_, p) in saves.iter().filter(|(sf, _)| *sf == f) {
             std::fs::write(p, g.save_state()).unwrap_or_else(|e| die(&format!("{p}: {e}")));
@@ -200,12 +215,15 @@ fn dump(args: &[String]) -> i32 {
             let (px, w, h) = g.frame();
             write_png(&path, px, w, h).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
             let w = g.wram();
+            if args.iter().any(|a| a == "--wram") {
+                let _ = std::fs::write(out.join(format!("frame_{f:06}.wram")), &w[..]);
+            }
             let b = |a: u32| w[mmx_core::ram::wram_index(a)];
             let w16 = |a: u32| u16::from_le_bytes([b(a), b(a + 1)]);
             println!(
-                "{} mode {:02X}/{:02X}/{:02X} level {:02X} X=({},{}) act {:02X} vy {} hp {} lives {} cam {} pad1 {:04X} xin {:02X}{:02X} coop_hidden {} last_trap {:?}",
-                path.display(), b(ram::MODE_D1), b(ram::MODE_D2), b(ram::STAGE_PHASE), b(ram::LEVEL_ID),
-                w16(ram::X_POS_X), w16(ram::X_POS_Y), b(ram::X_ACTION), w16(ram::X_VEL_Y) as i16, b(ram::X_HP) & 0x7F, b(ram::LIVES), w16(ram::CAMERA_X), w16(ram::PAD1_HELD), b(ram::X_INPUT_HELD), b(ram::X_INPUT_HELD + 1), g.coop.p2_hidden,
+                "{} mode {:02X}/{:02X}/{:02X}/{:02X} level {:02X} X=({},{}) act {:02X} vy {} hp {} lives {} cam ({},{}) pause {:02X} pad1 {:04X} xin {:02X}{:02X} coop_hidden {} last_trap {:?}",
+                path.display(), b(ram::MODE_D1), b(ram::MODE_D2), b(ram::STAGE_PHASE), b(ram::MODE_D4), b(ram::LEVEL_ID),
+                w16(ram::X_POS_X), w16(ram::X_POS_Y), b(ram::X_ACTION), w16(ram::X_VEL_Y) as i16, b(ram::X_HP) & 0x7F, b(ram::LIVES), w16(ram::CAMERA_X), w16(ram::CAMERA_Y), b(ram::PAUSE), w16(ram::PAD1_HELD), b(ram::X_INPUT_HELD), b(ram::X_INPUT_HELD + 1), g.coop.p2_hidden,
                 g.traplog.last().map(|t| (t.name, t.frame))
             );
             if g.coop.enabled {
