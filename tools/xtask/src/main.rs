@@ -294,6 +294,9 @@ fn dump(args: &[String]) -> i32 {
                     p16(0x05), p16(0x08), p2[0x02], p16(0x1C) as i16, p2[0x27] & 0x7F, p2[0x36], p2[0x37], p2[0x2B], p2[0x2C], b(ram::X_BASE + 0x2B), b(ram::X_BASE + 0x2C), p2[0x0E], g.coop.p2_oam_base, g.coop.p2_oam_count,
                     g.coop.zero_frame as i16, g.coop.dbg_regs.0, g.coop.dbg_regs.1, g.coop.dbg_regs.2
                 );
+                if g.coop.down_frames > 0 {
+                    println!("    P2 down {} spot {:?} touch {}", g.coop.down_frames, g.coop.revive.spot, g.coop.revive.touch);
+                }
             }
         }
     }

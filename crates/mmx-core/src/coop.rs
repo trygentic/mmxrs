@@ -195,6 +195,8 @@ pub struct CoopState {
     pub zero_frame: u16,
     /// P2's saber swing (X3 set only), see `saber.rs`.
     pub saber: crate::saber::Saber,
+    /// Down spot and revive progress (coop_hud.rs).
+    pub revive: crate::coop_hud::Revive,
 }
 
 impl Default for CoopState {
@@ -214,6 +216,7 @@ impl Default for CoopState {
             p2_shots: 0,
             zero_frame: u16::MAX,
             saber: crate::saber::Saber { slot: 0xFF, ..Default::default() },
+            revive: Default::default(),
         }
     }
 }
@@ -289,6 +292,7 @@ pub fn register_coop_traps(game: &mut Game) {
     game.traps.register(HOOK_DISPLAY, "coop_p2_display", TrapReturn::Observe, p2_display);
     game.traps.register(HOOK_CONTACT, "coop_contact", TrapReturn::Observe, contact);
     game.traps.register(crate::saber::HOOK_SHOTS_DONE, "coop_saber_shot", TrapReturn::Observe, crate::saber::shots_done);
+    crate::coop_hud::register(game);
 }
 
 fn word(w: &[u8; 0x20000], addr: u32) -> u16 {
@@ -530,7 +534,7 @@ fn p2_display(game: &mut Game) {
                 + (0..3).map(|k| &fx[k * 0x20..k * 0x20 + 0x20]).filter(|o| o[0] != 0).map(|o| layout_len(game, o)).sum::<usize>()
         }
     };
-    let Some(room) = 127usize.checked_sub(need) else { return };
+    let Some(room) = (127 - crate::coop_hud::HUD_SLOTS).checked_sub(need) else { return };
     let first = ((used + 3) & !3).min(room as u8 & !3);
     let pal = game.coop.zero_palette;
     if let Some(z) = zero {
