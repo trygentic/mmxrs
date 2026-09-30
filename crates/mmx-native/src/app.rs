@@ -1,0 +1,374 @@
+//! Windowed loop: winit 0.30 ApplicationHandler + pixels 0.15, paced by the
+//! cpal ring depth (~50 ms), or by a 60.0988 Hz timer without an audio device.
+
+use crate::audio::Audio;
+use crate::cli::Args;
+use crate::keys::{self, Hotkey, KeyAction};
+use mmx_core::{Game, Pads};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use winit::application::ApplicationHandler;
+use winit::event::{ElementState, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::PhysicalKey;
+use winit::window::{Fullscreen, Window, WindowId};
+
+const NTSC_HZ: f64 = 60.0988;
+const AUDIO_TARGET_SECS: f64 = 0.050;
+const MAX_CATCHUP: u32 = 4;
+const FAST_FORWARD_STEPS: u32 = 8;
+
+struct App {
+    game: Game,
+    scale: u32,
+    start_fullscreen: bool,
+    coop: bool,
+    window: Option<Arc<Window>>,
+    pixels: Option<pixels::Pixels<'static>>,
+    tex: (usize, usize),
+    audio: Option<Audio>,
+    gilrs: Option<gilrs::Gilrs>,
+    pad1: Option<gilrs::GamepadId>,
+    pad2: Option<gilrs::GamepadId>,
+    kb: [u16; 2],
+    fast: bool,
+    paused: bool,
+    frame_step: bool,
+    slot: u8,
+    last: Instant,
+    acc: f64,
+    fps_t: Instant,
+    fps_frames: u32,
+    fps: f64,
+    title: String,
+}
+
+pub fn run(mut game: Game, args: &Args) -> Result<(), String> {
+    let audio = Audio::open();
+    match &audio {
+        Some(a) => game.set_audio_rate(a.rate),
+        None => eprintln!("audio: no output device, pacing by timer"),
+    }
+    let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
+    let mut app = App {
+        game,
+        scale: args.scale,
+        start_fullscreen: args.fullscreen,
+        coop: args.coop_local,
+        window: None,
+        pixels: None,
+        tex: (256, 224),
+        audio,
+        gilrs: gilrs::Gilrs::new()
+            .map_err(|e| eprintln!("gamepads: {e}"))
+            .ok(),
+        pad1: None,
+        pad2: None,
+        kb: [0; 2],
+        fast: false,
+        paused: false,
+        frame_step: false,
+        slot: 1,
+        last: Instant::now(),
+        acc: 0.0,
+        fps_t: Instant::now(),
+        fps_frames: 0,
+        fps: 0.0,
+        title: String::new(),
+    };
+    event_loop.run_app(&mut app).map_err(|e| e.to_string())
+}
+
+/// `$HOME/.mmxrs/slotN.state` (or `./.mmxrs/` without HOME).
+// ponytail: no per-ROM subdir; there is one ROM.
+fn state_path(slot: u8) -> PathBuf {
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ".".into());
+    base.join(".mmxrs").join(format!("slot{slot}.state"))
+}
+
+impl App {
+    fn pad_bits(&self, id: Option<gilrs::GamepadId>) -> u16 {
+        let (Some(g), Some(id)) = (&self.gilrs, id) else {
+            return 0;
+        };
+        let Some(gp) = g.connected_gamepad(id) else {
+            return 0;
+        };
+        let buttons = keys::PAD_BUTTONS
+            .iter()
+            .filter(|(b, _)| gp.is_pressed(*b))
+            .fold(0, |a, (_, bit)| a | bit);
+        buttons
+            | keys::stick_bits(
+                gp.value(gilrs::Axis::LeftStickX),
+                gp.value(gilrs::Axis::LeftStickY),
+            )
+    }
+
+    /// z2-native's rule: the pad that last pressed a button is P1; in co-op a
+    /// different pad that presses becomes P2.
+    fn poll_pads(&mut self) {
+        let Some(g) = self.gilrs.as_mut() else { return };
+        while let Some(gilrs::Event { id, event, .. }) = g.next_event() {
+            match event {
+                gilrs::EventType::ButtonPressed(..) => {
+                    if !self.coop {
+                        self.pad1 = Some(id);
+                    } else if self.pad2 != Some(id) {
+                        if self.pad1.is_none() || self.pad1 == Some(id) {
+                            self.pad1 = Some(id);
+                        } else {
+                            self.pad2 = Some(id);
+                        }
+                    }
+                }
+                gilrs::EventType::Disconnected => {
+                    if self.pad1 == Some(id) {
+                        self.pad1 = None;
+                    }
+                    if self.pad2 == Some(id) {
+                        self.pad2 = None;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn step(&mut self) {
+        let pads = Pads {
+            p1: self.kb[0] | self.pad_bits(self.pad1),
+            p2: self.kb[1] | self.pad_bits(self.pad2),
+        };
+        self.game.step(pads);
+        let samples = self.game.take_audio();
+        if let (Some(a), false) = (&self.audio, self.fast) {
+            a.push(&samples);
+        }
+        self.fps_frames += 1;
+    }
+
+    fn hotkey(&mut self, h: Hotkey, pressed: bool, event_loop: &ActiveEventLoop) {
+        if h == Hotkey::FastForward {
+            self.fast = pressed;
+            return;
+        }
+        if !pressed {
+            return;
+        }
+        match h {
+            Hotkey::FastForward => {}
+            Hotkey::Slot(n) => self.slot = n,
+            Hotkey::SaveState => {
+                let p = state_path(self.slot);
+                let r = p
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|_| std::fs::write(&p, self.game.save_state()));
+                match r {
+                    Ok(()) => eprintln!("saved {}", p.display()),
+                    Err(e) => eprintln!("save {}: {e}", p.display()),
+                }
+            }
+            Hotkey::LoadState => {
+                let p = state_path(self.slot);
+                match std::fs::read(&p)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| self.game.load_state(&s))
+                {
+                    Ok(()) => eprintln!("loaded {}", p.display()),
+                    Err(e) => eprintln!("load {}: {e}", p.display()),
+                }
+            }
+            Hotkey::Fullscreen => {
+                if let Some(w) = &self.window {
+                    let fs = w
+                        .fullscreen()
+                        .is_none()
+                        .then_some(Fullscreen::Borderless(None));
+                    w.set_fullscreen(fs);
+                }
+            }
+            Hotkey::Quit => event_loop.exit(),
+            Hotkey::Pause => {
+                self.paused = !self.paused;
+                if let Some(a) = &self.audio {
+                    a.ring.lock().unwrap().clear();
+                }
+            }
+            Hotkey::FrameStep => self.frame_step = self.paused,
+        }
+    }
+
+    fn update_title(&mut self) {
+        let mut t = format!("mmxrs - {:.0} fps", self.fps);
+        if self.coop {
+            t += " [coop]";
+        }
+        t += &format!(" [SLOT {}]", self.slot);
+        if self.paused {
+            t += " [PAUSED]";
+        }
+        if self.fast {
+            t += " [FF]";
+        }
+        if t != self.title {
+            if let Some(w) = &self.window {
+                w.set_title(&t);
+            }
+            self.title = t;
+        }
+    }
+
+    fn draw(&mut self) {
+        let Some(p) = self.pixels.as_mut() else {
+            return;
+        };
+        let (px, w, h) = self.game.frame();
+        if (w, h) != self.tex {
+            // 256/512 wide, 224/239 (x2 interlaced) tall
+            if let Err(e) = p.resize_buffer(w as u32, h as u32) {
+                eprintln!("resize buffer: {e}");
+                return;
+            }
+            self.tex = (w, h);
+        }
+        for (dst, &c) in p.frame_mut().chunks_exact_mut(4).zip(&px[..w * h]) {
+            dst.copy_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8, 0xFF]);
+        }
+        if let Err(e) = p.render() {
+            eprintln!("render: {e}");
+        }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let (w, h) = (
+            self.tex.0 as u32 * self.scale,
+            self.tex.1 as u32 * self.scale,
+        );
+        let attrs = Window::default_attributes()
+            .with_title("mmxrs")
+            .with_inner_size(winit::dpi::LogicalSize::new(w, h))
+            .with_fullscreen(
+                self.start_fullscreen
+                    .then_some(Fullscreen::Borderless(None)),
+            );
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("create window: {e}");
+                return event_loop.exit();
+            }
+        };
+        let size = window.inner_size();
+        let surface = pixels::SurfaceTexture::new(size.width, size.height, window.clone());
+        match pixels::Pixels::new(self.tex.0 as u32, self.tex.1 as u32, surface) {
+            Ok(p) => self.pixels = Some(p),
+            Err(e) => {
+                eprintln!("create pixels: {e}");
+                return event_loop.exit();
+            }
+        }
+        self.window = Some(window);
+        self.last = Instant::now();
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(s) => {
+                if let Some(p) = self.pixels.as_mut() {
+                    if s.width > 0 && s.height > 0 {
+                        let _ = p.resize_surface(s.width, s.height);
+                    }
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let PhysicalKey::Code(code) = event.physical_key else {
+                    return;
+                };
+                let pressed = event.state == ElementState::Pressed;
+                match keys::map_key(code, self.coop) {
+                    Some(KeyAction::P1(b)) => set_bit(&mut self.kb[0], b, pressed),
+                    Some(KeyAction::P2(b)) => set_bit(&mut self.kb[1], b, pressed),
+                    Some(KeyAction::Hot(h)) if !event.repeat || h == Hotkey::FrameStep => {
+                        self.hotkey(h, pressed, event_loop)
+                    }
+                    _ => {}
+                }
+            }
+            WindowEvent::RedrawRequested => self.draw(),
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_none() {
+            return;
+        }
+        self.poll_pads();
+        let now = Instant::now();
+        let dt = now.duration_since(self.last).as_secs_f64();
+        self.last = now;
+
+        let mut stepped = 0;
+        if self.paused {
+            if std::mem::take(&mut self.frame_step) {
+                self.step();
+                stepped = 1;
+            }
+        } else if self.fast {
+            for _ in 0..FAST_FORWARD_STEPS {
+                self.step();
+            }
+            stepped = FAST_FORWARD_STEPS;
+        } else if let Some(target) = self
+            .audio
+            .as_ref()
+            .map(|a| (f64::from(a.rate) * AUDIO_TARGET_SECS) as usize)
+        {
+            // audio clock is the master: top the ring up to ~50 ms
+            while stepped < MAX_CATCHUP && self.audio.as_ref().is_some_and(|a| a.depth() < target) {
+                self.step();
+                stepped += 1;
+            }
+        } else {
+            self.acc = (self.acc + dt * NTSC_HZ).min(f64::from(MAX_CATCHUP));
+            while self.acc >= 1.0 {
+                self.acc -= 1.0;
+                self.step();
+                stepped += 1;
+            }
+        }
+
+        if now.duration_since(self.fps_t) >= Duration::from_secs(1) {
+            self.fps = f64::from(self.fps_frames) / now.duration_since(self.fps_t).as_secs_f64();
+            self.fps_frames = 0;
+            self.fps_t = now;
+        }
+        self.update_title();
+        if stepped > 0 {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        // ponytail: 2 ms wake-ups instead of a precise frame scheduler.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(2)));
+    }
+}
+
+fn set_bit(v: &mut u16, bit: u16, on: bool) {
+    if on {
+        *v |= bit;
+    } else {
+        *v &= !bit;
+    }
+}

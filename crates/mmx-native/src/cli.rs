@@ -1,0 +1,157 @@
+//! Hand-rolled argv parser (no clap). See `docs/native.md`.
+
+pub const USAGE: &str = "\
+usage: mmxrs [--rom PATH] [--scale N] [--fullscreen] [--coop-local]
+       mmxrs --headless --frames N [--rom PATH] [--dump-at F=out.png,...]
+             [--hold P1MASK] [--p2-hold MASK] [--coop-local]
+ROM defaults to $MMX_ROM. Masks are SNES pad words (hex 0x.. or decimal).";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Args {
+    pub rom: Option<String>,
+    pub scale: u32,
+    pub fullscreen: bool,
+    pub coop_local: bool,
+    pub headless: bool,
+    pub frames: u64,
+    /// (frame number after stepping, png path)
+    pub dump_at: Vec<(u64, String)>,
+    pub hold: u16,
+    pub p2_hold: u16,
+    // ponytail: --movie is parsed but unused until mmx-verify's bk2 parser lands.
+    pub movie: Option<String>,
+}
+
+impl Default for Args {
+    fn default() -> Self {
+        Args {
+            rom: None,
+            scale: 3,
+            fullscreen: false,
+            coop_local: false,
+            headless: false,
+            frames: 0,
+            dump_at: Vec::new(),
+            hold: 0,
+            p2_hold: 0,
+            movie: None,
+        }
+    }
+}
+
+fn parse_u16(s: &str) -> Result<u16, String> {
+    let r = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(h) => u16::from_str_radix(h, 16),
+        None => s.parse(),
+    };
+    r.map_err(|_| format!("bad pad mask {s:?}"))
+}
+
+/// Parse argv without the program name. `env_rom` is `$MMX_ROM`.
+pub fn parse<I: IntoIterator<Item = String>>(
+    argv: I,
+    env_rom: Option<String>,
+) -> Result<Args, String> {
+    let mut a = Args::default();
+    let mut it = argv.into_iter();
+    while let Some(flag) = it.next() {
+        let mut val = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
+        match flag.as_str() {
+            "--rom" => a.rom = Some(val("--rom")?),
+            "--scale" => {
+                let v = val("--scale")?;
+                a.scale = v.parse().map_err(|_| format!("bad --scale {v:?}"))?;
+                if !(1..=8).contains(&a.scale) {
+                    return Err("--scale must be 1-8".into());
+                }
+            }
+            "--fullscreen" => a.fullscreen = true,
+            "--coop-local" => a.coop_local = true,
+            "--headless" => a.headless = true,
+            "--frames" => {
+                let v = val("--frames")?;
+                a.frames = v.parse().map_err(|_| format!("bad --frames {v:?}"))?;
+            }
+            "--dump-at" => {
+                for item in val("--dump-at")?.split(',').filter(|s| !s.is_empty()) {
+                    let (f, path) = item
+                        .split_once('=')
+                        .ok_or_else(|| format!("bad --dump-at item {item:?}, want F=path.png"))?;
+                    let f = f
+                        .parse()
+                        .map_err(|_| format!("bad --dump-at frame {f:?}"))?;
+                    a.dump_at.push((f, path.to_string()));
+                }
+            }
+            "--hold" => a.hold = parse_u16(&val("--hold")?)?,
+            "--p2-hold" => a.p2_hold = parse_u16(&val("--p2-hold")?)?,
+            "--movie" => a.movie = Some(val("--movie")?),
+            "-h" | "--help" => return Err(USAGE.into()),
+            other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
+        }
+    }
+    if a.rom.is_none() {
+        a.rom = env_rom.filter(|s| !s.is_empty());
+    }
+    if a.headless && a.frames == 0 {
+        return Err("--headless needs --frames N".into());
+    }
+    Ok(a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> Result<Args, String> {
+        parse(s.split_whitespace().map(String::from), None)
+    }
+
+    #[test]
+    fn defaults() {
+        let a = p("").unwrap();
+        assert_eq!(a, Args::default());
+        assert_eq!(a.scale, 3);
+    }
+
+    #[test]
+    fn full_windowed() {
+        let a = p("--rom x.sfc --scale 5 --fullscreen --coop-local").unwrap();
+        assert_eq!(a.rom.as_deref(), Some("x.sfc"));
+        assert_eq!(a.scale, 5);
+        assert!(a.fullscreen && a.coop_local && !a.headless);
+    }
+
+    #[test]
+    fn headless_everything() {
+        let a = p("--headless --frames 600 --dump-at 10=a.png,600=b.png --hold 0x8000 --p2-hold 4096 --movie m.bk2").unwrap();
+        assert!(a.headless);
+        assert_eq!(a.frames, 600);
+        assert_eq!(a.dump_at, vec![(10, "a.png".into()), (600, "b.png".into())]);
+        assert_eq!(a.hold, 0x8000);
+        assert_eq!(a.p2_hold, 0x1000);
+        assert_eq!(a.movie.as_deref(), Some("m.bk2"));
+    }
+
+    #[test]
+    fn env_rom_is_fallback_only() {
+        let env = Some("env.sfc".to_string());
+        assert_eq!(
+            parse(vec![], env.clone()).unwrap().rom.as_deref(),
+            Some("env.sfc")
+        );
+        let a = parse(vec!["--rom".into(), "cli.sfc".into()], env).unwrap();
+        assert_eq!(a.rom.as_deref(), Some("cli.sfc"));
+    }
+
+    #[test]
+    fn errors() {
+        assert!(p("--scale 0").is_err());
+        assert!(p("--scale 9").is_err());
+        assert!(p("--scale").is_err());
+        assert!(p("--bogus").is_err());
+        assert!(p("--headless").is_err());
+        assert!(p("--headless --frames 1 --dump-at nope").is_err());
+        assert!(p("--hold 0xZZ").is_err());
+    }
+}

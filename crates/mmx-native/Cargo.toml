@@ -1,0 +1,21 @@
+[package]
+name = "mmx-native"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Mega Man X desktop frontend (winit/pixels/cpal/gilrs) and headless runner"
+
+[[bin]]
+name = "mmxrs"
+path = "src/main.rs"
+
+[dependencies]
+mmx-core = { path = "../mmx-core" }
+winit = { version = "0.30", features = ["rwh_06"] }
+pixels = "0.15"
+cpal = "0.15"
+png = "0.18"
+sha2 = "0.10"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+gilrs = "0.11"
