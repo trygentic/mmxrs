@@ -156,8 +156,8 @@ impl eframe::App for App {
         self.poll(&ctx);
         // Dropped files: an X3 title goes to the X3 slot, anything else to X.
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
-            if let Some(p) = f.path {
-                let p = p.to_string_lossy().into_owned();
+            let p = f.path().to_string_lossy().into_owned();
+            if !p.is_empty() {
                 let is_x3 = std::fs::read(&p).ok().and_then(|b| rom_info(&b).ok()).is_some_and(|i| i.title == "MEGAMAN X3");
                 *(if is_x3 { &mut self.s.x3_rom } else { &mut self.s.rom }) = p;
             }
