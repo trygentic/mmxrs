@@ -302,6 +302,22 @@ impl SnesEmulator {
         self.ppu.cgram()
     }
 
+    // mmxrs patch: SPC700 audio RAM (64 KiB) and DSP registers ($00-$7F)
+    #[must_use]
+    pub fn spc_ram(&self) -> &[u8] {
+        self.apu.audio_ram()
+    }
+
+    #[must_use]
+    pub fn dsp_register(&self, address: u8) -> u8 {
+        self.apu.dsp_register(address)
+    }
+
+    /// Research knob, process-wide: bit n mutes DSP voice n in the output.
+    pub fn set_voice_mute(mask: u8) {
+        crate::apu::dsp::VOICE_MUTE.store(mask, std::sync::atomic::Ordering::Relaxed);
+    }
+
     // mmxrs patch: raw VRAM words and OBSEL (sprite tile base, gap; word addresses)
     #[must_use]
     pub fn vram(&self) -> &[u16; 0x8000] {

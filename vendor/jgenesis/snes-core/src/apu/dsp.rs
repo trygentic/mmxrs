@@ -750,6 +750,10 @@ fn write_echo_sample(audio_ram: &mut AudioRam, address: u16, value: i16) {
     audio_ram[address.wrapping_add(1) as usize] = value_msb;
 }
 
+/// mmxrs patch: research knob (process-wide, not in save states): bit n mutes
+/// voice n in the output. 0 (the default) changes nothing.
+pub static VOICE_MUTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 #[derive(Debug, Clone, Encode, Decode)]
 struct DspRegisters {
     sample_table_address: u16,
@@ -835,9 +839,14 @@ impl AudioDsp {
 
     pub fn read_register(&self) -> u8 {
         log::trace!("DSP register read: {:02X}", self.register_address);
+        self.peek_register(self.register_address)
+    }
 
+    // mmxrs patch: side-effect-free read of any DSP register (research / inspection)
+    #[must_use]
+    pub fn peek_register(&self, address: u8) -> u8 {
         // Addresses $80-$FF mirror $00-$7F
-        let address = self.register_address & 0x7F;
+        let address = address & 0x7F;
 
         // High nibble of register address encodes the voice
         let voice = (address >> 4) as usize;
@@ -1101,9 +1110,13 @@ impl AudioDsp {
         let mut voice_samples_r = [0; 8];
         let mut voice_sum_l = 0_i32;
         let mut voice_sum_r = 0_i32;
+        let mute = VOICE_MUTE.load(std::sync::atomic::Ordering::Relaxed); // mmxrs patch
         for (i, voice) in self.voices.iter().enumerate() {
             let voice_sample_l = (i32::from(voice.current_sample) * i32::from(voice.volume_l)) >> 6;
             let voice_sample_r = (i32::from(voice.current_sample) * i32::from(voice.volume_r)) >> 6;
+            // mmxrs patch: research knob, a muted voice leaves the mix (and the echo input)
+            let (voice_sample_l, voice_sample_r) =
+                if mute >> i & 1 != 0 { (0, 0) } else { (voice_sample_l, voice_sample_r) };
 
             voice_samples_l[i] = voice_sample_l;
             voice_samples_r[i] = voice_sample_r;

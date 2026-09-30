@@ -3,7 +3,7 @@
 //! The APU consists of two primary components: an SPC700 CPU and a DSP that can play back ADPCM samples
 
 mod bootrom;
-mod dsp;
+pub(crate) mod dsp; // mmxrs patch: VOICE_MUTE
 mod timer;
 
 use crate::api::SnesEmulatorConfig;
@@ -306,6 +306,17 @@ impl Apu {
         self.registers.timer_0.tick();
         self.registers.timer_1.tick();
         self.registers.timer_2.tick();
+    }
+
+    // mmxrs patch: SPC700 audio RAM and DSP registers (research / inspection)
+    #[must_use]
+    pub fn audio_ram(&self) -> &[u8] {
+        &self.audio_ram[..]
+    }
+
+    #[must_use]
+    pub fn dsp_register(&self, address: u8) -> u8 {
+        self.dsp.peek_register(address)
     }
 
     pub fn read_port(&mut self, address: u32) -> u8 {

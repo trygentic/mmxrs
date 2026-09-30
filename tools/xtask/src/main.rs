@@ -13,7 +13,7 @@ const USAGE: &str = "usage: cargo xtask <command>
   verify [--movie F.bk2|F.lsmv] [--frames N] [--no-frame] [--coop-off] [--tap F,..] [--hold HEX] [--p2-hold HEX]
   trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..]   bank histogram of frame N's opcode fetches
   dump --frames N --out DIR [--at F,F,...] [--movie F] [--tap F,F,...] [--hold HEX] [--p2-hold HEX] [--coop]
-       [--rom-any PATH] [--x3 PATH] [--poke ADDR=VAL@A[-B],..] [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..]  start from / write a save state (P2 re-anchors after a load)
+       [--rom-any PATH] [--x3 PATH] [--poke ADDR=VAL@A[-B],..] [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..] [--wav PATH] [--apu] [--mute HEX]  start from / write a save state (P2 re-anchors after a load)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
   ledger
@@ -258,6 +258,15 @@ fn dump(args: &[String]) -> i32 {
                 .collect()
         })
         .unwrap_or_default();
+    // `--wav PATH`: the run's audio (`take_audio`, 32 kHz) as 16-bit stereo WAV.
+    // `--apu`: per frame, the DSP's sounding voices; SPC RAM at each `--at` frame (`.spc`).
+    let apu = args.iter().any(|a| a == "--apu");
+    // `--mute HEX`: research, bit n silences DSP voice n in the output.
+    if let Some(m) = flag(args, "--mute") {
+        Game::set_voice_mute(u8::from_str_radix(m, 16).unwrap_or_else(|_| die("--mute HEX")));
+    }
+    let mut wav = Vec::new();
+    g.set_audio_rate(32_000);
     for f in 1..=frames {
         for &(a, v, fa, fb) in &pokes {
             if (fa..=fb).contains(&f) {
@@ -273,6 +282,17 @@ fn dump(args: &[String]) -> i32 {
             }
         }
         g.step(script(f, inputs.get(f - 1).copied().unwrap_or_default()));
+        wav.extend(g.take_audio());
+        if apu {
+            // Sounding voices: SRCN, PITCH, ENVX, ADSR/GAIN, VOL, and KON/KOFF/ENDX.
+            let r = |a: u8| g.dsp_register(a);
+            let v: Vec<String> = (0..8u8)
+                .map(|k| k << 4)
+                .filter(|&b| r(b | 8) != 0)
+                .map(|b| format!("v{} src {:02X} p {:04X} env {:02X} adsr {:02X}{:02X} gain {:02X} vol {}/{}", b >> 4, r(b | 4), u16::from_le_bytes([r(b | 2), r(b | 3)]), r(b | 8), r(b | 5), r(b | 6), r(b | 7), r(b) as i8, r(b | 1) as i8))
+                .collect();
+            println!("apu {f}: kon {:02X} koff {:02X} endx {:02X} dir {:02X} | {}", r(0x4C), r(0x5C), r(0x7C), r(0x5D), v.join(" | "));
+        }
         for (_, p) in saves.iter().filter(|(sf, _)| *sf == f) {
             std::fs::write(p, g.save_state()).unwrap_or_else(|e| die(&format!("{p}: {e}")));
             println!("saved state after frame {f}: {p}");
@@ -284,6 +304,9 @@ fn dump(args: &[String]) -> i32 {
             let w = g.wram();
             if args.iter().any(|a| a == "--wram") {
                 let _ = std::fs::write(out.join(format!("frame_{f:06}.wram")), &w[..]);
+            }
+            if apu {
+                let _ = std::fs::write(out.join(format!("frame_{f:06}.spc")), g.spc_ram());
             }
             if args.iter().any(|a| a == "--vram") {
                 // VRAM (64 KiB, little-endian words), OAM (544 B), CGRAM (512 B LE).
@@ -319,7 +342,33 @@ fn dump(args: &[String]) -> i32 {
             }
         }
     }
+    if let Some(p) = flag(args, "--wav") {
+        write_wav(Path::new(p), &wav, 32_000).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+        println!("wrote {p} ({} samples)", wav.len());
+    }
     0
+}
+
+/// 16-bit stereo PCM WAV.
+fn write_wav(path: &Path, s: &[(f32, f32)], rate: u32) -> std::io::Result<()> {
+    let n = s.len() as u32 * 4;
+    let mut v = Vec::with_capacity(44 + n as usize);
+    v.extend(b"RIFF");
+    v.extend((36 + n).to_le_bytes());
+    v.extend(b"WAVEfmt ");
+    v.extend(16u32.to_le_bytes());
+    v.extend([1u16, 2].iter().flat_map(|x| x.to_le_bytes()));
+    v.extend(rate.to_le_bytes());
+    v.extend((rate * 4).to_le_bytes());
+    v.extend([4u16, 16].iter().flat_map(|x| x.to_le_bytes()));
+    v.extend(b"data");
+    v.extend(n.to_le_bytes());
+    for &(l, r) in s {
+        for x in [l, r] {
+            v.extend(((x.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+        }
+    }
+    std::fs::write(path, v)
 }
 
 /// `trace --frames N [--tap ..] [--hold HEX] [--find HEX,HEX]`: run N-1 frames,

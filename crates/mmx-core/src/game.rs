@@ -376,6 +376,21 @@ impl Game {
         std::mem::take(&mut self.audio.0)
     }
 
+    /// SPC700 audio RAM (64 KiB). Research / inspection.
+    pub fn spc_ram(&self) -> &[u8] {
+        self.emu.spc_ram()
+    }
+
+    /// DSP register `$00-$7F`, read without side effects. Research / inspection.
+    pub fn dsp_register(&self, a: u8) -> u8 {
+        self.emu.dsp_register(a)
+    }
+
+    /// Research knob, process-wide: bit n silences DSP voice n in every game's output.
+    pub fn set_voice_mute(mask: u8) {
+        SnesEmulator::set_voice_mute(mask);
+    }
+
     pub fn set_audio_rate(&mut self, hz: u32) {
         self.emu.update_audio_output_frequency(hz.into());
     }
