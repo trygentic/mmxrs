@@ -689,7 +689,7 @@ fn render(brr: &[i16], lp: usize, pitch: &[u16], gain: i32) -> Vec<i16> {
 
 /// Zero's saber whoosh from a Mega Man X3 (USA) image (checked by
 /// [`extract_x3`]): the SFX X3 plays on Zero's saber swing (the ball it
-/// throws, sample `$0E` swept up and down, voice volume `$30`), at about
+/// throws, sample `$0E` swept up and down, voice volume `$1E`), at about
 /// X3's output level.
 pub fn extract_x3_sounds(rom: &[u8]) -> Result<ZeroSounds, String> {
     let at = off(X3_WHOOSH_BRR);

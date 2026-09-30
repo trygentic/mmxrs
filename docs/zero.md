@@ -760,6 +760,81 @@ x --load states/highway-start.state --frames 44 --out target/z/wave --at 16-44/1
 xtask dump --rom-any X3 --load states/x3-zero-stand.state --frames 260 --out DIR --at 150-260/1 --wram --vram --p1tap 4000@10:150,4000@185:2
 ```
 
+## Sounds
+
+With the X3 ROM loaded, Zero's saber (P1 `--zero` and P2) plays X3's
+whoosh. Nothing else: **X3 has no Zero-specific hurt or death sounds.**
+
+**What X3 plays** (`xtask dump --rom-any X3 ... --apu` prints the DSP's
+sounding voices per frame: `SRCN`, `PITCH`, `ENVX`, ADSR/GAIN, volume, KON;
+`--mute HEX` silences voices in the output; `--wav PATH` writes the run's
+audio at 32 kHz). SPC sample directory `DIR = $39` (`$3900`). Sound effects
+are on voice 0 (music takes it back when free: the src `$19` notes on voice
+0 are music, not SFX).
+
+- **Saber.** From `x3-zero-stand`: hold Y 150 frames (charge), release
+  (act `$4A`, the charged shot: voice 0 src `$0E` 1 frame later), Y again
+  after that sound ends (frame 215: act `$4C`, poses 86-90). The swing
+  itself keys on nothing; at pose 90 (10 frames in, frame 225, when he
+  throws the ball, set `$4E`) voice 0 plays src `$0E` again: that is the
+  sound heard on X3 Zero's slash. With the second Y at 185 (inside the
+  charged shot's sound) X3 drops it entirely. Src `$0E`: start `$415A`,
+  loop `$4190`, 8 BRR blocks (128 samples, the last 32 loop; a short bump
+  then noise), ROM `$89:AF25` (file `$4AF25`, the bytes in SPC RAM are the
+  ROM's, test `x3_whoosh_matches_spc_ram`). Volume `$1E`/`$1E`, ADSR `$FF
+  $E0` (instant attack, full sustain), pitch swept per frame `$02A0` up to
+  `$0AA0` (21 kHz sample rate) at frame 6, then down to `$0030` (375 Hz)
+  at frame 38, key-off after 42 frames (GAIN `$BF`, ~2 ms fade). The
+  charged shot is the same sweep.
+- **Hurt / death.** Walking into the intro stage's first enemy from
+  `x3-intro-play` (X) and `x3-zero-stand` (Zero), `--hold 0100`: hurt at
+  frame 205 and every 64 frames after, death at 860 (X) / 1244 (Zero).
+  Both characters get the same voice-0 sequence: hurt = src `$0E` (pitch
+  `$01C0` falling, 8 frames) then src `$0C` (`$0340` rising to `$0C40`,
+  16 frames), volume `$4E`; death = that, then src `$04` on voices 0-2
+  (pitches `$21E0`/`$3FD0`/`$21B0` falling, repeated with falling volume).
+  No voice clip, nothing Zero-only. So X1's own hurt/death sounds stay
+  (nothing is stripped from X1's queue `$0B72`).
+
+**What ships.** `zero_data::extract_x3_sounds` (from `extract_x3`, so the
+ROM's title and CRC are checked) decodes the 8 blocks with a BRR decoder
+(`brr_decode`, the vendored DSP's shift/filter/15-bit math; test
+`brr_filters`) and renders the whoosh once: the measured pitch table
+`X3_WHOOSH_PITCH` (42 NTSC frames, 12-bit fraction as the DSP), linear
+interpolation plus a `[1 2 1]/4` smoothing for the DSP's Gaussian, a 64-
+sample fade, gain 80/256; integer math, so both netplay peers get the same
+`Sample { pcm, rate: 32000 }` (22427 samples, 0.7 s) in `ZeroSet.sounds`.
+Against X3's own voice 0 (`--mute FE`, the ball at frame 225) the render
+has the same RMS (1983 vs 1987) and its spectral-centroid track correlates
+0.97 (ours ~1.3x brighter: the Gaussian is duller than the smoothing).
+
+**Mixer** (`sfx.rs`). `CoopState.sfx: [u16; 2]` = frames into the whoosh
++ 1 for P2 and P1 (0 = silent), so rollback carries it. `saber::whoosh`
+(the arc pose's first frame, 8 frames into our swing; X3's comes 10 frames
+in) sets it to 1 after `saber::update` (P2's slice, P1's `$80:E518` trap);
+a new swing restarts it, as X3's driver re-keys voice 0. At the end of
+`Game::step`, `sfx::mix` adds each playing slot's frame of samples (`rate /
+fps` of them, so PAL paces it in wall time too) to that frame's output
+(linear resample to the device rate, clamped to +-1) and advances it. Replayed
+netplay frames mix the same and their audio is dropped as before; a game
+without the X3 set never mixes (`sfx` stays 0). Tests: `sfx_mix_paces_and_ends`,
+`sfx_whoosh_in_game_output` (hw-spiky, P1 swings at 28: the output's
+cross-correlation with the sample peaks at 0.69 exactly where the arc
+frame's audio starts; a run with `ZeroSet.sounds = None` differs only from
+there, by the whoosh), `saber_frames_survive_rollback` (audio equal too).
+
+Note: a save state carries the APU's output rate, so `set_audio_rate` goes
+after `load_state`.
+
+```
+x3 = xtask dump --rom-any X3 --apu --wav OUT.wav
+x3 --load states/x3-zero-stand.state --frames 320 --out DIR --at 150-320/1 --wram --p1tap 4000@10:150,4000@215:2 [--mute FE]
+x3 --load states/x3-intro-play.state --frames 900 --out DIR --at 1-900/1 --wram --hold 0100    # X hurt 205.., death 860
+x3 --load states/x3-zero-stand.state --frames 1500 --out DIR --at 1-1500/1 --wram --hold 0100  # Zero hurt 205.., death 1244
+xtask zerosheet --x3 X3 --sfx --out target/sfx      # target/sfx/swing.wav
+xtask dump --load states/hw-spiky.state --zero --frames 150 --out target/sfx/dump --p1tap 0100@1:26,0040@28:2,0040@70:2,0040@110:2 --wav target/sfx/p1_zero_swings.wav
+```
+
 ## Playing as Zero
 
 Supply your own Mega Man X3 (USA) image (CRC32 `FA0FE671`, copier header
