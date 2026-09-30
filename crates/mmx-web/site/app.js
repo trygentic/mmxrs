@@ -29,12 +29,15 @@ async function loadRom(file) {
     emu = null;
     net = false;
     const e = new Emu(rom);
-    e.set_coop(coop);
+    const hooks = e.hook_report(); // non-empty: not the PAL dump's layout
+    if (hooks) console.warn(hooks);
+    let refused = '';
+    try { e.set_coop(coop); } catch (err) { refused = ` (${err})`; }
     if (x3) e.set_x3_rom(x3);
     if (x3 && zero) e.set_p1_zero(true);
     emu = e;
     const info = JSON.parse(emu.rom_info_json());
-    msg = `${info.title.trim()} v1.${info.version} sha256 ${info.sha256.slice(0, 16)}…`;
+    msg = `${info.title.trim()} v1.${info.version} sha256 ${info.sha256.slice(0, 16)}…${refused}`;
     await startAudio();
   } catch (err) {
     msg = `load failed: ${err}`;
@@ -82,7 +85,7 @@ $('coop').checked = coop;
 $('coop').addEventListener('change', (e) => {
   coop = e.target.checked;
   pads[0] = pads[1] = 0;
-  emu?.set_coop(coop);
+  try { emu?.set_coop(coop); } catch (err) { msg = `${err}`; status(); }
   const u = new URL(location.href);
   if (coop) u.searchParams.set('coop', '1'); else u.searchParams.delete('coop');
   history.replaceState(null, '', u);

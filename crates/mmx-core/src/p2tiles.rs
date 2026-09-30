@@ -11,15 +11,16 @@
 //! Art hook: [`fill_page`] is the one place the page is written. A Zero art
 //! pack would write its own 4bpp tiles there instead of the ROM's X tiles.
 
+use crate::hooks::HookId;
 use crate::ram::{self, wram_index as ix};
 use crate::traps::TrapReturn;
 use crate::Game;
 
 /// Frame streamer entry (`JSL` from the player update, `D` = the block).
-pub const STREAMER: u32 = 0x848FCA;
+pub const STREAMER: HookId = HookId::Streamer;
 /// Streamer's common exit (`PLB; PLP; RTL`): `$A3` is final here. The only
 /// other exit (`+$17` bit 7 clear) queues nothing.
-pub const STREAMER_EXIT: u32 = 0x849083;
+pub const STREAMER_EXIT: HookId = HookId::StreamerExit;
 /// DMA queue: 8-byte entries `VMAIN, dest word, size, src24`; `$A3` = next
 /// free byte index; `$1F25` = the streamer's vblank budget counter.
 const DMA_QUEUE: usize = 0x0500;
@@ -71,8 +72,8 @@ pub fn in_window(tile: u16, tile_base: u16) -> bool {
 }
 
 pub fn register(game: &mut Game) {
-    game.traps.register(STREAMER, "p2tiles_stream", TrapReturn::Observe, stream_enter);
-    game.traps.register(STREAMER_EXIT, "p2tiles_steal", TrapReturn::Observe, stream_exit);
+    game.traps.register(game.hook(STREAMER), "p2tiles_stream", TrapReturn::Observe, stream_enter);
+    game.traps.register(game.hook(STREAMER_EXIT), "p2tiles_steal", TrapReturn::Observe, stream_exit);
 }
 
 /// P2's player update is the only streamer call made from an isolated call

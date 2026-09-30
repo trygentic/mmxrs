@@ -169,11 +169,20 @@ impl Emu {
         self.game.set_p1_zero(on).map_err(|e| JsValue::from_str(&e))
     }
 
-    pub fn set_coop(&mut self, on: bool) {
-        self.game.coop.enabled = on;
-        if on && !self.game.traps.is_trapped(mmx_core::coop::PLAYER_OAM) {
-            mmx_core::coop::register_coop_traps(&mut self.game);
+    /// Co-op on/off. Throws (and stays off) when this ROM lacks a hook
+    /// (see [`Emu::hook_report`]).
+    pub fn set_coop(&mut self, on: bool) -> Result<(), JsValue> {
+        if on && !self.game.traps.is_trapped(self.game.hook(mmx_core::coop::PLAYER_OAM)) {
+            mmx_core::coop::register_coop_traps(&mut self.game).map_err(|e| JsValue::from_str(&e))?;
         }
+        self.game.coop.enabled = on;
+        Ok(())
+    }
+
+    /// Where this ROM keeps the co-op hooks, one per line: empty when all
+    /// sit where the PAL dump has them (docs/rom-variants.md).
+    pub fn hook_report(&self) -> String {
+        if self.game.hooks().all_as_pal() { String::new() } else { self.game.hook_report().join("\n") }
     }
     pub fn frame_count(&self) -> u64 {
         self.game.frame_count()

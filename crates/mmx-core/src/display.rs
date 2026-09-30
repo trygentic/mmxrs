@@ -9,21 +9,22 @@
 //! through the same cursor, zero.rs `emit_p1`). P2: its display slice
 //! (coop.rs `p2_display`) records its own range, HUD excluded.
 
+use crate::hooks::HookId;
 use crate::ram::{self, wram_index as ix};
 use crate::traps::TrapReturn;
 use crate::Game;
 
 /// `JSR $80:D640` (armour parts), then `JSR $80:D671` (the player).
-pub const HOOK_P1_OAM: u32 = 0x80D55A;
+pub const HOOK_P1_OAM: HookId = HookId::P1Oam;
 /// The instruction after `JSR $80:D671`.
-pub const HOOK_P1_OAM_DONE: u32 = 0x80D560;
+pub const HOOK_P1_OAM_DONE: HookId = HookId::P1OamDone;
 const OAM_CURSOR: usize = 0x00E4;
 /// Y of a hidden OAM slot (the ROM's hide loop, coop.rs alignment padding).
 const HIDDEN_Y: u8 = 0xE0;
 
 pub fn register(game: &mut Game) {
-    game.traps.register(HOOK_P1_OAM, "display_p1_oam", TrapReturn::Observe, p1_start);
-    game.traps.register(HOOK_P1_OAM_DONE, "display_p1_oam_done", TrapReturn::Observe, p1_done);
+    game.traps.register(game.hook(HOOK_P1_OAM), "display_p1_oam", TrapReturn::Observe, p1_start);
+    game.traps.register(game.hook(HOOK_P1_OAM_DONE), "display_p1_oam_done", TrapReturn::Observe, p1_done);
 }
 
 /// Slots `a..b` as a mask (bit n = slot n, clamped to 128).

@@ -26,6 +26,10 @@ The disassembly's bank-`$80` PCs drift from this cartridge by up to `0x41`
 (bank `$81`/`$84` PCs matched), so every hook below was taken from
 `cargo xtask trace --calls` on a gameplay frame, not from the listing.
 
+Addresses are the PAL v1.0 dump's. Every one is in `hooks.rs` with a byte
+signature and is looked up at load (`Game::hook`), so other dumps (USA v1.1:
+bank `$80` `+$20`/`+$2B`) find them too; see `docs/rom-variants.md`.
+
 | addr | what | P2 body |
 |---|---|---|
 | `$80:D1EF` | instruction after the object master's `JSL $81:812E` (P1's action/input phase has just returned) | update slice: ROM input remap `$80:E518` on pad 2, then `$81:812E` |

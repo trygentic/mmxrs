@@ -18,12 +18,12 @@ use crate::Game;
 /// `$80:9A94 LDA $1F30`, where both paths after the display slice hook
 /// ([`coop::HOOK_DISPLAY`], `$80:9A86`) meet: every gameplay frame, after
 /// P2's sprites are in OAM. Nothing after it touches OAM or `$E3`.
-pub const HOOK_HUD: u32 = 0x809A94;
+pub const HOOK_HUD: crate::hooks::HookId = crate::hooks::HookId::Hud;
 /// HP bar redraw, state 2 of `$80:D7A3`'s jump table (listing `$80:D842`,
 /// drift `-$41`): `$E4/$E5 = $10/$04`, then if `$0BCF` bit 7: clamp HP to
 /// `$1F9A`, fill slots from Y `$40` upwards (tile `$80` full, `$82` empty,
 /// `$84` cap), clear bit 7. `RTS`. Needs M=1, X=0.
-const BAR_REDRAW: u32 = 0x80D801;
+const BAR_REDRAW: crate::hooks::HookId = crate::hooks::HookId::BarRedraw;
 /// `$1F11`: HP bar state (0 init, 2 shown, 4 hide, 6 hidden).
 const BAR_STATE: u32 = 0x7E1F11;
 const BAR_SHOWN: u8 = 2;
@@ -76,7 +76,7 @@ pub struct Revive {
 }
 
 pub fn register(game: &mut Game) {
-    game.traps.register(HOOK_HUD, "coop_hud", TrapReturn::Observe, hud);
+    game.traps.register(game.hook(HOOK_HUD), "coop_hud", TrapReturn::Observe, hud);
 }
 
 fn w16(w: &[u8; 0x20000], a: u32) -> u16 {
@@ -140,7 +140,7 @@ fn bar_entries(game: &mut Game, hp: u8) -> [u8; BAR_SLOTS * 4] {
     r.dbr = 0x80;
     r.p = (r.p | 0x20) & !0x10;
     game.set_regs(r);
-    game.call_isolated_ret(BAR_REDRAW, TrapReturn::Rts);
+    game.call_isolated_ret(game.hook(BAR_REDRAW), TrapReturn::Rts);
     game.set_regs(saved);
     let w = game.wram_mut();
     let bar: [u8; BAR_SLOTS * 4] = w[o..o + BAR_SLOTS * 4].try_into().unwrap();

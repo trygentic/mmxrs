@@ -12,6 +12,7 @@ use snes_config::SnesJoypadState;
 use snes_core::api::{CoprocessorRoms, P2Tiles, SnesEmulator, SnesEmulatorConfig, P2_PAGES, P2_PAGE_WORDS};
 use snes_core::input::{SnesController, SnesInputs};
 
+use crate::hooks::{HookId, HookMap};
 use crate::traps::{TrapRecord, TrapReturn};
 use crate::{coop, Pads, Registers, RomError, RomInfo, Timing, TrapLog, TrapTable};
 
@@ -54,6 +55,8 @@ pub struct Game {
     // exposes cartridge reads through &mut (open-bus side effect).
     rom: Vec<u8>,
     info: RomInfo,
+    /// Where this ROM keeps each hook (`hooks.rs`), resolved at load.
+    hooks: HookMap,
     video: Video,
     audio: Audio,
     frame_count: u64,
@@ -208,6 +211,7 @@ impl Game {
             traplog: TrapLog::default(),
             coop: coop::CoopState::default(),
             emu,
+            hooks: HookMap::resolve(&rom),
             rom,
             info,
             timing,
@@ -255,10 +259,10 @@ impl Game {
         if on && self.zero_set.is_none() {
             return Err("playing as Zero needs a Mega Man X3 (USA) ROM (--x3-rom PATH or MMX_X3_ROM)".into());
         }
-        self.coop.p1 = crate::zero::ZeroP1 { on, ..Default::default() };
         if on {
-            coop::register_coop_traps(self);
+            coop::register_coop_traps(self)?;
         }
+        self.coop.p1 = crate::zero::ZeroP1 { on, ..Default::default() };
         Ok(())
     }
 
@@ -268,6 +272,36 @@ impl Game {
 
     pub fn rom_info(&self) -> &RomInfo {
         &self.info
+    }
+
+    /// Hook addresses on this ROM (`hooks.rs`).
+    pub fn hooks(&self) -> &HookMap {
+        &self.hooks
+    }
+
+    /// Address of hook `id` on this ROM. A hook that was not found gives its
+    /// PAL address; `coop::register_coop_traps` refuses such a ROM, so no
+    /// trap or isolated call ever uses it.
+    pub fn hook(&self, id: HookId) -> u32 {
+        self.hooks.get(id).unwrap_or(id.pal())
+    }
+
+    /// The ROM (title, region, version, sha256) and one line per hook:
+    /// resolved address, "as PAL" / "relocated by N" / "NOT FOUND".
+    pub fn hook_report(&self) -> Vec<String> {
+        let i = &self.info;
+        let sha: String = i.sha256[..4].iter().map(|b| format!("{b:02x}")).collect();
+        let mut v = vec![format!(
+            "ROM {} ({}, v1.{}, sha256 {sha}…): {} of {} hooks as on the PAL dump, {} not found",
+            i.title,
+            i.region_name(),
+            i.version,
+            crate::hooks::HOOKS.iter().filter(|h| self.hooks.resolution(h.id) == crate::hooks::Resolution::AsPal).count(),
+            crate::hooks::HOOKS.len(),
+            self.hooks.missing().len(),
+        )];
+        v.extend(self.hooks.report());
+        v
     }
 
     pub fn step(&mut self, pads: Pads) {
