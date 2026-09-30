@@ -44,6 +44,7 @@ impl Emu {
         let mut play = NetPlay::new(cfg, self.rom.clone(), MatchboxTransport::connect(&url, ice), room)
             .map_err(err)?;
         play.audio_rate = self.audio_rate;
+        play.record = Some(mmx_core::netlog::Recorder::new());
         self.net = Some(play);
         Ok(())
     }
@@ -97,7 +98,20 @@ impl Emu {
     }
 
     pub fn net_drop(&mut self) {
-        self.net = None;
+        if let Some(r) = self.net.take().and_then(|n| n.record) {
+            self.net_log = r.snapshot();
+        }
+    }
+
+    /// The session log (docs/netplay.md "Session logs"; every session
+    /// records) of the current session, or of the last one after
+    /// `net_drop`. Empty before a session started. Save it as a file for
+    /// `cargo xtask netreplay`.
+    pub fn net_record(&self) -> String {
+        match self.net.as_ref().and_then(|n| n.record.as_ref()) {
+            Some(r) if r.started() => r.snapshot(),
+            _ => self.net_log.clone(),
+        }
     }
 
     pub fn net_default_ice() -> String {
