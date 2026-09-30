@@ -44,10 +44,30 @@ pub const REACH_X: i16 = 7;
 pub const REACH_Y: i16 = -19;
 pub const REACH_Y_AIR: i16 = -22;
 pub const FRAMES_PER_POSE: u8 = 4;
+/// The arc pose is held longer than X3 does (4 frames, ~67 ms, half of it
+/// lost while blinking): playtesters could not see the blade at all.
+pub const ARC_FRAMES: u8 = 10;
 const GROUND: [usize; 5] = [86, 87, 88, 89, 90];
 const AIR: [usize; 4] = [95, 96, 97, 98];
 /// Pose index of the arc (88, 97).
 const ARC: usize = 2;
+
+fn pose_len(i: usize) -> u8 {
+    if i == ARC { ARC_FRAMES } else { FRAMES_PER_POSE }
+}
+
+/// Pose index for swing frame `t` (1-based), `None` past the end.
+fn pose_index(t: u8, air: bool) -> Option<usize> {
+    let mut left = u16::from(t);
+    for i in 0..poses(air).len() {
+        let n = u16::from(pose_len(i));
+        if left <= n {
+            return Some(i);
+        }
+        left -= n;
+    }
+    None
+}
 
 /// Swing state (in `CoopState`, so rollback carries it).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, bincode::Encode, bincode::Decode)]
@@ -75,7 +95,7 @@ fn poses(air: bool) -> &'static [usize] {
 pub fn frame(s: &Saber) -> Option<usize> {
     (s.t > 0).then(|| {
         let p = poses(s.air);
-        p[(usize::from(s.t - 1) / usize::from(FRAMES_PER_POSE)).min(p.len() - 1)]
+        p[pose_index(s.t, s.air).unwrap_or(p.len() - 1)]
     })
 }
 
@@ -88,7 +108,7 @@ pub fn update(s: &mut Saber, action: u8, pad: u16) -> u16 {
     let pad = pad & !BTN_X;
     if s.t > 0 {
         s.t += 1;
-        if action == 0x0E || action == 0x0C || usize::from(s.t) > poses(s.air).len() * usize::from(FRAMES_PER_POSE) {
+        if action == 0x0E || action == 0x0C || pose_index(s.t, s.air).is_none() {
             s.t = 0; // hurt / dead / done
         }
     } else if pressed {
@@ -107,7 +127,7 @@ pub fn update(s: &mut Saber, action: u8, pad: u16) -> u16 {
 
 /// The swing is on its arc pose and has not hit yet.
 fn arc(s: &Saber) -> bool {
-    s.t > 0 && !s.hit && usize::from(s.t - 1) / usize::from(FRAMES_PER_POSE) == ARC
+    s.t > 0 && !s.hit && pose_index(s.t, s.air) == Some(ARC)
 }
 
 /// The shot the arc puts into the table (`+05/+08` = the box centre). Pure.
@@ -171,8 +191,9 @@ mod tests {
             update(&mut s, 0x00, BTN_X); // held: no restart
             seen.extend(frame(&s));
         }
-        assert_eq!(seen.len(), 20);
-        assert_eq!(seen[8..12], [88; 4]);
+        // 4 + 4 + ARC_FRAMES + 4 + 4 poses
+        assert_eq!(seen.len(), 16 + usize::from(ARC_FRAMES));
+        assert_eq!(seen[8..8 + usize::from(ARC_FRAMES)], vec![88; usize::from(ARC_FRAMES)][..]);
         assert_eq!(s.t, 0);
         // Air: left/right pass.
         update(&mut s, 0x08, 0);

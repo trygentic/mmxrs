@@ -537,6 +537,8 @@ at the end of the frame), so the `zf` printed next to it is one frame ahead.
 
 ## The saber
 
+The arc pose (frames 88 / 97) is held for `ARC_FRAMES` = 10 frames instead of X3's 4: playtesters could not see the blade at 67 ms, half of it lost to the i-frame blink.
+
 Code: `crates/mmx-core/src/saber.rs`, state `CoopState::saber` (rollback
 carries it). Only with the X3 set; without it X does nothing (buster-only Zero).
 
