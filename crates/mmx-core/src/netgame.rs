@@ -1,7 +1,8 @@
 //! Netplay glue shared by `mmx-native` and `mmx-web`: [`Game`] as an
-//! [`mmx_net::RollbackGame`] and [`NetPlay`], the
-//! per-tick rollback driver both frontends call (z2rs's `RollbackLink` +
-//! `rollback_tick`, shrunk). See `docs/netplay.md` "Frontend wiring".
+//! [`mmx_net::RollbackGame`] and [`NetPlay`], the per-tick driver both
+//! frontends call, in either [`Mode`]: rollback (z2rs's `RollbackLink` +
+//! `rollback_tick`, shrunk) or input-delay lockstep (z2rs's `step_session`).
+//! See `docs/netplay.md` "Frontend wiring".
 //!
 //! Save states for rollback are [`Game::save_state`] plus the co-op state
 //! ([`coop::CoopState`], P2's shadow block), which `save_state` leaves out:
@@ -9,8 +10,9 @@
 
 use mmx_net::{
     hash_state, CloseReason, ConnectStage, Role, RollbackConfig, RollbackError, RollbackEvent,
-    RollbackGame, RollbackRequest, RollbackSession, RollbackState, StateRing, Transport,
-    COOP_TWO_PLAYERS,
+    RollbackGame, RollbackRequest, RollbackSession, RollbackState, Session, SessionConfig,
+    SessionEvent, SessionState, StateRing, Transport, COOP_TWO_PLAYERS, DEFAULT_ROLLBACK_DELAY,
+    MAX_DELAY, MAX_ROLLBACK_DELAY,
 };
 
 use crate::zero_data::ZeroSet;
@@ -98,17 +100,108 @@ pub fn stage_label(stage: ConnectStage, room: &str) -> String {
     }
 }
 
-/// A rollback session plus everything a frontend tick needs: the state ring,
-/// the ROM (to rebuild the game on `Running`), skip/interrupt bookkeeping.
+/// How a [`NetPlay`] session keeps the peers in step.
+///
+/// The mode is not negotiated: both peers must pick the same one. The two
+/// sessions announce different protocol versions in their Hello, so a
+/// rollback peer meeting a lockstep peer refuses to start with
+/// `mismatch: NetMode` (docs/netplay.md "Frontend wiring").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Mode {
+    /// [`RollbackSession`]: the local player never waits; a mispredicted
+    /// remote pad is corrected by re-simulating, so the remote player can
+    /// visibly snap. Input delay `0..=MAX_ROLLBACK_DELAY`.
+    #[default]
+    Rollback,
+    /// Input-delay lockstep ([`Session`]): a frame steps only once both pads
+    /// are known. Smooth, but the game waits when the remote pad is late.
+    /// Input delay `0..=MAX_DELAY`.
+    Lockstep,
+}
+
+impl Mode {
+    /// `"rollback"` / `"lockstep"`.
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s.trim() {
+            "rollback" => Some(Mode::Rollback),
+            "lockstep" => Some(Mode::Lockstep),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Rollback => "rollback",
+            Mode::Lockstep => "lockstep",
+        }
+    }
+
+    /// Input delay when none is given: 2 frames for rollback, 3 (50 ms) for lockstep.
+    pub fn default_delay(self) -> u8 {
+        match self {
+            Mode::Rollback => DEFAULT_ROLLBACK_DELAY,
+            Mode::Lockstep => 3,
+        }
+    }
+
+    /// Largest accepted input delay.
+    pub fn max_delay(self) -> u8 {
+        match self {
+            Mode::Rollback => MAX_ROLLBACK_DELAY,
+            Mode::Lockstep => MAX_DELAY,
+        }
+    }
+}
+
+/// Handshake config for either mode (see [`NetPlay::config`]).
+#[derive(Debug, Clone)]
+pub enum NetConfig {
+    Rollback(RollbackConfig),
+    Lockstep(SessionConfig),
+}
+
+impl NetConfig {
+    pub fn mode(&self) -> Mode {
+        match self {
+            NetConfig::Rollback(_) => Mode::Rollback,
+            NetConfig::Lockstep(_) => Mode::Lockstep,
+        }
+    }
+
+    /// Desync-check spacing in frames (rollback `check_interval`, lockstep
+    /// `hash_interval`; the host's wins).
+    pub fn set_check_interval(&mut self, frames: u16) {
+        match self {
+            NetConfig::Rollback(c) => c.check_interval = frames,
+            NetConfig::Lockstep(c) => c.hash_interval = frames,
+        }
+    }
+}
+
+// One per session, never moved around: boxing buys nothing.
+#[allow(clippy::large_enum_variant)]
+enum Engine<T: Transport> {
+    Rollback {
+        session: RollbackSession<T>,
+        ring: StateRing<Vec<u8>>,
+        skip: u32,
+        interrupted: bool,
+    },
+    Lockstep {
+        session: Session,
+        transport: T,
+    },
+}
+
+/// A session in either [`Mode`] plus everything a frontend tick needs: the
+/// ROM (to rebuild the game when the session starts), rollback's state ring
+/// and skip/interrupt bookkeeping.
 pub struct NetPlay<T: Transport> {
-    pub session: RollbackSession<T>,
-    ring: StateRing<Vec<u8>>,
+    engine: Engine<T>,
     rom: Vec<u8>,
     pub room: String,
-    /// `Running` arrived and the game was rebuilt from power-on.
+    /// The session started and the game was rebuilt from power-on.
     pub started: bool,
-    skip: u32,
-    interrupted: bool,
     /// Why the session ended (desync, peer left, ...), for the status line.
     pub last_error: Option<String>,
     /// Applied to the rebuilt game (the frontend's audio device rate).
@@ -117,138 +210,215 @@ pub struct NetPlay<T: Transport> {
 
 impl<T: Transport> NetPlay<T> {
     /// Handshake config for `rom`: ROM CRC32, trap-set id of a session game
-    /// (with the X3 Zero set when `x3`), `COOP_TWO_PLAYERS`, rollback input
-    /// delay `delay`. The session game takes the set from the frontend's game
-    /// on `Running`, so load it before connecting.
-    pub fn config(rom: &[u8], host: bool, delay: u8, x3: Option<&ZeroSet>) -> Result<RollbackConfig, String> {
+    /// (with the X3 Zero set when `x3`), `COOP_TWO_PLAYERS`, input delay
+    /// `delay` (host's wins; range per [`Mode::max_delay`]). The session game
+    /// takes the set from the frontend's game on start, so load it before
+    /// connecting.
+    pub fn config(
+        rom: &[u8],
+        host: bool,
+        mode: Mode,
+        delay: u8,
+        x3: Option<&ZeroSet>,
+    ) -> Result<NetConfig, String> {
+        if delay > mode.max_delay() {
+            return Err(format!("{} input delay must be 0-{}", mode.name(), mode.max_delay()));
+        }
         let mut g = session_game(rom, COOP_TWO_PLAYERS).map_err(|e| e.to_string())?;
         g.set_zero_set(x3.cloned());
         let (crc, traps) = (g.rom_info().crc32, trapset_id(&g));
-        let mut cfg = if host {
-            RollbackConfig::host(crc, traps, COOP_TWO_PLAYERS)
-        } else {
-            RollbackConfig::guest(crc, traps, COOP_TWO_PLAYERS)
-        };
-        cfg.input_delay = delay;
-        Ok(cfg)
+        Ok(match mode {
+            Mode::Rollback => {
+                let mut cfg = if host {
+                    RollbackConfig::host(crc, traps, COOP_TWO_PLAYERS)
+                } else {
+                    RollbackConfig::guest(crc, traps, COOP_TWO_PLAYERS)
+                };
+                cfg.input_delay = delay;
+                NetConfig::Rollback(cfg)
+            }
+            Mode::Lockstep => {
+                let mut cfg = if host {
+                    SessionConfig::host(crc, traps, COOP_TWO_PLAYERS)
+                } else {
+                    SessionConfig::guest(crc, traps, COOP_TWO_PLAYERS)
+                };
+                cfg.delay = delay;
+                NetConfig::Lockstep(cfg)
+            }
+        })
     }
 
-    pub fn new(cfg: RollbackConfig, rom: Vec<u8>, transport: T, room: &str) -> Result<Self, String> {
-        let ring = StateRing::new(usize::from(cfg.max_prediction) + 2);
-        let session = RollbackSession::new(cfg, transport).map_err(|e| e.to_string())?;
+    pub fn new(cfg: NetConfig, rom: Vec<u8>, transport: T, room: &str) -> Result<Self, String> {
+        let engine = match cfg {
+            NetConfig::Rollback(cfg) => Engine::Rollback {
+                ring: StateRing::new(usize::from(cfg.max_prediction) + 2),
+                session: RollbackSession::new(cfg, transport).map_err(|e| e.to_string())?,
+                skip: 0,
+                interrupted: false,
+            },
+            NetConfig::Lockstep(cfg) => Engine::Lockstep {
+                session: Session::new(cfg).map_err(|e| e.to_string())?,
+                transport,
+            },
+        };
         Ok(NetPlay {
-            session,
-            ring,
+            engine,
             rom,
             room: room.into(),
             started: false,
-            skip: 0,
-            interrupted: false,
             last_error: None,
             audio_rate: None,
         })
     }
 
+    pub fn mode(&self) -> Mode {
+        match self.engine {
+            Engine::Rollback { .. } => Mode::Rollback,
+            Engine::Lockstep { .. } => Mode::Lockstep,
+        }
+    }
+
+    /// The rollback session (None in lockstep).
+    pub fn rollback(&self) -> Option<&RollbackSession<T>> {
+        match &self.engine {
+            Engine::Rollback { session, .. } => Some(session),
+            Engine::Lockstep { .. } => None,
+        }
+    }
+
+    /// The lockstep session (None in rollback).
+    pub fn lockstep(&self) -> Option<&Session> {
+        match &self.engine {
+            Engine::Lockstep { session, .. } => Some(session),
+            Engine::Rollback { .. } => None,
+        }
+    }
+
+    pub fn transport(&self) -> &T {
+        match &self.engine {
+            Engine::Rollback { session, .. } => session.transport(),
+            Engine::Lockstep { transport, .. } => transport,
+        }
+    }
+
+    /// Next frame this peer will simulate for the first time.
+    pub fn frame(&self) -> u32 {
+        match &self.engine {
+            Engine::Rollback { session, .. } => session.frame(),
+            Engine::Lockstep { session, .. } => session.frame(),
+        }
+    }
+
+    /// Frames that can no longer change (rollback: final on both peers;
+    /// lockstep: every stepped frame).
+    pub fn settled_frames(&self) -> u32 {
+        match &self.engine {
+            Engine::Rollback { session, .. } => session.final_frame(),
+            Engine::Lockstep { session, .. } => session.frame(),
+        }
+    }
+
+    /// Desync checks that matched so far.
+    pub fn checks_ok(&self) -> u32 {
+        match &self.engine {
+            Engine::Rollback { session, .. } => session.stats().checksums_ok,
+            Engine::Lockstep { session, .. } => session.stats().hashes_ok,
+        }
+    }
+
+    /// The session ended (quit, peer left, mismatch, desync, ...).
+    pub fn closed(&self) -> bool {
+        match &self.engine {
+            Engine::Rollback { session, .. } => session.state() == RollbackState::Closed,
+            Engine::Lockstep { session, .. } => {
+                matches!(session.state(), SessionState::Closed | SessionState::Desynced)
+            }
+        }
+    }
+
     /// The session drives the game (started and not closed). While false the
     /// frontend plays locally; nothing played then reaches the session.
     pub fn live(&self) -> bool {
-        self.started && self.session.state() != RollbackState::Closed
+        self.started && !self.closed()
     }
 
     pub fn is_host(&self) -> bool {
-        self.session.role() == Role::Host
+        let role = match &self.engine {
+            Engine::Rollback { session, .. } => session.role(),
+            Engine::Lockstep { session, .. } => session.role(),
+        };
+        role == Role::Host
     }
 
-    /// One frontend tick: add this peer's pad, advance, run the requests on
-    /// `game` (replayed frames' audio dropped), then handle events (`Running`
-    /// replaces `*game`). Returns frames simulated, replays included; present
-    /// once afterwards when non-zero. Before the session is live it only
-    /// pumps the network.
+    /// Pump the network only (receive, timers, send), e.g. to flush a Bye.
+    pub fn pump(&mut self, now_ms: u64) {
+        match &mut self.engine {
+            Engine::Rollback { session, .. } => session.poll(now_ms),
+            Engine::Lockstep { session, transport } => session.update(transport, now_ms),
+        }
+    }
+
+    /// One frontend tick. Returns frames simulated (rollback replays
+    /// included); present once afterwards when non-zero. Before the session
+    /// is live it only pumps the network (and rebuilds `*game` when the
+    /// session starts).
+    ///
+    /// Rollback: add this peer's pad, advance, run the requests on `game`
+    /// (replayed frames' audio dropped). Lockstep: latch the pad, step the
+    /// next frame if both pads are known, else return 0 (the game waits).
     pub fn tick(&mut self, game: &mut Game, pad: u16, now_ms: u64) -> u32 {
+        match self.engine {
+            Engine::Rollback { .. } => self.tick_rollback(game, pad, now_ms),
+            Engine::Lockstep { .. } => self.tick_lockstep(game, pad, now_ms),
+        }
+    }
+
+    fn tick_rollback(&mut self, game: &mut Game, pad: u16, now_ms: u64) -> u32 {
+        let live = self.live();
+        let Engine::Rollback { session, ring, skip, .. } = &mut self.engine else {
+            unreachable!()
+        };
         let mut n = 0;
-        if self.skip > 0 && self.live() {
-            self.skip -= 1;
-            self.session.poll(now_ms);
-        } else if !self.live() {
-            self.session.poll(now_ms);
+        if !live {
+            session.poll(now_ms);
+        } else if *skip > 0 {
+            *skip -= 1;
+            session.poll(now_ms);
         } else {
-            self.session.add_local_input(pad);
-            match self.session.advance(now_ms) {
-                Ok(reqs) => {
-                    if let Err(e) = self.apply(game, &reqs, &mut n) {
-                        self.last_error = Some(e);
-                        self.session.close();
-                    }
-                }
-                Err(RollbackError::Closed(_)) => {}
-                Err(e) => {
-                    self.last_error = Some(e.to_string());
-                    self.session.close();
-                }
+            session.add_local_input(pad);
+            let err = match session.advance(now_ms) {
+                Ok(reqs) => apply_rollback(session, ring, game, &reqs, &mut n).err(),
+                Err(RollbackError::Closed(_)) => None,
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(e) = err {
+                self.last_error = Some(e);
+                session.close();
             }
         }
-        self.events(game);
+        self.rollback_events(game);
         n
     }
 
-    fn apply(&mut self, game: &mut Game, reqs: &[RollbackRequest], n: &mut u32) -> Result<(), String> {
-        for r in reqs {
-            match *r {
-                RollbackRequest::SaveState { frame } => {
-                    if self.session.needs_checksum(frame) {
-                        self.session.report_checksum(frame, net_checksum(game));
-                    }
-                    self.ring.save(frame, net_save(game));
-                }
-                RollbackRequest::LoadState { frame } => {
-                    let s = self
-                        .ring
-                        .get(frame)
-                        .ok_or_else(|| format!("rollback: no saved state for frame {frame}"))?;
-                    net_load(game, s)?;
-                }
-                RollbackRequest::Advance {
-                    pad1, pad2, replay, ..
-                } => {
-                    game.step(Pads { p1: pad1, p2: pad2 });
-                    *n += 1;
-                    if replay {
-                        // Heard once already. The new frame is always the
-                        // last request, so its samples stay for the frontend.
-                        game.take_audio();
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn events(&mut self, game: &mut Game) {
-        for ev in self.session.events() {
+    fn rollback_events(&mut self, game: &mut Game) {
+        let Engine::Rollback { session, skip, interrupted, .. } = &mut self.engine else {
+            return;
+        };
+        for ev in session.events() {
             match ev {
                 RollbackEvent::Running { coop_flags, .. } => {
-                    // No SRAM in MMX: the host sends no WRAM, power-on is shared.
-                    match session_game(&self.rom, coop_flags) {
-                        Ok(mut g) => {
-                            if let Some(hz) = self.audio_rate {
-                                g.set_audio_rate(hz);
-                            }
-                            // Static art, part of the handshake id (see `config`).
-                            g.zero_set = game.zero_set.clone();
-                            *game = g;
-                            self.started = true;
-                        }
+                    match start_game(&self.rom, coop_flags, self.audio_rate, game) {
+                        Ok(()) => self.started = true,
                         Err(e) => {
-                            self.last_error = Some(e.to_string());
-                            self.session.close();
+                            self.last_error = Some(e);
+                            session.close();
                         }
                     }
                 }
-                RollbackEvent::WaitRecommendation { skip_frames } => {
-                    self.skip = u32::from(skip_frames)
-                }
-                RollbackEvent::NetworkInterrupted { .. } => self.interrupted = true,
-                RollbackEvent::NetworkResumed => self.interrupted = false,
+                RollbackEvent::WaitRecommendation { skip_frames } => *skip = u32::from(skip_frames),
+                RollbackEvent::NetworkInterrupted { .. } => *interrupted = true,
+                RollbackEvent::NetworkResumed => *interrupted = false,
                 RollbackEvent::DesyncDetected { frame, .. } => {
                     self.last_error = Some(format!("desync at frame {frame}"))
                 }
@@ -260,42 +430,173 @@ impl<T: Transport> NetPlay<T> {
         }
     }
 
-    /// One-line status: connect stage, running stats, or why it closed.
-    pub fn status(&self) -> String {
-        let who = if self.is_host() { "host" } else { "guest" };
-        let s = &self.session;
-        let body = match s.state() {
-            RollbackState::Idle => stage_label(s.transport().stage(), &self.room),
-            RollbackState::Synchronizing => stage_label(ConnectStage::Connected, &self.room),
-            RollbackState::Running => {
-                let st = s.stats();
-                let rtt = st.rtt_ms.map_or("-".into(), |ms| format!("{ms}ms"));
-                format!(
-                    "f={} d={} rtt={rtt} rollbacks={} pred={}/{}{}",
-                    st.frame,
-                    s.input_delay(),
-                    st.rollbacks,
-                    st.prediction_depth,
-                    st.max_prediction_depth,
-                    if self.interrupted { " INTERRUPTED" } else { "" }
-                )
-            }
-            RollbackState::Closed => {
-                let why = self
-                    .last_error
-                    .clone()
-                    .or_else(|| s.close_reason().map(CloseReason::to_string))
-                    .unwrap_or_default();
-                format!("closed ({why})")
-            }
+    fn tick_lockstep(&mut self, game: &mut Game, pad: u16, now_ms: u64) -> u32 {
+        let live = self.live();
+        let Engine::Lockstep { session, transport } = &mut self.engine else {
+            unreachable!()
         };
-        format!("rollback {who}: {body}")
+        session.update(transport, now_ms);
+        let mut n = 0;
+        if live {
+            session.latch_local(pad);
+            if let Some((frame, pad1, pad2)) = session.poll() {
+                game.step(Pads { p1: pad1, p2: pad2 });
+                n = 1;
+                if session.needs_hash(frame) {
+                    session.report_hash(frame, net_checksum(game));
+                }
+            }
+            // Send the freshly latched pad now rather than next tick.
+            session.update(transport, now_ms);
+        }
+        self.lockstep_events(game);
+        n
     }
 
-    /// Announce the quit (a `Bye`); keep calling `session.poll` ~200 ms after.
-    pub fn close(&mut self) {
-        self.session.close();
+    fn lockstep_events(&mut self, game: &mut Game) {
+        let Engine::Lockstep { session, .. } = &mut self.engine else {
+            return;
+        };
+        for ev in session.take_events() {
+            match ev {
+                SessionEvent::Started { coop_flags, .. } => {
+                    match start_game(&self.rom, coop_flags, self.audio_rate, game) {
+                        Ok(()) => self.started = true,
+                        Err(e) => {
+                            self.last_error = Some(e);
+                            session.close();
+                        }
+                    }
+                }
+                SessionEvent::Desync { frame, .. } => {
+                    self.last_error = Some(format!("desync at frame {frame}"))
+                }
+                SessionEvent::Closed(reason) => {
+                    self.last_error.get_or_insert_with(|| reason.to_string());
+                }
+                SessionEvent::PeerHello { .. }
+                | SessionEvent::Stalled { .. }
+                | SessionEvent::Resumed { .. } => {}
+            }
+        }
     }
+
+    /// One-line status: mode and role, then connect stage, running stats
+    /// ("waiting for peer" while a lockstep frame is held up), or why it closed.
+    pub fn status(&self) -> String {
+        let who = if self.is_host() { "host" } else { "guest" };
+        let closed = || {
+            let reason = match &self.engine {
+                Engine::Rollback { session, .. } => session.close_reason(),
+                Engine::Lockstep { session, .. } => session.close_reason(),
+            };
+            let why = self
+                .last_error
+                .clone()
+                .or_else(|| reason.map(CloseReason::to_string))
+                .unwrap_or_default();
+            format!("closed ({why})")
+        };
+        let rtt = |ms: Option<u32>| ms.map_or("-".into(), |ms| format!("{ms}ms"));
+        let body = match &self.engine {
+            Engine::Rollback { session: s, interrupted, .. } => match s.state() {
+                RollbackState::Idle => stage_label(s.transport().stage(), &self.room),
+                RollbackState::Synchronizing => stage_label(ConnectStage::Connected, &self.room),
+                RollbackState::Running => {
+                    let st = s.stats();
+                    format!(
+                        "f={} d={} rtt={} rollbacks={} pred={}/{}{}",
+                        st.frame,
+                        s.input_delay(),
+                        rtt(st.rtt_ms),
+                        st.rollbacks,
+                        st.prediction_depth,
+                        st.max_prediction_depth,
+                        if *interrupted { " INTERRUPTED" } else { "" }
+                    )
+                }
+                RollbackState::Closed => closed(),
+            },
+            Engine::Lockstep { session: s, transport } => match s.state() {
+                SessionState::Idle => stage_label(transport.stage(), &self.room),
+                SessionState::Handshake => stage_label(ConnectStage::Connected, &self.room),
+                SessionState::Running | SessionState::Stalled => {
+                    let st = s.stats();
+                    let wait = match s.state() {
+                        SessionState::Stalled => {
+                            format!(" waiting for peer ({:.1}s)", st.stall_ms as f64 / 1000.0)
+                        }
+                        _ => String::new(),
+                    };
+                    format!("f={} d={} rtt={}{wait}", st.frame, s.delay(), rtt(st.rtt_ms))
+                }
+                SessionState::Desynced | SessionState::Closed => closed(),
+            },
+        };
+        format!("{} {who}: {body}", self.mode().name())
+    }
+
+    /// Announce the quit (a `Bye`); keep calling [`NetPlay::pump`] (or
+    /// `tick`) ~200 ms after so it leaves the machine.
+    pub fn close(&mut self) {
+        match &mut self.engine {
+            Engine::Rollback { session, .. } => session.close(),
+            Engine::Lockstep { session, .. } => session.close(),
+        }
+    }
+}
+
+/// Rebuild `*game` for a starting session: power-on with the session's co-op
+/// flags. No SRAM in MMX, so the host sends no WRAM and power-on is shared.
+fn start_game(
+    rom: &[u8],
+    coop_flags: u32,
+    audio_rate: Option<u32>,
+    game: &mut Game,
+) -> Result<(), String> {
+    let mut g = session_game(rom, coop_flags).map_err(|e| e.to_string())?;
+    if let Some(hz) = audio_rate {
+        g.set_audio_rate(hz);
+    }
+    // Static art, part of the handshake id (see `NetPlay::config`).
+    g.zero_set = game.zero_set.clone();
+    *game = g;
+    Ok(())
+}
+
+fn apply_rollback<T: Transport>(
+    session: &mut RollbackSession<T>,
+    ring: &mut StateRing<Vec<u8>>,
+    game: &mut Game,
+    reqs: &[RollbackRequest],
+    n: &mut u32,
+) -> Result<(), String> {
+    for r in reqs {
+        match *r {
+            RollbackRequest::SaveState { frame } => {
+                if session.needs_checksum(frame) {
+                    session.report_checksum(frame, net_checksum(game));
+                }
+                ring.save(frame, net_save(game));
+            }
+            RollbackRequest::LoadState { frame } => {
+                let s = ring
+                    .get(frame)
+                    .ok_or_else(|| format!("rollback: no saved state for frame {frame}"))?;
+                net_load(game, s)?;
+            }
+            RollbackRequest::Advance { pad1, pad2, replay, .. } => {
+                game.step(Pads { p1: pad1, p2: pad2 });
+                *n += 1;
+                if replay {
+                    // Heard once already. The new frame is always the last
+                    // request, so its samples stay for the frontend.
+                    game.take_audio();
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A 32 KiB LoROM with a "MEGAMAN X" header whose main loop sums pad 1
@@ -343,8 +644,8 @@ mod tests {
         let rom = synthetic_rom();
         let (link, ta, tb) = loopback_pair(LoopbackConfig::default(), 1);
         let mk = |host: bool, t| {
-            let mut cfg = NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, 0, None).unwrap();
-            cfg.input_delay = 0;
+            let cfg = NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Rollback, 0, None);
+            let Ok(NetConfig::Rollback(cfg)) = cfg else { panic!("{cfg:?}") };
             RollbackSession::new(cfg, t).unwrap()
         };
         let (mut h, mut g) = (mk(true, ta), mk(false, tb));
@@ -610,8 +911,9 @@ mod tests {
         };
         let (link, ta, tb) = loopback_pair(link_cfg, 7);
         let mk = |host: bool, t| {
-            let mut cfg = NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, 0, None).unwrap();
-            cfg.check_interval = 10;
+            let mut cfg =
+                NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Rollback, 0, None).unwrap();
+            cfg.set_check_interval(10);
             NetPlay::new(cfg, rom.clone(), t, "test").unwrap()
         };
         let mut peers = [
@@ -619,11 +921,11 @@ mod tests {
             (mk(false, tb), session_game(&rom, 0).unwrap(), 0x7777u32),
         ];
         let mut tick = 0u64;
-        while peers.iter().any(|(p, ..)| p.session.final_frame() < 300) {
+        while peers.iter().any(|(p, ..)| p.settled_frames() < 300) {
             assert!(tick < 5000, "stuck: {} / {}", peers[0].0.status(), peers[1].0.status());
             link.advance(1);
             for (net, game, seed) in peers.iter_mut() {
-                let f = net.session.frame();
+                let f = net.frame();
                 let pad = ((f / 9).wrapping_mul(2_654_435_761).wrapping_add(*seed) >> 11) as u16 & 0xFFF0;
                 net.tick(game, pad, tick * 16);
                 assert!(net.last_error.is_none(), "{}", net.status());
@@ -631,9 +933,93 @@ mod tests {
             tick += 1;
         }
         for (net, ..) in &peers {
-            let st = net.session.stats();
+            let st = net.rollback().unwrap().stats();
             assert!(st.checksums_ok >= 25, "{}: {st:?}", net.status());
             assert!(st.rollbacks > 0, "no rollback exercised: {st:?}");
         }
+    }
+
+    /// Lockstep twin of the test above: two `Game`s on the synthetic ROM
+    /// through `NetPlay` in `Mode::Lockstep` (delay 3) over the same lossy,
+    /// jittery loopback. 300 frames, hashes match, the link really dropped
+    /// packets, and both games equal a plain run fed the scripted full-width
+    /// pads shifted by the delay (so every pad arrived intact, in order).
+    #[test]
+    fn lockstep_pair_over_lossy_loopback_stays_in_sync() {
+        const FRAMES: u32 = 300;
+        const DELAY: u8 = 3;
+        let rom = synthetic_rom();
+        let link_cfg = LoopbackConfig {
+            latency_ticks: 3,
+            jitter_ticks: 2,
+            loss_per_mille: 150,
+            connect_after_ticks: 2,
+        };
+        let (link, ta, tb) = loopback_pair(link_cfg, 7);
+        let mk = |host: bool, t| {
+            let mut cfg =
+                NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Lockstep, DELAY, None).unwrap();
+            cfg.set_check_interval(10);
+            NetPlay::new(cfg, rom.clone(), t, "test").unwrap()
+        };
+        // The pad latched while frame `f` is next belongs to frame `f + DELAY`.
+        let script = |seed: u32, f: u32| ((f / 9).wrapping_mul(2_654_435_761).wrapping_add(seed) >> 11) as u16 & 0xFFF0;
+        let mut peers = [
+            (mk(true, ta), session_game(&rom, 0).unwrap(), 0x1111u32),
+            (mk(false, tb), session_game(&rom, 0).unwrap(), 0x7777u32),
+        ];
+        let mut tick = 0u64;
+        let mut waited = 0u32;
+        while peers.iter().any(|(p, ..)| p.frame() < FRAMES) {
+            assert!(tick < 5000, "stuck: {} / {}", peers[0].0.status(), peers[1].0.status());
+            link.advance(1);
+            for (net, game, seed) in peers.iter_mut() {
+                if net.frame() >= FRAMES {
+                    net.pump(tick * 16); // done: keep acking / resending for the peer
+                    continue;
+                }
+                let live = net.live();
+                let n = net.tick(game, script(*seed, net.frame()), tick * 16);
+                assert!(n <= 1);
+                waited += u32::from(live && n == 0);
+                assert!(net.last_error.is_none(), "{}", net.status());
+            }
+            tick += 1;
+        }
+        assert!(link.dropped() > 0, "the link dropped nothing");
+        let mut want = session_game(&rom, COOP_TWO_PLAYERS).unwrap();
+        for f in 0..FRAMES {
+            let pad = |seed| if f < u32::from(DELAY) { 0 } else { script(seed, f - u32::from(DELAY)) };
+            want.step(Pads { p1: pad(0x1111), p2: pad(0x7777) });
+        }
+        for (net, game, _) in &peers {
+            assert_eq!(net.frame(), FRAMES);
+            assert!(net.checks_ok() >= 25, "{}", net.status());
+            assert_eq!(net.lockstep().unwrap().delay(), DELAY);
+            assert_eq!(net_checksum(game), net_checksum(&want), "{}", net.status());
+            assert_eq!(game.wram()[0x300..0x304], want.wram()[0x300..0x304]);
+        }
+        eprintln!("lockstep: {tick} ticks, {waited} ticks waiting, {} packets dropped", link.dropped());
+    }
+
+    /// A rollback host and a lockstep guest refuse each other (their Hellos
+    /// carry different protocol versions): both close, neither starts.
+    #[test]
+    fn mode_mismatch_refuses_to_start() {
+        let rom = synthetic_rom();
+        let (link, ta, tb) = loopback_pair(LoopbackConfig::default(), 3);
+        let cfg = |host, mode| NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, mode, 2, None).unwrap();
+        let mut h = NetPlay::new(cfg(true, Mode::Rollback), rom.clone(), ta, "t").unwrap();
+        let mut g = NetPlay::new(cfg(false, Mode::Lockstep), rom.clone(), tb, "t").unwrap();
+        let (mut gh, mut gg) = (session_game(&rom, 0).unwrap(), session_game(&rom, 0).unwrap());
+        for tick in 0..200u64 {
+            link.advance(1);
+            h.tick(&mut gh, 0, tick * 16);
+            g.tick(&mut gg, 0, tick * 16);
+        }
+        assert!(h.closed() && g.closed(), "{} / {}", h.status(), g.status());
+        assert!(!h.started && !g.started);
+        let both = format!("{} / {}", h.status(), g.status());
+        assert!(both.contains("NetMode"), "{both}");
     }
 }

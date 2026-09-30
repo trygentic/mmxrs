@@ -24,7 +24,7 @@ impl Emu {
         ice: &str,
     ) -> Result<(), JsValue> {
         let err = |e: String| JsValue::from_str(&e);
-        let cfg = NetPlay::<MatchboxTransport>::config(&self.rom, host, delay, self.game.zero_set()).map_err(err)?;
+        let cfg = NetPlay::<MatchboxTransport>::config(&self.rom, host, mmx_core::netgame::Mode::Rollback, delay, self.game.zero_set()).map_err(err)?;
         let url = mmx_net::room_url(signal, room).map_err(|e| err(e.to_string()))?;
         let ice = match ice.trim() {
             "" => None,

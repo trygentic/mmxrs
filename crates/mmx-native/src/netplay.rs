@@ -34,7 +34,7 @@ pub fn connect(
     delay: u8,
     x3: Option<&mmx_core::zero_data::ZeroSet>,
 ) -> Result<Net, String> {
-    let cfg = NetPlay::<NetTransport>::config(rom, host, delay, x3)?;
+    let cfg = NetPlay::<NetTransport>::config(rom, host, mmx_core::netgame::Mode::Rollback, delay, x3)?;
     let url = mmx_net::room_url(signal, room).map_err(|e| e.to_string())?;
     let ice = ice
         .map(mmx_net::IceConfig::parse)
@@ -68,7 +68,7 @@ impl Net {
     /// One tick; returns frames simulated. Logs each connect stage once.
     pub fn tick(&mut self, game: &mut Game, pad: u16) -> u32 {
         let n = self.play.tick(game, pad, self.now_ms());
-        let stage = mmx_net::Transport::stage(self.play.session.transport());
+        let stage = mmx_net::Transport::stage(self.play.transport());
         if self.reported != Some(stage) {
             self.reported = Some(stage);
             if stage != ConnectStage::Ended {
@@ -79,7 +79,7 @@ impl Net {
             self.said_running = true;
             eprintln!("netplay: session running, restarted from power-on");
         }
-        if !self.reported_end && self.play.session.state() == mmx_net::RollbackState::Closed {
+        if !self.reported_end && self.play.closed() {
             self.reported_end = true;
             eprintln!("netplay: {}", self.play.status());
         }
@@ -96,7 +96,8 @@ impl Net {
         self.play.close();
         let until = self.now_ms() + GOODBYE_FLUSH_MS;
         while self.now_ms() < until {
-            self.play.session.poll(self.now_ms());
+            let now = self.now_ms();
+            self.play.pump(now);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
@@ -140,7 +141,7 @@ mod tests {
         ];
         let clock = Instant::now();
         let mut next = Duration::ZERO;
-        while peers.iter().any(|(n, ..)| n.play.session.final_frame() < frames) {
+        while peers.iter().any(|(n, ..)| n.play.settled_frames() < frames) {
             assert!(
                 clock.elapsed() < Duration::from_secs(120),
                 "timeout: {} / {}",
@@ -153,20 +154,19 @@ mod tests {
             }
             next += Duration::from_millis(16);
             for (net, game, seed) in peers.iter_mut() {
-                let f = net.play.session.frame();
+                let f = net.play.frame();
                 let pad = ((f / 12).wrapping_mul(2_654_435_761).wrapping_add(*seed) >> 13) as u16 & 0xFFF0;
                 net.tick(game, pad);
                 assert!(net.play.last_error.is_none(), "{}", net.play.status());
             }
         }
         for (net, ..) in &peers {
-            let st = net.play.session.stats();
-            eprintln!("{}: {st:?}", net.play.status());
-            assert!(st.checksums_ok >= frames / 60 - 1, "{}", net.play.status());
+            eprintln!("{}: {} checks ok", net.play.status(), net.play.checks_ok());
+            assert!(net.play.checks_ok() >= frames / 60 - 1, "{}", net.play.status());
         }
         peers[0].0.close_and_flush();
         let quit_by = Instant::now();
-        while peers[1].0.play.session.is_running() {
+        while peers[1].0.play.live() {
             assert!(quit_by.elapsed() < Duration::from_secs(20), "guest never saw the quit");
             let (net, game, _) = &mut peers[1];
             net.tick(game, 0);
