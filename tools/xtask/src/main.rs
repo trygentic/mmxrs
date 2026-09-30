@@ -11,6 +11,7 @@ const USAGE: &str = "usage: cargo xtask <command>
   verify [--movie F.bk2|F.lsmv] [--frames N] [--no-frame] [--coop-off] [--tap F,..] [--hold HEX] [--p2-hold HEX]
   trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..]   bank histogram of frame N's opcode fetches
   dump --frames N --out DIR [--at F,F,...] [--movie F] [--tap F,F,...] [--hold HEX] [--p2-hold HEX] [--coop]
+       [--load STATE] [--save F=PATH,..]  start from / write a save state (P2 re-anchors after a load)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
   ledger
   rominfo
@@ -53,6 +54,30 @@ fn rom() -> Vec<u8> {
              e.g. MMX_ROM=~/roms/mmx.sfc cargo xtask verify --frames 600")
     };
     std::fs::read(&path).unwrap_or_else(|e| die(&format!("MMX_ROM {}: {e}", path.to_string_lossy())))
+}
+
+/// `--load PATH`: start from a save state (frame numbering restarts at 1).
+fn game_scripted(args: &[String]) -> Game {
+    let mut g = game(rom());
+    if let Some(p) = flag(args, "--load") {
+        let s = std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+        g.load_state(&s).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+    }
+    g
+}
+
+/// `--save F=PATH,...`: write a save state after frame F.
+fn saves(args: &[String]) -> Vec<(usize, String)> {
+    flag(args, "--save")
+        .map(|s| {
+            s.split(',')
+                .map(|t| {
+                    let (f, p) = t.split_once('=').unwrap_or_else(|| die("--save: want FRAME=PATH"));
+                    (f.trim().parse().unwrap_or_else(|_| die("--save")), p.trim().to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn game(rom: Vec<u8>) -> Game {
@@ -157,7 +182,8 @@ fn dump(args: &[String]) -> i32 {
     };
     let inputs = movie(args);
     let script = scripted(args);
-    let mut g = game(rom());
+    let saves = saves(args);
+    let mut g = game_scripted(args);
     if args.iter().any(|a| a == "--coop") {
         g.coop.enabled = true;
         mmx_core::coop::register_coop_traps(&mut g);
@@ -165,6 +191,10 @@ fn dump(args: &[String]) -> i32 {
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("{}: {e}", out.display())));
     for f in 1..=frames {
         g.step(script(f, inputs.get(f - 1).copied().unwrap_or_default()));
+        for (_, p) in saves.iter().filter(|(sf, _)| *sf == f) {
+            std::fs::write(p, g.save_state()).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+            println!("saved state after frame {f}: {p}");
+        }
         if at.contains(&f) {
             let path = out.join(format!("frame_{f:06}.png"));
             let (px, w, h) = g.frame();
@@ -197,10 +227,10 @@ fn dump(args: &[String]) -> i32 {
 fn trace(args: &[String]) -> i32 {
     let frames = num(args, "--frames").unwrap_or_else(|| die("trace needs --frames N"));
     let script = scripted(args);
+    let mut g = game_scripted(args);
     let find: Vec<u32> = flag(args, "--find")
         .map(|s| s.split(',').map(|f| u32::from_str_radix(f.trim().trim_start_matches("0x"), 16).unwrap_or_else(|_| die("--find"))).collect())
         .unwrap_or_default();
-    let mut g = game(rom());
     for f in 1..frames {
         g.step(script(f, Pads::default()));
     }
@@ -242,7 +272,7 @@ fn trace(args: &[String]) -> i32 {
 fn cooptrace(args: &[String]) -> i32 {
     let frame = num(args, "--frame").unwrap_or_else(|| die("cooptrace needs --frame F"));
     let script = scripted(args);
-    let mut g = game(rom());
+    let mut g = game_scripted(args);
     g.coop.enabled = true;
     mmx_core::coop::register_coop_traps(&mut g);
     for f in 1..frame {
