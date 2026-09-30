@@ -1,6 +1,6 @@
 # mmx-native (binary `mmxrs`)
 
-Run: `cargo run -p mmx-native --release -- --rom mmx.sfc [--x3-rom mmx3.sfc [--zero]] [--scale 1-8] [--fullscreen] [--coop-local]`
+Run: `cargo run -p mmx-native --release -- --rom mmx.sfc [--x3-rom mmx3.sfc [--zero]] [--scale 1-8] [--fullscreen] [--coop-local] [--pads]`
 (`--rom` falls back to `$MMX_ROM`, `--x3-rom` to `$MMX_X3_ROM`; default scale 3).
 `--x3-rom` takes your Mega Man X3 (USA) image: P2 is drawn as X3 Zero and P2's
 X swings the saber (docs/zero.md "Playing as Zero"); online, both peers need it.
@@ -47,8 +47,63 @@ F7 load state, 1-9 pick slot, F11 fullscreen, P or F6 pause, `.` single-step
 while paused, Esc quit. States live in `$HOME/.mmxrs/slotN.state`.
 Title bar: fps, `[coop]` or `[NET ...]`, `[SLOT n]`, `[PAUSED]`, `[FF]`.
 
-Gamepads (gilrs, standard mapping): the pad that last pressed a button is P1;
-with `--coop-local` a different pad that presses becomes P2.
+## Gamepads
+
+The pad that last pressed a button is P1; with `--coop-local` a different pad
+that presses becomes P2. Each connect/disconnect is logged to stderr with the
+pad's name and source.
+
+Two sources:
+
+- **gilrs** (all desktops), standard mapping.
+- **Apple GameController** (macOS only, `src/gc_pad.rs`, ported from z2rs).
+  gilrs's IOKit backend misses some pads (a Switch Pro Controller over
+  Bluetooth) or lists them but reads no input (Apple-driven Xbox pads);
+  GameController sees Switch Pro, DualShock 4, DualSense, Xbox and MFi pads.
+  Controllers are polled every frame (the extended-gamepad profile: face
+  buttons, shoulders, triggers, menu/options, d-pad, left stick with a 0.5
+  dead zone). Dedupe rule: while GameController lists at least one pad, gilrs
+  input is ignored (it would be the same pads, often seen twice); gilrs only
+  drives pads when GameController has none.
+
+The layout is positional, the same on every pad: bottom face button = SNES B
+(jump), left = Y (buster), right = A (dash), top = X. GameController's
+`buttonA` is the bottom button on every pad, so Nintendo's printed labels come
+out swapped against Xbox's (Switch B is jump, Switch A is dash), which is what
+a SNES player expects since the Switch layout is the SNES one.
+
+| SNES | Xbox | PlayStation | Switch Pro | gilrs | GameController |
+|---|---|---|---|---|---|
+| B (jump) | A | Cross | B | South | buttonA |
+| Y (buster) | X | Square | Y | West | buttonX |
+| A (dash) | B | Circle | A | East | buttonB |
+| X | Y | Triangle | X | North | buttonY |
+| L | LB / LT | L1 / L2 | L / ZL | LeftTrigger / LeftTrigger2 | leftShoulder / leftTrigger |
+| R | RB / RT | R1 / R2 | R / ZR | RightTrigger / RightTrigger2 | rightShoulder / rightTrigger |
+| Start | Menu | Options | + | Start | buttonMenu |
+| Select | View | Create / Share | - | Select | buttonOptions |
+| d-pad | d-pad / left stick | same | same | DPad* / LeftStick | dpad / leftThumbstick |
+
+Pairing on macOS: System Settings > Bluetooth, put the pad in pairing mode
+(Switch Pro: hold the sync button on top; DualShock/DualSense: Share/Create +
+PS; Xbox: the pair button) and click Connect. If macOS's System Settings >
+Game Controllers lets you remap a pad's buttons, that remap applies to
+GameController pads here too.
+
+Diagnostic: `--pads` (or `MMX_PAD_DEBUG=1`) prints connected pads and one line
+per pad whenever its SNES bits change, e.g.
+
+```
+gamepad connected (gilrs): Nintendo Switch Pro Controller
+gamepad connected (GameController): Pro Controller (Switch Pro Controller)
+pad P1 Pro Controller (Switch Pro Controller) [GC]: 0x8000 B
+```
+
+(`[gilrs, ignored: GC active]` marks a gilrs pad under the dedupe rule.) With
+`--pads` GameController also delivers input while another app, such as the
+terminal, is frontmost.
+
+## Headless
 
 Headless (no window, no audio device):
 
