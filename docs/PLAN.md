@@ -73,6 +73,9 @@ impl Game {
     pub fn oam(&self) -> [u8; 544]; pub fn cgram(&self) -> [u16; 256];
     pub fn regs(&self) -> Registers; pub fn set_regs(&mut self, r: Registers);
     pub fn frame_count(&self) -> u64;
+    pub fn call_isolated(&mut self, addr: u32);                                  // JSL/RTL routine, zero emulated cycles, traps fire inside
+    pub fn call_isolated_ret(&mut self, addr: u32, ret: TrapReturn);            // Rts form for JSR routines
+    pub fn rom_read(&self, addr: u32) -> u8;                                    // LoROM 24-bit address
     pub fn save_state(&self) -> Vec<u8>; pub fn load_state(&mut self, s: &[u8]) -> Result<(), String>;
     pub traps: TrapTable; pub traplog: TrapLog; pub coop: CoopState;
 }
@@ -83,7 +86,10 @@ pub mod ram;   // v1.0 addresses as `pub const X_HP: u32 = 0x7E0BCF;` etc.
 ```
 
 `Game::step` never touches the filesystem, never sleeps, never uses the wall
-clock. `mmx-core` must build for `wasm32-unknown-unknown`.
+clock. It returns at an instruction boundary just after the PPU finished a
+frame, so `set_regs`, `call_isolated*` and save states are safe between steps.
+A trap fires only when the next CPU tick really fetches an opcode (a cloned-CPU
+probe), so an NMI landing on a trapped entry does not double-fire it. `mmx-core` must build for `wasm32-unknown-unknown`.
 
 ## RAM map (v1.0, bank $7E; from the disassembly analysis, confidence high unless marked)
 

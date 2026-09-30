@@ -30,6 +30,9 @@ fn main() {
         std::process::exit(1);
     });
     game.coop.enabled = args.coop_local;
+    if args.coop_local {
+        mmx_core::coop::register_coop_traps(&mut game);
+    }
 
     if args.headless {
         match headless::run(&mut game, &args) {

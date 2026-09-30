@@ -118,6 +118,9 @@ impl Emu {
 
     pub fn set_coop(&mut self, on: bool) {
         self.game.coop.enabled = on;
+        if on && !self.game.traps.is_trapped(mmx_core::coop::PLAYER_OAM) {
+            mmx_core::coop::register_coop_traps(&mut self.game);
+        }
     }
     pub fn frame_count(&self) -> u64 {
         self.game.frame_count()

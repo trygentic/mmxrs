@@ -278,8 +278,8 @@ fn p2_display(game: &mut Game) {
     let pal = game.coop.zero_palette;
     let mut p2 = game.coop.p2;
     swap_block(game.wram_mut(), &mut p2);
-    // unverified: call_isolated must support JSR/RTS routines (see report).
-    game.call_isolated(PLAYER_OAM);
+    // `$80:D6B2` is entered by JSR and ends in RTS.
+    game.call_isolated_ret(PLAYER_OAM, crate::TrapReturn::Rts);
     let w = game.wram_mut();
     swap_block(w, &mut p2);
     let last = w[OAM_CURSOR] & 0x7F;
