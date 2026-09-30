@@ -142,8 +142,8 @@ Code: `crates/mmx-core/src/p2tiles.rs`, PPU patch in
 - **Three pages.** `page` holds three 768-word pages back to back; a slot
   also set in `page1: u128` reads the second, one set in `page2` the third
   (`Game::add_p2_tile_slots(mask, page)`, which never sets both). Page 0 is
-  P2's, page 1 a Zero P1's ("Playing as Zero"), page 2 the saber waves (P2's
-  in columns 0-7, P1's in 8-15; "The saber"). Netplay rollback states wrap
+  P2's, page 1 a Zero P1's ("Playing as Zero"), page 2 the saber slash arcs
+  (P2's in columns 0-7, P1's in 8-15; "The saber"). Netplay rollback states wrap
   `Game::save_state`, so they carry the pages.
 - **Filling the page.** P2 keeps X's `+$18` (anchor copies X's block and only
   sets `+$17 |= $80` to force a reload), so the emitter writes X's tile numbers
@@ -481,9 +481,10 @@ object), and Y again swings the saber (act `$4C` 86-90 on the ground, `$50`
 blue-white arc). The green wave is a separate object, but it comes with the
 *release* (act `$4A`/`$4E`, on the blade flourish 84/93), not with the `$4C`
 swing (which fires a blue buster ball, set `$4E`, on frame 89). Extracted as
-`ZeroSet.wave`, see "The saber" below. `$8F:DBA5` (the Zero Project's
-"Z-Saber projectile") is set `$4F` frame 12, not Zero's green wave (the old
-guess: X's beam-saber wave); not extracted.
+`ZeroSet.wave`, see "The green wave" below (no longer used). `$8F:DBA5` (the
+Zero Project's "Z-Saber projectile") is set `$4F` frame 12: X's flying saber
+wave. Set `$4F` frames 0-11 are the green slash arc the port draws on
+Zero's swing (`ZeroSet.slash`, "The saber" below).
 
 **X1 -> X3 mapping.** X1's set 0 uses the same frame numbers as Zero's set
 `$4A` (measured on X1 from `hw-c` with jumps and shots, and the beam-in from
@@ -545,73 +546,146 @@ at the end of the frame), so the `zf` printed next to it is one frame ahead.
 
 ## The saber
 
-The arc pose (frames 88 / 97) is held for `ARC_FRAMES` = 10 frames instead of X3's 4: playtesters could not see the blade at 67 ms, half of it lost to the i-frame blink.
-
 Code: `crates/mmx-core/src/saber.rs`, state `CoopState::saber` (rollback
 carries it). Only with the X3 set; without it X does nothing (buster-only Zero).
 
 - **Swing.** Pad 2's X (`$0040`, unused by X1's default button config) starts
   a swing when P2 stands, walks, lands or dashes (actions `00 02 04 0A 14`:
-  X3 frames 86-90) or jumps/falls (`06 08`: 95-98), 4 frames per pose (20 /
-  16 frames). No swing on walls or while hurt; hurt or death cancels it.
+  X3 frames 86-90) or jumps/falls (`06 08`: 95-98), 4 frames per pose, the
+  arc pose (88 / 97) `ARC_FRAMES` = 10 (X3 holds it 5; playtesters could not
+  see the blade at 67 ms, half of it lost to the i-frame blink). X3's own
+  `$4C`: 86 1 frame, 87 2, 88 5, 89 1, 90 17; `$50`: 95 2, 96 5, 97 1, 98 13.
+  No swing on walls or while hurt; hurt or death cancels it.
 - **Mechanism: P2's own update keeps running with a masked pad.** On the
   ground the ROM gets no buttons, so X's code stops Zero (stand); in the air
   only left/right pass, so the jump arc and air control are the ROM's. The
   display shows the saber pose instead of the ROM frame. No X1 action was
   borrowed: `$0A` (land) and hurt without knockback both change physics or
   i-frames, the mask doesn't. Y (buster) works outside swings.
-- **Damage: a shot that only the enemy loop sees.** On the arc pose (88/97),
-  after the shot loop (`$80:D1FF`, the instruction after `JSR $80:D3B2`;
-  new trap `coop_saber_shot`) a shot is written into a free `$1228` slot:
-  `+00 = 1`, id `+0A = 2`, position `+05/+08` = P2 + (7 toward Zero's
-  facing, -19; air -22), `+11` = P2's, box `+20 = $BFC4` (bank `$86`, `x y
-  half-w half-h` = `00 01 13 0A`, 38 x 20 px), `+30 = 0`. That box is the
-  blade as drawn: on screen (hw-spiky, frame 88 facing right) the arc runs
-  from 13 px behind to 26 px in front of `+05`, 29 to 8 px above `+08`;
-  frame 97's 3 px higher (the blue/white crescent; the layouts have no
-  palette bits, the blade uses Zero's palette like the body). The
-  first version (16 in front, `$BF56` = 40 x 40) reached 10 px past the tip
-  and 12 px below it. Enemies test it in their AI with the ROM's enemy-vs-shot
-  routine `$84:9B43` (shot active, `+30 = 0`, box test `$84:9C0E`), and
-  `$84:9E15` applies the damage: the enemy's row `$86:EEDB[+28]` at the shot
-  id. Id 2 is X's full charge (Highway row 3: lemon 1, half charge 2, full
-  charge 4); the task's "damage `+26`" is not what X1 reads. The physics hook
-  takes the slot out again (zeroed), after the enemy loop. The shot's update
-  (`$80:F666[+0A]`) never runs, it is never drawn and never counted, so the
-  `$0BDD` bookkeeping (docs/coop.md "Shots (B3)") never sees it. The damage
-  routine does `INC +30` on the shot, or the enemy sets `+01 = 6`: either
-  ends the swing's damage (one hit per swing).
-- **Checked.** `hw-spiky`, P2 walks right 20 frames, X at 22: the arc (frame
-  31) hits the Spiky with the tip, 2 HP -> 1 (test `saber_hits_spiky`, P1's
-  `$0BDD` stays 0; id 2 does 1 to it, `$86:F049`). The old reach hit it on
-  two frames in a row: that hit left the shot at `+01 = 6`, `+30 = 0`, so
-  `hit` stayed false; `take_back` now counts `+01 != 0` too.
-  `hw-bee2`, P2 jumps every 40 frames and taps X 8 frames into the jump:
-  Bee Blader (`$0E68+$27`) 29 -> 25 -> 21 -> 17 -> 13 -> 9, 4 per connecting
-  swing, until it drifts out of reach (blade only; with the wave it dies,
-  below).
-- **The blade on screen.** A playtest said the saber was invisible. Not
-  reproduced: frames 86-90 / 95-98 are selected (`zf`), all 48 page tiles
-  are filled and every P2 slot is masked, the layouts have no palette bits,
-  and the blade shows in 88/97 as on the X3 sheet and as in X3 itself
-  (`xtask dump --rom-any X3 --load states/x3-zero-saber.state`: the same
-  small crescent, 4 frames). A 2-frame rollback every frame draws the same
-  pictures (test `saber_frames_survive_rollback`). It is small and brief:
-  one pose of five, and during i-frames P2 blinks every other frame.
-  Strip: `target/z/saber_strip_4x.png` (ground 86-90, air 95-98).
+
+### The green slash arc
+
+The user: "the green slashing arc when Zero slashes enemies with his
+saber" (the fan sheet's large green crescent along the blade, about 40 x 40,
+hugging Zero's front from head height down).
+
+**X3 draws no green arc on Zero's swing.** From `x3-zero-stand` (hold Y
+150 frames, release, Y again at 185; `dump --rom-any X3 ... --at 150-230/1
+--wram --vram --p1tap 4000@10:150,4000@185:2`), per frame the shot table
+`$10D8` and OAM palettes: the swing (`$4C` 86-90) adds sprites only in
+Zero's own palette 1 (7 -> 9 -> 12 -> 14 sprites: the blue-white blade in
+the body layouts), and the only object it spawns is set `$4E` (id 3, the
+blue/yellow buster ball, OAM palette 3) on frame 89, 34 px in front, flying
+at 8 px a frame. A single Y tap or a double tap is the plain buster (id 0,
+set `$08`). Strips: `target/z/slash_x3_own_swing_4x.png`,
+`slash_x3_own_air_4x.png`.
+
+**The arc is set `$4F`** (X's beam-saber slash, the neighbour of Zero's
+sets): table `$0D:9BB4`, layouts `$0F:DA99..`, lists `+31 = $85:E5EE`
+(written by the shot init at `$81:8E6x`, which spawns frame 14, X's flying
+wave, with box `$86:B85F`), tiles raw 4bpp from `$BA:E000` (`$3AE000`),
+streamed to VRAM `$6300-$66xx` (tiles `$30-$6F`: up to four rows). Frames:
+
+| # | what | drawn box (unflipped = facing left, from the origin) |
+|---|---|---|
+| 0-1 | blade start | x 2..23, y -22..-1 |
+| 2 | rising arc (over the head) | x -19..22, y -39..-11 |
+| 3 | full crescent, in front, head to waist | x -48..2, y -37..3 |
+| 4-5 | tail near the feet | x -32..-16, y -3..9 |
+| 6-11 | the same, 5 px further forward, 2 up (used for the air swing) | |
+| 12-15 | X's flying wave | |
+| 16-19 | sparks | |
+
+Drawn at the wearer's origin, frame 3 lies on Zero's blade in pose 88 and
+frame 9 in 97 (no offset needed). Checked in the engine: poking Zero's
+block to set `$4F` (`--poke
+7E09EE=4F@5,7E0A09=EE@5,7E0A0A=E5@5,7E09EF=83@5`, saved after frame 8 as
+`states/x3-zero-slash.state`) streams frame 3 into `$6300-$6662` and draws
+it at Zero's place; test `zero_data_extract_x3_slash` compares the
+extraction with that VRAM. `extract_x3_slash` repacks each frame into 8
+columns x 3 rows (16x16 sprites in rows 0-1, 8x8 in the rest; frame 3 needs
+22 tiles) so it fits half of shadow page 2. Sheet: `xtask zerosheet --x3
+PATH --slash --out DIR`.
+
+**Palette** `$8C:A460` (`2184 73BC 5394 3B8E 2308 1284 731C 5A3A 728A 3098
+7394 730F 4559 7205 7180 18C6`): the arc draws with 1-5 (white, four greens)
+and 15. It is the only `$8C` palette with greens in 1-5, and it is X3's
+sprite palette 3 while X plays (`x3-intro-play` CGRAM), the effects
+palette. X's saber itself was not reached in our states (it needs Zero's
+saber handed over), so the pairing is inferred; in Zero's own palette the
+arc comes out blue and white. **Remapped onto Zero's palette**, as the wave
+was (no sprite palette is free with co-op on: 0 flashes, 1 X or a Zero P1,
+2 HUD, 3 P2's Zero, 4-7 enemies): `zero::SLASH_ON_ZERO` 1 -> 4 (`639C`
+white), 2-4 -> 12 (`2388` green), 5 -> 1 (`1284`, the same dark green),
+15 -> 15. It reads as a green crescent with white bands. No CGRAM writes.
+
+**Timing** (ours; X3 has none for Zero): the arc pose shows frame 2 for 2
+frames, then 3 for 8; the pose after it (89 / 98) the tail 4, 5 for 2
+frames each; air + 6 (`saber::slash_frame`).
+
+**Drawing.** `zero::slash_entries`: at the wearer's drawn origin (the
+body's, `X3_Y_OFFSET` included), mirrored by his facing, on top of the body
+(P2: in its slots before the body; P1: at the build cursor before the
+body), blinking with the body. Tiles in shadow page 2 (P2 columns 0-7, P1
+8-15; `CoopState::wave_frames` tracks the loaded frame, the name is
+historical).
+
+### Damage
+
+A shot that only the enemy loop sees. On the arc pose (88/97), after the
+shot loop (`$80:D1FF`, the instruction after `JSR $80:D3B2`; trap
+`coop_saber_shot`) a shot is written into a free `$1228` slot: `+00 = 1`,
+id `+0A = 2`, position `+05/+08` = the crescent's centre (23 px toward the
+facing; `+08 + (i8)+19 - 8 - 17`; air 28 and `- 19`), `+11` = the
+player's, box `+20 = $86:BB34` (`00 00 18 17`, 48 x 46 px against the
+drawn 50 x 40; X1's bank has no closer box), `+30 = 0`. Enemies test it in
+their AI with the ROM's enemy-vs-shot routine `$84:9B43` (shot active,
+`+30 = 0`, box test `$84:9C0E`), and `$84:9E15` applies the damage: the
+enemy's row `$86:EEDB[+28]` at the shot id. Id 2 is X's full charge
+(Highway row 3: lemon 1, half charge 2, full charge 4). The physics hook
+takes the slot out again (zeroed), after the enemy loop. The shot's update
+(`$80:F666[+0A]`) never runs, it is never drawn and never counted, so the
+`$0BDD` bookkeeping (docs/coop.md "Shots (B3)") never sees it. One hit per
+swing: the damage routine does `INC +30` on the shot, or the enemy sets
+`+01 = 6`; `take_back` counts either.
+
+Checked:
+
+- `hw-spiky`, P2 walks right 20 frames, X at 22: the arc's first frame hits
+  the Spiky with its centre 55 px in front of Zero (the tip reaches 48),
+  2 -> 1, once (test `saber_hits_spiky`; P1's `$0BDD` stays 0).
+- `hw-spiky`, P2 swings where it stands, the Spiky 88 px away on the arc's
+  first frame: no hit (test `saber_misses_spiky_from_afar`; the old wave
+  took it from there).
+- `hw-bee2`, P2 jumps every 40 frames and taps X 8 frames into the jump:
+  Bee Blader (`$0E68+$27`) 29 -> 25 -> 21 -> 17 -> 13 -> 9 -> 5 -> 1, 4 per
+  swing, while it drifts from x 3435 to 3363 (P2 at 3452; its box is large).
+- P1 as Zero: test `saber_p1_hits_spiky`; rollback:
+  `saber_frames_survive_rollback`.
+
+Strips (4x, `target/z/`): `slash_p1_ground_4x.png`, `slash_p1_air_4x.png`
+(`--zero`), `slash_p2_ground_4x.png`, `slash_p2_air_4x.png` (`--coop`, P2
+next to X), `slash_x3_own_swing_4x.png`, `slash_x3_own_air_4x.png` (X3's).
+`x` = `xtask dump --x3 PATH`:
 
 ```
-xtask dump --load states/hw-spiky.state --frames 40 --out target/z/saber --at 27,32 --p2tap 0100@1:20,0040@22:2 --coop --wram
+x --load states/highway-start.state --frames 44 --out DIR --at 10-44/1 --p1tap 0040@10:2 --zero
+x --load states/highway-start.state --frames 50 --out DIR --at 10-50/1 --p1tap 8000@10:20,0040@16:2 --zero
+x --load states/highway-start.state --frames 44 --out DIR --at 10-44/1 --p2tap 0100@1:12,0040@16:2 --coop
+x --load states/highway-start.state --frames 50 --out DIR --at 10-50/1 --p2tap 0100@1:12,8000@14:20,0040@20:2 --coop
 T=$(seq 10 40 1190 | awk '{printf "8000@%d:20,0040@%d:2,", $1, $1+8}' | sed 's/,$//')
-xtask dump --load states/hw-bee2.state --frames 1200 --out target/z/bee --at 50-1200/50 --refill --coop --p2tap "$T" --wram
+x --load states/hw-bee2.state --frames 1200 --out target/z/bee --at 50-1200/50 --refill --coop --p2tap "$T" --wram
 ```
 
-### The green wave
+### The green wave (not used by the swing)
 
-A playtest: "some blue on Zero's saber, but I thought the sprite had green
-and a longer arc / range". The blue-white crescent is the blade in the body
-frame; the green is X3's wave object, which the port now draws and hits
-with on every swing's arc.
+**Not drawn and not thrown any more**: the user meant the slash arc above,
+not a projectile. The extraction (`ZeroSet.wave`, `x3_wave_step`) and its
+test stay. ponytail: the wave exists in the ROM (set `$4D`, below) and
+could become a charged-saber move later (X3 throws it on the charge
+release, act `$4A`/`$4E`).
+
+What follows is the earlier port, kept for the measurements.
 
 **In X3** (`states/x3-zero-stand.state`, hold Y 150 frames, release; states
 `x3-zero-wave` = that run's frame 173, wave in flight):
@@ -643,7 +717,7 @@ with a crescent head and a ringed tail, not the fan sheet's 48 x 32 arcs.
 Test `zero_data_extract_x3_wave` (decode == VRAM `$6380`/`$6480` in
 `x3-zero-wave`).
 
-**In the port.** `Saber.wave` (`saber.rs`, so rollback carries it): the
+**In the port (removed).** `Saber.wave` (`saber.rs`, so rollback carries it): the
 first frame of the arc pose (88 / 97) throws it from Zero's drawn origin,
 then it follows `x3_wave_step` for `WAVE_FRAMES` = 31 frames, past the end
 of the swing; a new arc replaces it. Drawn by `zero::wave_entries` in front
@@ -659,7 +733,7 @@ five colours map onto it (`zero::WAVE_ON_ZERO`: 1 -> 4 `639C`, 6/7 -> 12
 `2388`, 8/9 -> 1 `1284`) and it draws with its wearer's palette (P1: 1, P2:
 3). No CGRAM writes.
 
-**Damage.** The wave is its own shot (`saber::wave_shot_bytes`, slot
+**Damage (removed).** The wave was its own shot (`saber::wave_shot_bytes`, slot
 `Saber::wave_slot`, same insert/take-back as the blade's): id 2, position =
 the box centre, box `$86:BDC1` (`00 00 04 04`) on t0 and `$86:D381` (`00 00
 10 09`, X3's 32 x 18) after. One hit per swing, blade and wave together:

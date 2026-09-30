@@ -58,10 +58,13 @@ pub struct ZeroSet {
     pub frames: Vec<Frame>,
     /// X3's saber wave (empty for X1). See [`extract_x3_wave`].
     pub wave: WaveSet,
+    /// X3's green saber slash arc (`None` for X1). See [`extract_x3_slash`].
+    pub slash: Option<WaveSet>,
 }
 
-/// X3's saber wave (the green crescent): its own object, 2-row pages
-/// (`tiles_used` has 32 slots; layout tiles are rebased to them).
+/// An X3 effect set drawn next to Zero: the saber wave (2-row pages,
+/// `tiles_used` has 32 slots) or the slash arc (48 slots, columns 0-7);
+/// layout tiles are rebased to the page.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WaveSet {
     pub tiles: Vec<u8>,
@@ -251,7 +254,7 @@ pub fn extract_x1(rom: &[u8]) -> Result<ZeroSet, String> {
     tiles.resize(tiles.len().div_ceil(32) * 32, 0);
     frames.extend(self::frames(rom, PORTRAIT_SET, PORTRAIT_DMA, &PORTRAIT_NAMES, base)?);
     let palette = std::array::from_fn(|i| rw(rom, ZERO_PALETTE + 2 * i as u32).unwrap_or(0));
-    Ok(ZeroSet { tiles, palette, frames, wave: WaveSet::default() })
+    Ok(ZeroSet { tiles, palette, frames, wave: WaveSet::default(), slash: None })
 }
 
 /// X action (`+$02`) and frame (`+$17 & $7F`) -> the X1 Zero frame to draw,
@@ -432,7 +435,7 @@ pub fn extract_x3(rom: &[u8]) -> Result<ZeroSet, String> {
         }
     }
     let palette = std::array::from_fn(|i| rw(rom, X3_PALETTE + 2 * i as u32).unwrap_or(0));
-    Ok(ZeroSet { tiles, palette, frames, wave: extract_x3_wave(rom)? })
+    Ok(ZeroSet { tiles, palette, frames, wave: extract_x3_wave(rom)?, slash: Some(extract_x3_slash(rom)?) })
 }
 
 /// The saber wave: X3 object set `$4D` (spawned by Zero's charged attack,
@@ -470,6 +473,65 @@ pub fn extract_x3_wave(rom: &[u8]) -> Result<WaveSet, String> {
         frames.push(Frame { name: "wave", sprites, tiles_used: page.clone() });
     }
     let palette = std::array::from_fn(|i| rw(rom, X3_WAVE_PALETTE + 2 * i as u32).unwrap_or(0));
+    Ok(WaveSet { tiles, palette, frames })
+}
+
+/// The green slash arc: X3 set `$4F` (X's beam-saber slash; Zero's own
+/// swing in X3 has no arc, only the blue blade in his body frames), lists
+/// `$85:E5EE`, palette `$8C:A460` (the only `$8C` palette with greens in 1-5,
+/// the colours the set draws with; X3's sprite palette 3 while X plays).
+/// Frames 0-5 ground swing (2, 3 = the arc), 6-11 the same 5 px further
+/// forward and 2 up (air), 12-15 X's flying wave (not used). Drawn at the
+/// wearer's origin, it hugs Zero's arc pose 88 / 97.
+pub const X3_SLASH_SET: u8 = 0x4F;
+pub const X3_SLASH_DMA: u32 = 0x85E5EE;
+pub const X3_SLASH_PALETTE: u32 = 0x8CA460;
+pub const X3_SLASH_FRAMES: usize = 12;
+
+/// See [`X3_SLASH_SET`]. X3 streams up to four rows (tiles `$30-$6F`);
+/// each frame is repacked into 8 columns x 3 rows of a 48-slot page (16x16
+/// sprites in rows 0-1, 8x8 ones in the cells left), so it fits half of a
+/// shadow page. Pure.
+pub fn extract_x3_slash(rom: &[u8]) -> Result<WaveSet, String> {
+    let mut tiles = Vec::new();
+    let mut frames = Vec::new();
+    let mut raw = vec![None; 64]; // streamed slot (tile - $30) -> ROM address
+    for f in 0..X3_SLASH_FRAMES {
+        let slots = x3_dma_at(rom, X3_SLASH_DMA, f, 0x6300)?;
+        if !slots.is_empty() {
+            raw = vec![None; 64];
+        }
+        for (s, a) in slots {
+            *raw.get_mut(s).ok_or(format!("slash frame {f}: DMA past row 3"))? = Some(a);
+        }
+        let mut page = vec![NO_TILE; X3_PAGE_TILES];
+        let mut free: Vec<usize> = (0..X3_PAGE_TILES).filter(|s| s % 16 < 8).collect();
+        let mut sprites = x3_layout(rom, X3_SLASH_SET, f)?;
+        // Big ones first: they need a 2x2 block in rows 0-1.
+        let mut order: Vec<usize> = (0..sprites.len()).collect();
+        order.sort_by_key(|&i| !sprites[i].big);
+        for i in order {
+            let s = &mut sprites[i];
+            let src = s.tile.checked_sub(0x30).ok_or(format!("slash frame {f}: tile {:02X}", s.tile))?;
+            let (d, at): (&[usize], usize) = if s.big {
+                let at = *free.iter().find(|&&t| t < 16 && [1, 16, 17].iter().all(|k| free.contains(&(t + k)))).ok_or(format!("slash frame {f}: no room"))?;
+                (&[0, 1, 16, 17], at)
+            } else {
+                (&[0], *free.first().ok_or(format!("slash frame {f}: no room"))?)
+            };
+            for &k in d {
+                free.retain(|&t| t != at + k);
+                let a = raw.get(usize::from(src) + k).copied().flatten();
+                if let Some(a) = a {
+                    tiles.extend((0..32).map(|b| rd(rom, a + b)).collect::<Result<Vec<_>, _>>()?);
+                    page[at + k] = (tiles.len() / 32 - 1) as u16;
+                }
+            }
+            s.tile = at as u8;
+        }
+        frames.push(Frame { name: "slash", sprites, tiles_used: page });
+    }
+    let palette = std::array::from_fn(|i| rw(rom, X3_SLASH_PALETTE + 2 * i as u32).unwrap_or(0));
     Ok(WaveSet { tiles, palette, frames })
 }
 
@@ -696,6 +758,48 @@ mod tests {
                 let v = 0x6380 + (slot / 16) * 0x100 + (slot % 16) * 16;
                 let vram: Vec<u8> = g.vram()[v..v + 16].iter().flat_map(|w| w.to_le_bytes()).collect();
                 assert_eq!(page[slot * 32..][..32], vram[..], "slot {slot:02X}");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_data_extract_x3_slash() {
+        let Some(path) = std::env::var_os("MMX_X3_ROM") else {
+            eprintln!("MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let mut g = crate::Game::from_rom_any(std::fs::read(path).expect("read MMX_X3_ROM")).expect("load X3");
+        let rom = g.rom_bytes().to_vec();
+        let sl = extract_x3(&rom).unwrap().slash.unwrap();
+        assert_eq!(sl.frames.len(), X3_SLASH_FRAMES);
+        assert_eq!(sl.palette[3], 0x3B8E);
+        // Every slot a sprite reads is filled, in columns 0-7.
+        for f in &sl.frames {
+            for s in &f.sprites {
+                for d in if s.big { [0, 1, 16, 17].as_slice() } else { &[0] } {
+                    let t = usize::from(s.tile) + d;
+                    assert!(t % 16 < 8 && f.tiles_used[t] != NO_TILE, "{f:?}");
+                }
+            }
+        }
+        // decode(ROM) == VRAM: the game's own streamer and emitter showing set
+        // $4F frame 3 (Zero's block poked to it; docs/zero.md "The saber").
+        let state = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/x3-zero-slash.state");
+        let Ok(st) = std::fs::read(state) else {
+            eprintln!("{state} missing; VRAM check skipped");
+            return;
+        };
+        g.load_state(&st).unwrap();
+        let id: [u8; 16] = std::array::from_fn(|i| i as u8);
+        let page = sl.page(3, &id);
+        let orig = x3_layout(&rom, X3_SLASH_SET, 3).unwrap();
+        assert_eq!(orig.len(), 10);
+        for (s, o) in sl.frames[3].sprites.iter().zip(&orig) {
+            assert_eq!((s.x, s.y, s.big), (o.x, o.y, o.big));
+            for d in if s.big { [0, 1, 16, 17].as_slice() } else { &[0] } {
+                let v = 0x6000 + (usize::from(o.tile) + d) * 16;
+                let vram: Vec<u8> = g.vram()[v..v + 16].iter().flat_map(|w| w.to_le_bytes()).collect();
+                assert_eq!(page[(usize::from(s.tile) + d) * 32..][..32], vram[..], "tile {:02X}", o.tile);
             }
         }
     }
