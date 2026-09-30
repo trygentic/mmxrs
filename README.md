@@ -35,7 +35,13 @@ export MMX_ROM=/path/to/Mega\ Man\ X\ \(USA\).sfc
 cargo xtask rominfo                     # title, version byte, sha256
 cargo xtask verify --frames 600         # oracle vs DUT, zero input
 cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local
+# Zero with X3's sprites and the saber (optional Mega Man X3 (USA) dump):
+cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local --x3-rom "/path/to/Mega Man X3 (USA).sfc"
+# online co-op: one side --coop-host ROOM, the other --coop-join ROOM (see docs/netplay.md)
 ```
+
+Player 2: WASD, G jump, F buster, H dash, T saber (X3 ROM loaded). Without an
+X3 ROM player 2 is X's sprites in Zero's colours, buster only.
 
 Per-crate docs: `docs/traps.md`, `docs/verify.md`, `docs/coop.md`,
 `docs/netplay.md`, `docs/native.md`, `docs/web.md`.
