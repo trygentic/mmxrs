@@ -1,0 +1,15 @@
+[package]
+name = "mmx-verify"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Lockstep verification (DUT vs untrapped oracle) and movie parsers for mmxrs"
+
+[features]
+default = ["movies"]
+# .bk2 / .lsmv parsers (pull in the zip reader).
+movies = ["dep:zip"]
+
+[dependencies]
+mmx-core = { path = "../mmx-core" }
+zip = { version = "4", default-features = false, features = ["deflate"], optional = true }

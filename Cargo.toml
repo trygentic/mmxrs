@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/mmx-core",
+    "crates/mmx-verify",
+    "tools/xtask",
 ]
 # Vendored third-party sources (vendor/jgenesis, vendor/matchbox_socket) are
 # path dependencies, not workspace members: not linted or formatted as ours.

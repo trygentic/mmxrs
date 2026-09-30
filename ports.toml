@@ -1,0 +1,126 @@
+# ports.toml: routine ledger for the Mega Man X (USA v1.0) reconstruction.
+# Hand-maintained until an extractor exists (docs/PLAN.md "Routine map").
+# status: "unported" | "ported" (trap registered) | "verified" (lockstep-clean
+# on a movie with the trap on). `cargo xtask ledger` prints the counts.
+
+[meta]
+disassembly = "MarkAlarm Mega Man X disassembly (USA v1.0)"
+# ponytail: URL not recorded in PLAN.md; fill in the exact repo when known.
+url = "https://github.com/MarkAlarm"
+commit = "e6d6130"
+rom_version = "USA v1.0"
+
+[[routine]]
+name = "reset"
+addr = "80:8000"
+status = "unported"
+
+[[routine]]
+name = "main_loop"
+addr = "80:8099"
+status = "unported"
+
+[[routine]]
+name = "nmi"
+addr = "80:8168"
+status = "unported"
+
+[[routine]]
+name = "irq"
+addr = "80:84A1"
+status = "unported"
+
+[[routine]]
+name = "sound_enqueue"
+addr = "80:888F"
+status = "unported"
+
+[[routine]]
+name = "title"
+addr = "80:91AA"
+status = "unported"
+
+[[routine]]
+name = "stage_frame"
+addr = "80:9A6A"
+status = "unported"
+
+[[routine]]
+name = "pause_check"
+addr = "80:9E7E"
+status = "unported"
+
+[[routine]]
+name = "object_update"
+addr = "80:D203"
+status = "unported"
+
+[[routine]]
+name = "shots_loop"
+addr = "80:D450"
+status = "unported"
+
+[[routine]]
+name = "enemies_loop"
+addr = "80:D500"
+status = "unported"
+
+[[routine]]
+name = "oam_build_hud"
+addr = "80:D585"
+status = "unported"
+
+[[routine]]
+name = "hud_health_bar"
+addr = "80:D7E4"
+status = "unported"
+
+[[routine]]
+name = "hud_boss_bar"
+addr = "80:DA24"
+status = "unported"
+
+[[routine]]
+name = "spawn_by_camera"
+addr = "80:DC4C"
+status = "unported"
+
+[[routine]]
+name = "camera"
+addr = "80:DDF1"
+status = "unported"
+
+[[routine]]
+name = "input_remap"
+addr = "80:E559"
+status = "unported"
+
+[[routine]]
+name = "player_update"
+addr = "81:812E"
+status = "unported"
+
+[[routine]]
+name = "player_hurt"
+addr = "81:967C"
+status = "unported"
+
+[[routine]]
+name = "player_death"
+addr = "81:96CB"
+status = "unported"
+
+[[routine]]
+name = "enemy_spawn"
+addr = "82:8321"
+status = "unported"
+
+[[routine]]
+name = "rng"
+addr = "84:9086"
+status = "unported"
+
+[[routine]]
+name = "player_contact_damage"
+addr = "84:9D07"
+status = "unported"
