@@ -6,3 +6,14 @@ license.workspace = true
 description = "Mega Man X game core: jgenesis SNES emulator wrapper, routine traps, RAM map, co-op"
 
 [dependencies]
+snes-core = { path = "../../vendor/jgenesis/snes-core" }
+wdc65816-emu = { path = "../../vendor/jgenesis/wdc65816-emu" }
+jgenesis-common = { path = "../../vendor/jgenesis/jgenesis-common" }
+snes-config = { path = "../../vendor/jgenesis/snes-config" }
+bincode = "2"
+crc = "3" # already pulled in by snes-core
+sha2 = "0.10"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# rand (via jgenesis-common / snes-core) needs a wasm entropy backend to link.
+getrandom = { version = "0.4", features = ["wasm_js"] }

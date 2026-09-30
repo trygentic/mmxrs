@@ -1,0 +1,28 @@
+[package]
+name = "jgenesis-common"
+version = "0.14.1"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = []
+clap = ["dep:clap"]
+serde = ["dep:serde"]
+
+[dependencies]
+jgenesis-proc-macros = { path = "../jgenesis-proc-macros" }
+
+bincode = { version = "2", features = ["derive"] }
+bytemuck = { version = "1", features = ["derive", "extern_crate_alloc"] }
+clap = { version = "4", features = ["derive"], optional = true }
+log = { version = "0.4" }
+multiversion = "0.8"
+rand = { version = "0.10" }
+rustc-hash = { version = "2" }
+serde = { version = "1", features = ["derive"], optional = true }
+time = { version = "0.3" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3" }
+

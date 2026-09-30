@@ -37,6 +37,56 @@ pub const PAUSE: u32 = 0x7E1F24;
 pub const OAM_BUF: u32 = 0x7E0700;
 pub const SOUND_QUEUE: u32 = 0x7E0B72;
 
+// Scheduler: 7 task slots of $10 bytes; current slot index.
+pub const TASK_SLOTS: u32 = 0x7E0030;
+pub const TASK_STRIDE: usize = 0x10;
+pub const TASK_COUNT: usize = 7;
+pub const TASK_CURRENT: u32 = 0x7E00A0;
+pub const MODE_D4: u32 = 0x7E00D4;
+/// `$D2` values: 0 intro, 2 stage select, 4 in stage, `$0A` game over.
+pub const D2_IN_STAGE: u8 = 0x04;
+/// `$D3` values: 0 load, 2 ready, 4 gameplay, 6 dying, 8 clear.
+pub const PHASE_GAMEPLAY: u8 = 0x04;
+pub const NMI_DONE: u32 = 0x7E0B9D;
+pub const FRAME_NMI: u32 = 0x7E0B9E;
+pub const PAD1_PREV: u32 = 0x7E00A9;
+pub const PAD2_PREV: u32 = 0x7E00AF;
+pub const X_INPUT_PREV: u32 = 0x7E0BE0;
+pub const X_SUBPIX_X: u32 = 0x7E0BAC;
+pub const X_SUBPIX_Y: u32 = 0x7E0BAF;
+/// Bit 6 = facing.
+pub const X_FACING: u32 = 0x7E0BB9;
+// Enemy slot field offsets (from `ENEMIES_BASE + i * ENEMY_STRIDE`).
+pub const ENEMY_ACTIVE: usize = 0x00;
+pub const ENEMY_POS_X: usize = 0x05;
+pub const ENEMY_POS_Y: usize = 0x08;
+pub const ENEMY_ID: usize = 0x0A;
+pub const ENEMY_CONTACT_DAMAGE: usize = 0x26;
+pub const ENEMY_HP: usize = 0x27;
+pub const SHOTS_BASE: u32 = 0x7E0C98;
+pub const SHOT_STRIDE: usize = 0x20;
+pub const SHOT_COUNT: usize = 12;
+/// Items and enemy shots.
+pub const ITEMS_BASE: u32 = 0x7E1228;
+pub const ITEM_STRIDE: usize = 0x40;
+pub const ITEM_COUNT: usize = 8;
+pub const EFFECTS_BASE: u32 = 0x7E1928;
+pub const EFFECT_STRIDE: usize = 0x20;
+pub const EFFECT_COUNT: usize = 31;
+pub const SUB_TANKS: u32 = 0x7E1F83;
+pub const SUB_TANK_COUNT: usize = 4;
+/// Weapon `i` energy at `WEAPON_ENERGY + 2 * i`.
+pub const WEAPON_ENERGY: u32 = 0x7E1F88;
+pub const ARMOR: u32 = 0x7E1F99;
+pub const HEART_TANKS: u32 = 0x7E1F9C;
+pub const BOSS_PTR: u32 = 0x7E1F0E;
+pub const OAM_BUF_LEN: usize = 544;
+pub const CGRAM_BUF: u32 = 0x7E0300;
+/// 16 entries of {cmd, param}; enqueued by `$80:888F`.
+pub const SOUND_QUEUE_LEN: usize = 16;
+/// Anti-piracy counter (SRAM probes at `$70:xxxx`; no SRAM mapped = pass).
+pub const ANTI_PIRACY: u32 = 0x7E1F9F;
+
 /// Index into the 128 KiB WRAM array for a `$7E`/`$7F` address.
 pub const fn wram_index(addr: u32) -> usize {
     (addr & 0x1FFFF) as usize
