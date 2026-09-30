@@ -8,6 +8,9 @@ use mmx_core::{
 };
 use wasm_bindgen::prelude::*;
 
+#[cfg(feature = "netplay")]
+mod net;
+
 /// `KeyboardEvent.code` -> (player 1|2, pad bit). Player 1 on the arrows and
 /// ZXCV, player 2 on WASD and the letters around G.
 const KEYS: &[(&str, u8, u16)] = &[
@@ -62,6 +65,12 @@ pub struct Emu {
     rgba: Vec<u8>,
     width: usize,
     height: usize,
+    audio_rate: Option<u32>,
+    /// ROM bytes: an online session rebuilds the game from power-on.
+    #[cfg(feature = "netplay")]
+    rom: Vec<u8>,
+    #[cfg(feature = "netplay")]
+    net: Option<mmx_core::netgame::NetPlay<mmx_net::MatchboxTransport>>,
 }
 
 #[wasm_bindgen]
@@ -69,7 +78,17 @@ impl Emu {
     #[wasm_bindgen(constructor)]
     pub fn new(rom: &[u8]) -> Result<Emu, JsValue> {
         let game = Game::from_rom(rom.to_vec()).map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let mut emu = Emu { game, rgba: Vec::new(), width: 0, height: 0 };
+        let mut emu = Emu {
+            game,
+            rgba: Vec::new(),
+            width: 0,
+            height: 0,
+            audio_rate: None,
+            #[cfg(feature = "netplay")]
+            rom: rom.to_vec(),
+            #[cfg(feature = "netplay")]
+            net: None,
+        };
         emu.refresh_frame();
         Ok(emu)
     }
@@ -105,6 +124,7 @@ impl Emu {
     }
     pub fn set_audio_rate(&mut self, hz: u32) {
         self.game.set_audio_rate(hz);
+        self.audio_rate = Some(hz);
     }
 
     pub fn save_state(&self) -> Vec<u8> {

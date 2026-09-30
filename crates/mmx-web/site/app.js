@@ -19,6 +19,8 @@ const pads = [0, 0];
 let ff = false;
 let slot = null; // ponytail: one in-memory save slot, no IndexedDB
 let msg = '';
+let net = false; // an online session exists (connecting, live, or closed until Leave)
+let netAcc = 0;
 
 // --- ROM loading -----------------------------------------------------------
 async function loadRom(file) {
@@ -26,6 +28,7 @@ async function loadRom(file) {
     const rom = new Uint8Array(await file.arrayBuffer());
     emu?.free();
     emu = null;
+    net = false;
     const e = new Emu(rom);
     e.set_coop(coop);
     emu = e;
@@ -61,6 +64,7 @@ $('coop').addEventListener('change', (e) => {
 addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement && e.target.type === 'file') return;
   actx?.state === 'suspended' && actx.resume();
+  if (net && ['F5', 'F7', 'Tab'].includes(e.code)) { e.preventDefault(); return; } // would desync
   if (e.code === 'F5') { e.preventDefault(); if (emu) { slot = emu.save_state(); msg = 'saved'; status(); } return; }
   if (e.code === 'F7') { e.preventDefault(); if (emu && slot) { emu.load_state(slot); msg = 'loaded'; status(); } return; }
   if (e.code === 'Tab') { e.preventDefault(); ff = true; return; }
@@ -127,7 +131,12 @@ function loop(t) {
   requestAnimationFrame(loop);
   const dt = Math.min((t - (lastT || t)) / 1000, 0.25);
   lastT = t;
-  if (!emu || paused) return;
+  if (!emu) return;
+  if (net) {
+    netFrame(dt);
+    if (emu.net_live()) return;
+  }
+  if (paused) return;
   let n = 0;
   if (ff) {
     for (; n < FF_FRAMES; n++) stepOne();
@@ -145,6 +154,64 @@ function loop(t) {
   if (n) blit();
 }
 requestAnimationFrame(loop);
+
+// --- online co-op (bundle built with --features netplay) ----------------------
+// The game keeps running locally while connecting; `Running` restarts both
+// peers from power-on and from then on net_tick drives it at 60 Hz.
+function netFrame(dt) {
+  const now = performance.now();
+  if (!emu.net_live()) {
+    emu.net_tick(pads[0], now); // network only
+    if (emu.net_live()) { netAcc = 0; blit(); }
+    return;
+  }
+  netAcc = Math.min(netAcc + dt * NTSC_HZ, 4);
+  let shown = 0;
+  for (; netAcc >= 1; netAcc--) { shown += emu.net_tick(pads[0], now); pushAudio(); }
+  if (shown) blit();
+}
+
+const netSupported = () => !!emu && typeof emu.net_connect === 'function';
+function netButtons() {
+  $('netHost').disabled = $('netJoin').disabled = net || !netSupported();
+  $('netLeave').disabled = !net;
+}
+function netConnect(host) {
+  if (!netSupported()) { $('netStatus').textContent = emu ? 'netplay: not in this build (--features netplay)' : 'netplay: load the ROM first'; return; }
+  const signal = $('netSignal').value.trim();
+  if (location.protocol === 'https:' && signal.startsWith('ws://')) {
+    $('netStatus').textContent = 'netplay: this page is https, so the signal URL must be wss://';
+    return;
+  }
+  try {
+    emu.net_connect(signal, $('netRoom').value.trim(), host, +$('netDelay').value, $('netIce').value);
+  } catch (err) {
+    $('netStatus').textContent = `netplay: ${err}`;
+    return;
+  }
+  net = true;
+  netButtons();
+}
+function netLeave() {
+  if (!net) return;
+  emu.net_leave();
+  // keep pumping ~200 ms so the goodbye leaves, then drop the session
+  setTimeout(() => { emu?.net_drop?.(); net = false; netButtons(); $('netStatus').textContent = 'netplay: left'; }, 200);
+}
+$('netHost').addEventListener('click', () => netConnect(true));
+$('netJoin').addEventListener('click', () => netConnect(false));
+$('netLeave').addEventListener('click', netLeave);
+{
+  const q = new URLSearchParams(location.search);
+  for (const k of ['signal', 'room', 'ice', 'delay']) {
+    const v = q.get(k);
+    if (v !== null) $(`net${k[0].toUpperCase()}${k.slice(1)}`).value = v;
+  }
+}
+setInterval(() => {
+  netButtons();
+  if (net && emu) $('netStatus').textContent = `netplay: ${emu.net_status()}`;
+}, 250);
 
 function status() {
   const a = audioLive() ? `audio ${underruns} underruns` : 'audio off (press a key)';

@@ -2608,6 +2608,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "mmx-core",
+ "mmx-net",
  "wasm-bindgen",
 ]
 
