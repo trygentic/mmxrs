@@ -415,6 +415,187 @@ mod tests {
         assert_eq!(s.mismatches(), 0);
     }
 
+    /// One simulated frame as a player would see it.
+    #[derive(Clone, Copy, PartialEq)]
+    struct Snap {
+        pads: (u16, u16),
+        /// All of WRAM, the whole co-op state, the picture, OAM and P2's tile page.
+        sum: u64,
+        p2: [u8; crate::ram::X_BLOCK_LEN],
+        cam: (u16, u16),
+    }
+
+    impl Snap {
+        fn new(g: &Game, pad1: u16, pad2: u16) -> Snap {
+            let px: Vec<u8> = g.frame().0.iter().flat_map(|p| p.to_le_bytes()).collect();
+            let (page, slots) = g.p2_tiles();
+            let page: Vec<u8> = page.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let coop = bincode::encode_to_vec(&g.coop, bincode::config::standard()).unwrap();
+            let w = g.wram();
+            let word = |a: usize| u16::from_le_bytes([w[a], w[a + 1]]);
+            Snap {
+                pads: (pad1, pad2),
+                sum: hash_state(&[w, &coop, &px, &page, &slots.to_le_bytes(), &g.oam()]),
+                p2: g.coop.p2,
+                cam: (word(0x1E4D), word(0x1E50)),
+            }
+        }
+
+        /// P2 on screen (world position minus camera).
+        fn screen(&self) -> (i32, i32) {
+            let w = |o: usize| i32::from(u16::from_le_bytes([self.p2[o], self.p2[o + 1]]));
+            (w(5) - i32::from(self.cam.0), w(8) - i32::from(self.cam.1))
+        }
+    }
+
+    /// Real ROM, in stage with P2 anchored (hw-spiky: highway-start, P1 walks
+    /// right 250 frames, then idles 60), two peers over a lossy loopback with
+    /// scripted pads (both walk / jump / shoot). Every settled frame on both
+    /// peers must equal a plain single-`Game` run with the same pads, down to
+    /// the picture: rollback is invisible once a frame settles. Also prints how
+    /// far the first (predicted) showing of P2 was from where it settled.
+    /// Skipped without `MMX_ROM` (and `MMX_X3_ROM` for `x3`).
+    fn rollback_invisible_to_p2(x3: bool, delay: u8, loss_per_mille: u16, frames: usize) {
+        use crate::{BTN_LEFT, BTN_RIGHT, BTN_Y};
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else {
+            return eprintln!("MMX_ROM not set; skipping");
+        };
+        let x3rom = match x3 {
+            true => match std::env::var_os("MMX_X3_ROM").and_then(|p| std::fs::read(p).ok()) {
+                Some(r) => Some(r),
+                None => return eprintln!("MMX_X3_ROM not set; skipping"),
+            },
+            false => None,
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/highway-start.state");
+        let Ok(state) = std::fs::read(st) else { return eprintln!("{st} missing; skipping") };
+        let fresh = || {
+            let mut g = session_game(&rom, COOP_TWO_PLAYERS).unwrap();
+            if let Some(r) = &x3rom {
+                g.set_x3_rom(r).unwrap();
+            }
+            g
+        };
+        let mut base = fresh();
+        base.load_state(&state).unwrap();
+        for f in 0..310 {
+            base.step(Pads { p1: if f < 250 { BTN_RIGHT } else { 0 }, p2: 0 });
+        }
+        assert!(!base.coop.p2_hidden, "P2 not anchored");
+        let s0 = net_save(&base);
+
+        let p1 = |f: u32| match f % 120 {
+            0..=59 => BTN_RIGHT,
+            60..=79 => BTN_RIGHT | BTN_B,
+            80..=99 => 0,
+            _ => BTN_Y * u16::from(f % 4 < 2),
+        };
+        let p2 = |f: u32| match (f / 7).wrapping_mul(2_654_435_761) >> 29 {
+            0 | 1 => BTN_RIGHT,
+            2 => BTN_RIGHT | BTN_B,
+            3 => BTN_LEFT,
+            4 => BTN_LEFT | BTN_B,
+            5 => BTN_Y,
+            6 => BTN_B,
+            _ => 0,
+        };
+        let link_cfg = LoopbackConfig { latency_ticks: 3, jitter_ticks: 2, loss_per_mille, connect_after_ticks: 2 };
+        let (link, ta, tb) = loopback_pair(link_cfg, 11);
+        let (crc, traps) = (base.rom_info().crc32, trapset_id(&base));
+        let mk = |host: bool, t| {
+            let mut cfg = if host {
+                RollbackConfig::host(crc, traps, COOP_TWO_PLAYERS)
+            } else {
+                RollbackConfig::guest(crc, traps, COOP_TWO_PLAYERS)
+            };
+            cfg.input_delay = delay;
+            cfg.check_interval = 10;
+            let ring = StateRing::new(usize::from(cfg.max_prediction) + 2);
+            let mut g = fresh();
+            net_load(&mut g, &s0).unwrap();
+            // (session, game, ring, first showing per frame, last simulation per frame)
+            (RollbackSession::new(cfg, t).unwrap(), g, ring, vec![None::<Snap>; frames + 16], vec![None::<Snap>; frames + 16])
+        };
+        let mut peers = [mk(true, ta), mk(false, tb)];
+        let mut tick = 0u64;
+        while peers.iter().any(|(s, ..)| (s.final_frame() as usize) < frames) {
+            assert!(tick < 20_000, "stuck");
+            link.advance(1);
+            for (i, (s, g, ring, shown, settled)) in peers.iter_mut().enumerate() {
+                let f = s.frame();
+                s.add_local_input(if i == 0 { p1(f) } else { p2(f) });
+                let reqs = s.advance(tick * 16).unwrap_or_else(|e| panic!("frame {f}: {e:?}"));
+                for r in reqs {
+                    apply_requests(g, ring, &[r], s).unwrap();
+                    if let RollbackRequest::Advance { frame, pad1, pad2, replay, .. } = r {
+                        let (f, snap) = (frame as usize, Some(Snap::new(g, pad1, pad2)));
+                        if f < settled.len() {
+                            settled[f] = snap;
+                            if !replay {
+                                shown[f] = snap;
+                            }
+                        }
+                    }
+                }
+                for ev in s.events() {
+                    assert!(!matches!(ev, RollbackEvent::DesyncDetected { .. }), "{ev:?}");
+                }
+            }
+            tick += 1;
+        }
+        for (who, (s, _, _, shown, settled)) in ["host", "guest"].iter().zip(&peers) {
+            let st = s.stats();
+            assert!(st.rollbacks > 0, "no rollback exercised");
+            let off: Vec<(i32, i32)> = (0..frames)
+                .map(|f| {
+                    let (a, b) = (shown[f].unwrap().screen(), settled[f].unwrap().screen());
+                    ((a.0 - b.0).abs(), (a.1 - b.1).abs())
+                })
+                .collect();
+            eprintln!(
+                "x3={x3} d={delay} loss={loss_per_mille} {who}: rollbacks {} max depth {}, P2 first shown \
+                 >4 px from where it settled on {}/{frames} frames, max off {:?}",
+                st.rollbacks,
+                st.max_rollback_depth,
+                off.iter().filter(|d| d.0 > 4 || d.1 > 4).count(),
+                off.iter().fold((0, 0), |m, d| (m.0.max(d.0), m.1.max(d.1))),
+            );
+        }
+        let mut g = fresh();
+        net_load(&mut g, &s0).unwrap();
+        for f in 0..frames {
+            let (pad1, pad2) = peers[0].4[f].unwrap().pads;
+            g.step(Pads { p1: pad1, p2: pad2 });
+            let want = Snap::new(&g, pad1, pad2);
+            for (who, (.., settled)) in ["host", "guest"].iter().zip(&peers) {
+                let got = settled[f].unwrap();
+                if got != want {
+                    let diff: Vec<String> = (0..want.p2.len())
+                        .filter(|&k| got.p2[k] != want.p2[k])
+                        .map(|k| format!("+{k:02X}:{:02X}(want {:02X})", got.p2[k], want.p2[k]))
+                        .collect();
+                    panic!(
+                        "x3={x3} d={delay}: {who} differs from the plain run at frame {f}: pads {:04X?} vs \
+                         ({pad1:04X}, {pad2:04X}), sum {:016X} vs {:016X}, P2 block diff [{}]",
+                        got.pads, got.sum, want.sum, diff.join(" ")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rollback_invisible_to_p2_rom() {
+        rollback_invisible_to_p2(false, 0, 300, 600);
+        rollback_invisible_to_p2(false, 2, 150, 600);
+    }
+
+    #[test]
+    fn rollback_invisible_to_p2_x3() {
+        rollback_invisible_to_p2(true, 0, 300, 600);
+        rollback_invisible_to_p2(true, 2, 150, 600);
+    }
+
     /// Two `Game`s on the synthetic ROM through `NetPlay` over a lossy,
     /// jittery loopback link with no input delay: stays in sync for 300
     /// settled frames and actually rolls back.
