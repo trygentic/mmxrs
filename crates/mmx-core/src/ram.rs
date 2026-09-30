@@ -69,8 +69,9 @@ pub const ENEMY_HP: usize = 0x27;
 pub const SHOTS_BASE: u32 = 0x7E0C98;
 pub const SHOT_STRIDE: usize = 0x20;
 pub const SHOT_COUNT: usize = 12;
-/// Items and enemy shots.
+/// `$1228`: X's shots and enemy shots (8 x `$40`). Items (pellets, 1-ups) live in `$1428` (see `coop_objects.rs`).
 pub const ITEMS_BASE: u32 = 0x7E1228;
+pub const PICKUPS_BASE: u32 = 0x7E1428;
 pub const ITEM_STRIDE: usize = 0x40;
 pub const ITEM_COUNT: usize = 8;
 pub const EFFECTS_BASE: u32 = 0x7E1928;
