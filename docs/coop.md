@@ -180,7 +180,7 @@ in the way. `p2_oam_base/count` grow to cover them, so
 slice leaves `HUD_SLOTS` slots free below 128 (`room`); with P2 hidden and
 the game at 128 slots the bar takes the game's last 8. The bar is rebuilt
 every frame from P2's block, so there is no cache to carry. The icon: X's
-"X" recoloured to palette 3; with X3 loaded, X3's "Z" emblem from shadow
+"X" recoloured to palette 3; with X3 loaded, a Z glyph drawn in code (X3 keeps X's emblem for Zero; see `coop_hud::Z_GLYPH`) emblem from shadow
 page 3 (also for a Zero P1's own icon; docs/zero.md "The HUD icon").
 
 Checked (4x crops of the left edge, frame 30):

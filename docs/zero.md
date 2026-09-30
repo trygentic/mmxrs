@@ -861,6 +861,8 @@ so a mismatch refuses to start (docs/netplay.md).
 
 ### The HUD icon
 
+Update: X3's HUD icon turned out to be the same X emblem for Zero, so the Z is a 16x16 glyph drawn in code (`coop_hud::Z_GLYPH`, Zero's palette: red strokes, gold highlights, white plate) and works without the X3 ROM. The X3 extraction below is kept for reference.
+
 With X3 loaded, the life bar icon of a Zero (P2's, the down marker, and a
 Zero P1's own, OAM slot 0) is X3's own "Z" emblem instead of X's "X"
 (`coop_hud.rs`; placement of P2's bar: docs/coop.md "P2 HP bar and

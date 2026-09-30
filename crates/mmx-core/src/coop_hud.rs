@@ -150,15 +150,65 @@ fn bar_entries(game: &mut Game, hp: u8) -> [u8; BAR_SLOTS * 4] {
     bar
 }
 
-/// Write the Z icon into shadow page 3 (see [`ICON_PAGE`]). False without X3.
-fn put_icon(game: &mut Game) -> bool {
-    let Some(tiles) = game.zero_set.as_ref().and_then(|z| z.hud_icon.as_ref()).map(|i| i.tiles.clone()) else {
-        return false;
+/// The Z icon, 16x16, in Zero's palette: `K` dark outline (15), `W` white
+/// plate (4), `R` red stroke (7), `Y` gold highlight (13), `.` transparent.
+/// X3 keeps X's emblem for Zero (there is no Z in either ROM), so it is drawn
+/// here and needs no X3 ROM.
+const Z_GLYPH: [&str; 16] = [
+    "KKKKKKKKKKKKKKKK",
+    "KWWWWWWWWWWWWWWK",
+    "KWWWWWWWWWWWWWWK",
+    "KWWYYYYYYYYYYWWK",
+    "KWWRRRRRRRRRRWWK",
+    "KWWWWWWWWWRRRWWK",
+    "KWWWWWWWWRRRWWWK",
+    "KWWWWWWWRRRWWWWK",
+    "KWWWWWWRRRWWWWWK",
+    "KWWWWWRRRWWWWWWK",
+    "KWWWWRRRWWWWWWWK",
+    "KWWRRRRRRRRRRWWK",
+    "KWWYYYYYYYYYYWWK",
+    "KWWWWWWWWWWWWWWK",
+    "KWWWWWWWWWWWWWWK",
+    "KKKKKKKKKKKKKKKK",
+];
+
+/// [`Z_GLYPH`] as four SNES 4bpp planar tiles (top-left, top-right,
+/// bottom-left, bottom-right), matching [`ICON_CELLS`]. Pure.
+pub fn z_glyph_tiles() -> [[u8; 32]; 4] {
+    let px = |x: usize, y: usize| -> u8 {
+        match Z_GLYPH[y].as_bytes()[x] {
+            b'K' => 15,
+            b'W' => 4,
+            b'R' => 7,
+            b'Y' => 13,
+            _ => 0,
+        }
     };
-    for (t, cell) in tiles.chunks_exact(32).zip(ICON_CELLS) {
-        let mut t: [u8; 32] = t.try_into().unwrap();
-        crate::zero_data::remap_tile(&mut t, &HUD_ON_ZERO);
-        crate::p2tiles::fill_page(game, usize::from(ICON_PAGE) * crate::p2tiles::SHADOW_WORDS + cell * 16, &t);
+    let mut out = [[0u8; 32]; 4];
+    for (i, (ox, oy)) in [(0, 0), (8, 0), (0, 8), (8, 8)].into_iter().enumerate() {
+        for r in 0..8 {
+            let mut planes = [0u8; 4];
+            for c in 0..8 {
+                let v = px(ox + c, oy + r);
+                for (b, plane) in planes.iter_mut().enumerate() {
+                    *plane |= ((v >> b) & 1) << (7 - c);
+                }
+            }
+            out[i][2 * r] = planes[0];
+            out[i][2 * r + 1] = planes[1];
+            out[i][16 + 2 * r] = planes[2];
+            out[i][17 + 2 * r] = planes[3];
+        }
+    }
+    out
+}
+
+/// Write the Z icon into shadow page 3 (see [`ICON_PAGE`]). Always true: the
+/// glyph is ours, not the ROM's.
+fn put_icon(game: &mut Game) -> bool {
+    for (t, cell) in z_glyph_tiles().iter().zip(ICON_CELLS) {
+        crate::p2tiles::fill_page(game, usize::from(ICON_PAGE) * crate::p2tiles::SHADOW_WORDS + cell * 16, t);
     }
     true
 }
