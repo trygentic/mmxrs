@@ -18,6 +18,10 @@
 //! update never runs, it is never drawn and never counted in `$0BDD`, so no
 //! shot bookkeeping (docs/coop.md "Shots (B3)") is involved. One hit per
 //! swing: the damage routine does `INC +30` on the shot, which ends it.
+//!
+//! Wave: the arc also throws X3's green wave ([`Wave`], data
+//! `zero_data::x3_wave_step`), which flies on for [`WAVE_FRAMES`] frames
+//! after the swing; its own shot follows it (same one hit per swing).
 
 use crate::coop::{OFF_POS_X, OFF_POS_Y};
 use crate::ram::wram_index as ix;
@@ -69,8 +73,41 @@ fn pose_index(t: u8, air: bool) -> Option<usize> {
     None
 }
 
-/// Swing state (in `CoopState`, so rollback carries it).
+/// The wave's life in frames: X3's died after 31 (both runs, about 197 px
+/// out, just off screen).
+pub const WAVE_FRAMES: u8 = 31;
+/// Wave hit boxes in X1's bank `$86` matching X3's (`x y half-w half-h`):
+/// `$BDC1` = `00 00 04 04` (the spawn frame, X3 `$B7FB`), `$D381` =
+/// `00 00 10 09` (32 x 18 px, X3 `$B807`/`$B80F`; X3's x offset goes into
+/// the shot's position).
+pub const WAVE_BOX_SPAWN: u16 = 0xBDC1;
+pub const WAVE_BOX: u16 = 0xD381;
+
+/// A flying wave (in [`Saber`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+pub struct Wave {
+    /// Frames since the spawn + 1, 0 = none.
+    pub t: u8,
+    pub air: bool,
+    pub right: bool,
+    /// Zero's drawn origin at the spawn, world coordinates (`+05`, `+08 +
+    /// (i8)+19 + X3_Y_OFFSET`).
+    pub x: u16,
+    pub y: u16,
+}
+
+impl Wave {
+    /// `(world x, world y, wave frame, box)` now, `None` when there is none.
+    /// Pure.
+    pub fn at(&self) -> Option<(u16, u16, usize, crate::zero_data::HitBox)> {
+        let (dx, dy, f, b) = crate::zero_data::x3_wave_step(self.t.checked_sub(1)?, self.air);
+        let dx = if self.right { dx } else { -dx };
+        Some((self.x.wrapping_add(dx as u16), self.y.wrapping_add(dy as u16), f, b))
+    }
+}
+
+/// Swing state (in `CoopState`, so rollback carries it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct Saber {
     /// Frames into the swing, 0 = none.
     pub t: u8,
@@ -81,6 +118,15 @@ pub struct Saber {
     pub btn: bool,
     /// Shot slot (0-7) in use this frame, `0xFF` = none.
     pub slot: u8,
+    pub wave: Wave,
+    /// The wave's shot slot this frame, `0xFF` = none.
+    pub wave_slot: u8,
+}
+
+impl Default for Saber {
+    fn default() -> Self {
+        Self { t: 0, air: false, hit: false, btn: false, slot: 0xFF, wave: Wave::default(), wave_slot: 0xFF }
+    }
 }
 
 fn poses(air: bool) -> &'static [usize] {
@@ -99,9 +145,14 @@ pub fn frame(s: &Saber) -> Option<usize> {
     })
 }
 
-/// Called with P2's pad before its update slice: start / advance / end the
-/// swing, return the pad the ROM gets. Pure but for `s`.
-pub fn update(s: &mut Saber, action: u8, pad: u16) -> u16 {
+/// Called with the player's block and pad before its update: start /
+/// advance / end the swing and its wave, return the pad the ROM gets. Pure
+/// but for `s`.
+pub fn update(s: &mut Saber, obj: &[u8], pad: u16) -> u16 {
+    let action = obj[0x02];
+    if s.wave.t > 0 {
+        s.wave.t = if s.wave.t >= WAVE_FRAMES { 0 } else { s.wave.t + 1 };
+    }
     let x = pad & BTN_X != 0;
     let pressed = x && !s.btn;
     s.btn = x;
@@ -115,8 +166,14 @@ pub fn update(s: &mut Saber, action: u8, pad: u16) -> u16 {
         // stand, ready, walk, land, dash / jump, fall. Not on walls, not hurt.
         let (ground, air) = (matches!(action, 0x00 | 0x02 | 0x04 | 0x0A | 0x14), matches!(action, 0x06 | 0x08));
         if ground || air {
-            *s = Saber { t: 1, air, hit: false, btn: true, slot: 0xFF };
+            *s = Saber { t: 1, air, btn: true, wave: s.wave, ..Saber::default() };
         }
+    }
+    // The arc's first frame throws the wave (replacing an older one).
+    if s.t > 1 && pose_index(s.t, s.air) == Some(ARC) && pose_index(s.t - 1, s.air) != Some(ARC) {
+        let w = |o: usize| u16::from_le_bytes([obj[o], obj[o + 1]]);
+        let y = w(OFF_POS_Y).wrapping_add(obj[0x19] as i8 as u16).wrapping_add(crate::zero::X3_Y_OFFSET as u16);
+        s.wave = Wave { t: 1, air: s.air, right: obj[0x11] & 0x40 != 0, x: w(OFF_POS_X), y };
     }
     match s.t {
         0 => pad,
@@ -146,21 +203,48 @@ pub fn shot_bytes(p2: &[u8], air: bool) -> [u8; SHOT_LEN] {
     s
 }
 
-/// [`HOOK_SHOTS_DONE`]: put each swing's arc shot (a Zero P1's, P2's) into
-/// a free slot for the enemy loop.
+/// The wave's shot (`+05/+08` = its box centre), `None` without a wave or
+/// after the swing's hit. Pure.
+pub fn wave_shot_bytes(s: &Saber) -> Option<[u8; SHOT_LEN]> {
+    let (x, y, _, (bx, by, _, _)) = s.wave.at().filter(|_| !s.hit)?;
+    let bx = i16::from(bx);
+    let x = x.wrapping_add(if s.wave.right { bx } else { -bx } as u16);
+    let mut b = [0u8; SHOT_LEN];
+    b[0x00] = 1;
+    b[0x0A] = DAMAGE_ID;
+    b[0x05..0x07].copy_from_slice(&x.to_le_bytes());
+    b[0x08..0x0A].copy_from_slice(&y.wrapping_add(i16::from(by) as u16).to_le_bytes());
+    b[0x11] = if s.wave.right { 0x40 } else { 0 };
+    let bp = if s.wave.t == 1 { WAVE_BOX_SPAWN } else { WAVE_BOX };
+    b[0x20..0x22].copy_from_slice(&bp.to_le_bytes());
+    Some(b)
+}
+
+/// [`HOOK_SHOTS_DONE`]: put each swing's arc shot and wave shot (a Zero
+/// P1's, P2's) into free slots for the enemy loop.
 pub fn shots_done(game: &mut Game) {
     if game.zero_set.is_none() {
         return;
     }
-    if game.coop.p1.on && arc(&game.coop.p1.saber) {
-        let b = ix(crate::ram::X_BASE);
-        let shot = shot_bytes(&game.wram()[b..b + crate::ram::X_BLOCK_LEN], game.coop.p1.saber.air);
-        game.coop.p1.saber.slot = put_shot(game, &shot);
+    if game.coop.p1.on {
+        if arc(&game.coop.p1.saber) {
+            let b = ix(crate::ram::X_BASE);
+            let shot = shot_bytes(&game.wram()[b..b + crate::ram::X_BLOCK_LEN], game.coop.p1.saber.air);
+            game.coop.p1.saber.slot = put_shot(game, &shot);
+        }
+        if let Some(shot) = wave_shot_bytes(&game.coop.p1.saber) {
+            game.coop.p1.saber.wave_slot = put_shot(game, &shot);
+        }
     }
     let c = &game.coop;
-    if c.enabled && !c.p2_hidden && arc(&c.saber) {
-        let shot = shot_bytes(&c.p2, c.saber.air);
-        game.coop.saber.slot = put_shot(game, &shot);
+    if c.enabled && !c.p2_hidden {
+        if arc(&c.saber) {
+            let shot = shot_bytes(&c.p2, c.saber.air);
+            game.coop.saber.slot = put_shot(game, &shot);
+        }
+        if let Some(shot) = wave_shot_bytes(&game.coop.saber) {
+            game.coop.saber.wave_slot = put_shot(game, &shot);
+        }
     }
 }
 
@@ -178,14 +262,15 @@ pub fn take_back(game: &mut Game) {
     let mut p1 = game.coop.p1.saber;
     let mut p2 = game.coop.saber;
     for s in [&mut p1, &mut p2] {
-        let k = std::mem::replace(&mut s.slot, 0xFF);
-        if k == 0xFF {
-            continue;
+        for k in [std::mem::replace(&mut s.slot, 0xFF), std::mem::replace(&mut s.wave_slot, 0xFF)] {
+            if k == 0xFF {
+                continue;
+            }
+            let o = ix(SHOTS) + usize::from(k) * SHOT_LEN;
+            let w = game.wram_mut();
+            s.hit |= w[o + 0x30] != 0 || w[o + 0x01] != 0; // +30 bumped, or +01 = 6 (the hit state)
+            w[o..o + SHOT_LEN].fill(0);
         }
-        let o = ix(SHOTS) + usize::from(k) * SHOT_LEN;
-        let w = game.wram_mut();
-        s.hit |= w[o + 0x30] != 0;
-        w[o..o + SHOT_LEN].fill(0);
     }
     game.coop.p1.saber = p1;
     game.coop.saber = p2;
@@ -197,14 +282,19 @@ mod tests {
 
     #[test]
     fn saber_swing_ground_and_air() {
-        let mut s = Saber { slot: 0xFF, ..Default::default() };
-        assert_eq!(update(&mut s, 0x00, 0x0100), 0x0100);
+        let blk = |a: u8| {
+            let mut b = [0u8; 0x90];
+            b[2] = a;
+            b
+        };
+        let mut s = Saber::default();
+        assert_eq!(update(&mut s, &blk(0x00), 0x0100), 0x0100);
         assert_eq!(frame(&s), None);
-        assert_eq!(update(&mut s, 0x04, BTN_X | 0x0100), 0); // starts, pad masked
+        assert_eq!(update(&mut s, &blk(0x04), BTN_X | 0x0100), 0); // starts, pad masked
         assert_eq!(frame(&s), Some(86));
         let mut seen = vec![86];
         for _ in 0..30 {
-            update(&mut s, 0x00, BTN_X); // held: no restart
+            update(&mut s, &blk(0x00), BTN_X); // held: no restart
             seen.extend(frame(&s));
         }
         // 4 + 4 + ARC_FRAMES + 4 + 4 poses
@@ -212,14 +302,14 @@ mod tests {
         assert_eq!(seen[8..8 + usize::from(ARC_FRAMES)], vec![88; usize::from(ARC_FRAMES)][..]);
         assert_eq!(s.t, 0);
         // Air: left/right pass.
-        update(&mut s, 0x08, 0);
-        assert_eq!(update(&mut s, 0x08, BTN_X | 0x0100 | 0x8000), 0x0100);
+        update(&mut s, &blk(0x08), 0);
+        assert_eq!(update(&mut s, &blk(0x08), BTN_X | 0x0100 | 0x8000), 0x0100);
         assert_eq!(frame(&s), Some(95));
         // Hurt cancels; walls don't start.
-        update(&mut s, 0x0E, 0);
+        update(&mut s, &blk(0x0E), 0);
         assert_eq!(s.t, 0);
-        update(&mut s, 0x12, 0);
-        update(&mut s, 0x12, BTN_X);
+        update(&mut s, &blk(0x12), 0);
+        update(&mut s, &blk(0x12), BTN_X);
         assert_eq!(s.t, 0);
     }
 
@@ -270,6 +360,69 @@ mod tests {
         assert_eq!(seen[25].1, 2, "alive before the arc: {seen:?}");
         assert!(seen[28..33].iter().any(|&(zf, hp)| zf == 88 && hp == 1), "{seen:?}");
         assert_eq!(g.wram()[0x0BDD], 0, "P1's shot count untouched");
+    }
+
+    #[test]
+    fn saber_wave_spawns_on_arc_and_flies() {
+        let mut blk = [0u8; 0x90];
+        blk[OFF_POS_X..OFF_POS_X + 2].copy_from_slice(&500u16.to_le_bytes());
+        blk[OFF_POS_Y..OFF_POS_Y + 2].copy_from_slice(&367u16.to_le_bytes());
+        blk[0x11] = 0x62; // facing right
+        let mut s = Saber::default();
+        update(&mut s, &blk, BTN_X);
+        let mut t = 1;
+        while s.wave.t == 0 {
+            update(&mut s, &blk, 0);
+            t += 1;
+        }
+        assert_eq!(frame(&s), Some(88), "spawns on the arc's first frame (swing frame {t})");
+        assert_eq!((s.wave.x, s.wave.y), (500, 367 - 8));
+        let shot = wave_shot_bytes(&s).unwrap();
+        assert_eq!(u16::from_le_bytes([shot[5], shot[6]]), 508); // spawn: 8 in front, 4x4 box
+        for _ in 0..4 {
+            update(&mut s, &blk, 0);
+        }
+        // t = 5 (step 4): 29 + 6 in front, box 15 further, 1 below the origin
+        let shot = wave_shot_bytes(&s).unwrap();
+        assert_eq!((u16::from_le_bytes([shot[5], shot[6]]), u16::from_le_bytes([shot[8], shot[9]])), (550, 360));
+        assert_eq!(u16::from_le_bytes([shot[0x20], shot[0x21]]), WAVE_BOX);
+        s.hit = true;
+        assert_eq!(wave_shot_bytes(&s), None, "one hit per swing");
+        for _ in 0..usize::from(WAVE_FRAMES) {
+            update(&mut s, &blk, 0);
+        }
+        assert_eq!(s.wave.t, 0);
+    }
+
+    /// hw-spiky: P2 swings where it stands, 88 px from the Spiky: the blade
+    /// cannot reach, the wave takes it 2 -> 1, once.
+    #[test]
+    fn saber_wave_hits_spiky_from_afar() {
+        let (Some(x1), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
+            eprintln!("MMX_ROM / MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/hw-spiky.state");
+        let Ok(state) = std::fs::read(st) else {
+            eprintln!("{st} missing; skipping");
+            return;
+        };
+        let mut g = crate::Game::from_rom(std::fs::read(x1).unwrap()).unwrap();
+        g.set_x3_rom(&std::fs::read(x3).unwrap()).unwrap();
+        g.load_state(&state).unwrap();
+        g.coop.enabled = true;
+        crate::coop::register_coop_traps(&mut g);
+        let hp = |g: &crate::Game| g.wram()[0x0E68 + 0x27] & 0x7F;
+        let mut seen = Vec::new();
+        for f in 1..=60 {
+            g.step(crate::Pads { p1: 0, p2: if f == 2 { BTN_X } else { 0 } });
+            let gap = u16::from_le_bytes([g.wram()[0x0E68 + 5], g.wram()[0x0E68 + 6]]) as i32
+                - i32::from(u16::from_le_bytes([g.coop.p2[OFF_POS_X], g.coop.p2[OFF_POS_X + 1]]));
+            seen.push((hp(&g), gap));
+        }
+        let hit = seen.iter().position(|&(hp, _)| hp == 1).expect("the wave hits");
+        assert!(seen[hit].1 > 60, "out of the blade's reach: {seen:?}");
+        assert!(seen[hit..].iter().all(|&(hp, _)| hp == 1), "one hit per swing: {seen:?}");
     }
 
     /// Single player, P1 as Zero (`hw-spiky`): walk right 26 frames, X at 28;

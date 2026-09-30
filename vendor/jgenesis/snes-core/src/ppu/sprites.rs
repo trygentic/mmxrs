@@ -306,7 +306,9 @@ impl Ppu {
             let oam_idx = self.sprites.scanned_oam_idxs[oam_buffer_idx as usize];
             // mmxrs patch: this sprite reads the P2 shadow page instead of VRAM
             let p2_page = (self.p2_tiles.0.slots >> oam_idx) & 1 != 0;
-            let p2_base = ((self.p2_tiles.0.page1 >> oam_idx) & 1) as usize * super::P2_PAGE_WORDS;
+            let p2_base = (((self.p2_tiles.0.page1 >> oam_idx) & 1)
+                | ((self.p2_tiles.0.page2 >> oam_idx) & 1) << 1) as usize
+                * super::P2_PAGE_WORDS;
 
             let oam_low_addr = usize::from(oam_idx) << 1;
             let [x_lsb, y] = self.oam_low[oam_low_addr].to_le_bytes();

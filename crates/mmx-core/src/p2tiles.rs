@@ -133,7 +133,7 @@ pub fn mark_p2_slots(game: &mut Game) {
             mask |= 1 << slot;
         }
     }
-    game.add_p2_tile_slots(mask, false);
+    game.add_p2_tile_slots(mask, 0);
 }
 
 #[cfg(test)]

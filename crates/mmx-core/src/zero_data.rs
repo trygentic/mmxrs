@@ -473,6 +473,9 @@ pub fn extract_x3_wave(rom: &[u8]) -> Result<WaveSet, String> {
     Ok(WaveSet { tiles, palette, frames })
 }
 
+/// A hit box `(x, y, half w, half h)`, x toward the facing.
+pub type HitBox = (i8, i8, u8, u8);
+
 /// The wave's flight, measured in X3 (`states/x3-zero-stand.state`, charge,
 /// release; docs/zero.md "The saber"): frame `t` (0 = spawn) -> `(dx, dy,
 /// frame, box)`, offsets from Zero's origin at the spawn (x toward his
@@ -480,7 +483,7 @@ pub fn extract_x3_wave(rom: &[u8]) -> Result<WaveSet, String> {
 /// the facing). On the ground it drops 3 px a frame to `+1`; in the air it
 /// keeps its height. From `t = 4` it moves 6 px a frame, frames 3, 4, 2, ...
 /// Pure.
-pub fn x3_wave_step(t: u8, air: bool) -> (i16, i16, usize, (i8, i8, u8, u8)) {
+pub fn x3_wave_step(t: u8, air: bool) -> (i16, i16, usize, HitBox) {
     let t = i16::from(t);
     let reach = if air { 27 } else { 29 };
     let dx = if t == 0 { 8 } else { reach + 6 * (t - 3).max(0) };
