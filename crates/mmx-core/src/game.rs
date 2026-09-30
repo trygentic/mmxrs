@@ -355,6 +355,13 @@ impl Game {
         self.emu.update_audio_output_frequency(hz.into());
     }
 
+    /// Frames per emulated second: 60.0988 NTSC, 50.007 PAL (the header's
+    /// region byte decides; roms/mega-man-x.smc is the PAL release). Wall-clock
+    /// pacers must use this, not a hard-coded 60.
+    pub fn fps(&self) -> f64 {
+        self.emu.target_fps()
+    }
+
     pub fn wram(&self) -> &[u8; 0x20000] {
         self.emu.wram()
     }

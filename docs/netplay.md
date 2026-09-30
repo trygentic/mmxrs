@@ -170,7 +170,7 @@ let mut s = RollbackSession::new(RollbackConfig::host(rom_crc32, trapset_id, fla
 let mut ring = StateRing::new(usize::from(cfg.max_prediction) + 2);
 let mut skip = 0;
 
-// every frontend tick (native: winit loop at 60 Hz; web: requestAnimationFrame)
+// every frontend tick (one per frame of audio the device plays, see tick_audio)
 if skip > 0 {
     skip -= 1;
     s.poll(now_ms);                        // network only
@@ -286,7 +286,12 @@ change was needed for this.
   start; the session game takes the set from the frontend's game), co-op flags
   `COOP_TWO_PLAYERS`, input delay. No WRAM is sent (MMX has no SRAM; both
   peers start from power-on).
-- `tick(game, pad, now_ms)` once per 60 Hz frontend tick: pumps the network;
+- `tick_audio(game, pad, now_ms)`: what the frontends call, while their audio
+  queue is below ~50 ms: `tick` plus exactly one frame of audio (the new
+  frame's, or silence when nothing stepped), so the device clock paces the
+  session at the ROM's own rate (`Game::fps`; the PAL ROM runs 50.007).
+  Without audio they call `tick` from a `Game::fps` timer.
+- `tick(game, pad, now_ms)` once per frontend tick: pumps the network;
   once live, **lockstep** latches the local pad and steps the next frame if
   both pads are known (one frame per tick, 0 while waiting; hashes every 60
   frames), **rollback** adds the local pad, advances, and runs the requests. Rollback save states

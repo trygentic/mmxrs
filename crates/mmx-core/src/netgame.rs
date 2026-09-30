@@ -376,6 +376,22 @@ impl<T: Transport> NetPlay<T> {
         }
     }
 
+    /// [`NetPlay::tick`] for a frontend whose audio device is the clock:
+    /// call it while the device queue is below target (a few per wake-up at
+    /// most). Returns the frames simulated and exactly one frame of audio:
+    /// the new frame's samples, or silence when the tick stepped nothing
+    /// (wait recommendation, lockstep stall), so each tick spends one frame
+    /// of device time and the queue can neither run away nor starve.
+    pub fn tick_audio(&mut self, game: &mut Game, pad: u16, now_ms: u64) -> (u32, Vec<(f32, f32)>) {
+        let n = self.tick(game, pad, now_ms);
+        let mut pcm = game.take_audio();
+        if pcm.is_empty() {
+            let hz = f64::from(self.audio_rate.unwrap_or(48_000));
+            pcm = vec![(0.0, 0.0); (hz / game.fps()).round() as usize];
+        }
+        (n, pcm)
+    }
+
     fn tick_rollback(&mut self, game: &mut Game, pad: u16, now_ms: u64) -> u32 {
         let live = self.live();
         let Engine::Rollback { session, ring, skip, .. } = &mut self.engine else {
@@ -1024,5 +1040,187 @@ mod tests {
         assert!(!h.started && !g.started);
         let both = format!("{} / {}", h.status(), g.status());
         assert!(both.contains("NetMode"), "{both}");
+    }
+
+    /// The frontend pacing rule (native app.rs, web app.js) against a fake
+    /// audio device per peer, 1 ms of virtual time per loopback tick, a
+    /// 300 ms RTT link with jitter and loss, 20-frame prediction window: top
+    /// the device queue up to 50 ms with `tick_audio`, at most 4 per 2 ms
+    /// wake-up. The queue never reaches the 200 ms cap (nothing dropped, so
+    /// nothing plays fast), the device hears its own rate, and the game runs
+    /// at `Game::fps` against the device clock.
+    fn audio_paced_pair(mode: Mode) {
+        const SECS: u64 = 10;
+        let rom = synthetic_rom();
+        let link_cfg = LoopbackConfig {
+            latency_ticks: 150,
+            jitter_ticks: 20,
+            loss_per_mille: 20,
+            connect_after_ticks: 50,
+        };
+        let (link, ta, tb) = loopback_pair(link_cfg, 11);
+        let mk = |host: bool, t, hz| {
+            let mut cfg = NetPlay::<mmx_net::LoopbackTransport>::config(
+                &rom,
+                host,
+                mode,
+                mode.default_delay(),
+                None,
+                false,
+            )
+            .unwrap();
+            if let NetConfig::Rollback(c) = &mut cfg {
+                c.max_prediction = 20;
+            }
+            let mut p = NetPlay::new(cfg, rom.clone(), t, "test").unwrap();
+            p.audio_rate = Some(hz);
+            p
+        };
+        struct Dev {
+            hz: u64,
+            queue: u64,
+            max: u64,
+            heard: u64,
+            starved: u64,
+        }
+        let mut peers = [
+            (
+                mk(true, ta, 44_100),
+                Dev {
+                    hz: 44_100,
+                    queue: 0,
+                    max: 0,
+                    heard: 0,
+                    starved: 0,
+                },
+            ),
+            (
+                mk(false, tb, 48_000),
+                Dev {
+                    hz: 48_000,
+                    queue: 0,
+                    max: 0,
+                    heard: 0,
+                    starved: 0,
+                },
+            ),
+        ];
+        let mut games = [
+            session_game(&rom, 0).unwrap(),
+            session_game(&rom, 0).unwrap(),
+        ];
+        let mut live_at = [None; 2];
+        for ms in 0..(SECS + 2) * 1000 {
+            link.advance(1);
+            for (i, ((net, dev), game)) in peers.iter_mut().zip(games.iter_mut()).enumerate() {
+                // the device drains hz/1000 per ms once the session plays
+                if live_at[i].is_some() {
+                    let want = dev.hz * (ms + 1) / 1000 - dev.hz * ms / 1000;
+                    let got = want.min(dev.queue);
+                    dev.queue -= got;
+                    dev.heard += got;
+                    dev.starved += want - got;
+                }
+                if ms % 2 != 0 {
+                    continue;
+                }
+                if !net.live() {
+                    net.tick(game, 0, ms);
+                    if net.live() {
+                        live_at[i] = Some((ms, net.frame()));
+                    }
+                    continue;
+                }
+                let target = dev.hz / 20;
+                let mut k = 0;
+                while k < 4 && dev.queue < target {
+                    let pad = ((net.frame() / 9).wrapping_mul(2_654_435_761) >> 11) as u16 & 0xFFF0;
+                    let (_, pcm) = net.tick_audio(game, pad, ms);
+                    dev.queue += pcm.len() as u64;
+                    dev.max = dev.max.max(dev.queue);
+                    k += 1;
+                }
+                assert!(net.last_error.is_none(), "{}", net.status());
+            }
+        }
+        for (((net, dev), game), live) in peers.iter().zip(&games).zip(live_at) {
+            let (t0, f0) = live.expect("session never started");
+            let secs = ((SECS + 2) * 1000 - t0) as f64 / 1000.0;
+            let fps = f64::from(net.frame() - f0) / secs;
+            eprintln!(
+                "{:?} {} Hz: queue max {} ms, heard {:.1} s of {secs:.1} s, starved {} ms, {fps:.2} fps (game {:.2}), {}",
+                mode,
+                dev.hz,
+                dev.max * 1000 / dev.hz,
+                dev.heard as f64 / dev.hz as f64,
+                dev.starved * 1000 / dev.hz,
+                game.fps(),
+                net.status()
+            );
+            assert!(
+                dev.max < dev.hz / 5,
+                "queue hit the 200 ms cap: {}",
+                dev.max
+            );
+            assert!(
+                dev.max <= dev.hz / 20 + dev.hz / 50,
+                "queue ran past target + a frame: {}",
+                dev.max
+            );
+            // every tick spends one frame of device time; skips are silence,
+            // so rollback frames lag the device by a few percent at most
+            // (lockstep at 300 ms RTT stalls most ticks: silence, not speed-up)
+            assert!(
+                mode == Mode::Lockstep || (fps / game.fps() - 1.0).abs() < 0.05,
+                "{fps} fps vs {}",
+                game.fps()
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_audio_paced_over_300ms_rtt() {
+        audio_paced_pair(Mode::Rollback);
+    }
+
+    #[test]
+    fn lockstep_audio_paced_over_300ms_rtt() {
+        audio_paced_pair(Mode::Lockstep);
+    }
+
+    /// Real ROM: one frame renders `rate / Game::fps` samples, so a pacer at
+    /// `Game::fps` feeds the device exactly its rate. roms/mega-man-x.smc is
+    /// the PAL release (region 0x02, 50.007 fps: 960 samples/frame at 48 kHz);
+    /// the old hard-coded 60.0988 Hz online timer fed 57.7 kHz into a 48 kHz
+    /// device, the 200 ms ring overflowed and dropped: fast music.
+    #[test]
+    fn rom_audio_per_frame_matches_fps() {
+        let Some(path) = std::env::var_os("MMX_ROM").filter(|p| !p.is_empty()) else {
+            return eprintln!("MMX_ROM not set; skipping");
+        };
+        let rom = std::fs::read(path).unwrap();
+        for hz in [44_100u32, 48_000] {
+            let mut g = session_game(&rom, 0).unwrap();
+            g.set_audio_rate(hz);
+            for _ in 0..60 {
+                g.step(Pads::default());
+            }
+            g.take_audio();
+            let mut n = 0;
+            for _ in 0..300 {
+                g.step(Pads::default());
+                n += g.take_audio().len();
+            }
+            let per_sec = n as f64 / 300.0 * g.fps();
+            eprintln!(
+                "{hz} Hz: {:.1} samples/frame at {:.3} fps = {per_sec:.0} Hz",
+                n as f64 / 300.0,
+                g.fps()
+            );
+            assert!(
+                (per_sec / f64::from(hz) - 1.0).abs() < 0.01,
+                "{per_sec} vs {hz}"
+            );
+        }
     }
 }
