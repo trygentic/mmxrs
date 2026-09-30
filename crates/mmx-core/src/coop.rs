@@ -204,6 +204,8 @@ pub struct CoopState {
     pub zero_frame: u16,
     /// P2's saber swing (X3 set only), see `saber.rs`.
     pub saber: crate::saber::Saber,
+    /// Player 1 as Zero (`Game::set_p1_zero`), independent of `enabled`.
+    pub p1: crate::zero::ZeroP1,
     /// Down spot and revive progress (coop_hud.rs).
     pub revive: crate::coop_hud::Revive,
 }
@@ -227,6 +229,7 @@ impl Default for CoopState {
             p2_shots: 0,
             zero_frame: u16::MAX,
             saber: crate::saber::Saber { slot: 0xFF, ..Default::default() },
+            p1: Default::default(),
             revive: Default::default(),
         }
     }
@@ -453,11 +456,11 @@ fn shot_books(game: &mut Game) {
 /// B1; left behind by a vertical scroll, B2). The horizontal clamp is in the
 /// display slice, against the camera the ROM scrolled to this frame.
 fn p2_physics(game: &mut Game) {
+    crate::saber::take_back(game); // both players' swings
     if !game.coop.enabled {
         return;
     }
     shot_books(game);
-    crate::saber::take_back(game);
     if game.coop.p2_hidden || p2_is_down(&game.coop.p2) {
         return;
     }
@@ -572,7 +575,7 @@ fn p2_display(game: &mut Game) {
     let zero = game.zero_set.clone();
     let fx = &game.coop.p2_scratch[P2_SWAPPED_LEN - 0x60..];
     let need = match &zero {
-        Some(z) => crate::zero::x3_frame(&game.coop).map_or(0, |f| z.frames[f].sprites.len()),
+        Some(z) => crate::zero::x3_frame(&game.coop.p2, &game.coop.saber).map_or(0, |f| z.frames[f].sprites.len()),
         None => {
             layout_len(game, &game.coop.p2)
                 + (0..3).map(|k| &fx[k * 0x20..k * 0x20 + 0x20]).filter(|o| o[0] != 0).map(|o| layout_len(game, o)).sum::<usize>()
@@ -592,7 +595,7 @@ fn p2_display(game: &mut Game) {
         game.coop.p2_oam_base = usize::from(base);
         game.coop.p2_oam_count = usize::from(last - base);
         let mask = (u128::from(first)..u128::from(last)).fold(0u128, |m, s| m | 1 << s);
-        game.set_p2_tile_slots(mask);
+        game.add_p2_tile_slots(mask, false);
         return;
     }
     let w = game.wram_mut();

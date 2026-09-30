@@ -143,6 +143,12 @@ impl Emu {
         self.game.set_x3_rom(rom).map_err(|e| JsValue::from_str(&e))
     }
 
+    /// Player 1 plays as Zero (needs [`Emu::set_x3_rom`] first). Before a
+    /// netplay connect: both peers must agree.
+    pub fn set_p1_zero(&mut self, on: bool) -> Result<(), JsValue> {
+        self.game.set_p1_zero(on).map_err(|e| JsValue::from_str(&e))
+    }
+
     pub fn set_coop(&mut self, on: bool) {
         self.game.coop.enabled = on;
         if on && !self.game.traps.is_trapped(mmx_core::coop::PLAYER_OAM) {

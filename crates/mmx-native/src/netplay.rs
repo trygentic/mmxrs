@@ -35,8 +35,9 @@ pub fn connect(
     mode: Mode,
     delay: u8,
     x3: Option<&mmx_core::zero_data::ZeroSet>,
+    zero: bool,
 ) -> Result<Net, String> {
-    let cfg = NetPlay::<NetTransport>::config(rom, host, mode, delay, x3)?;
+    let cfg = NetPlay::<NetTransport>::config(rom, host, mode, delay, x3, zero)?;
     let url = mmx_net::room_url(signal, room).map_err(|e| e.to_string())?;
     let ice = ice
         .map(mmx_net::IceConfig::parse)
@@ -140,7 +141,7 @@ mod tests {
             Mode::Rollback => 0,
             Mode::Lockstep => mode.default_delay(),
         };
-        let mk = |host| connect(rom, host, room, &url, Some("none"), mode, delay, None).expect("connect");
+        let mk = |host| connect(rom, host, room, &url, Some("none"), mode, delay, None, false).expect("connect");
         let mut peers = [
             (mk(true), session_game(rom, 0).unwrap(), 0x1111u32),
             (mk(false), session_game(rom, 0).unwrap(), 0x7777u32),

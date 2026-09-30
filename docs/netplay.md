@@ -267,10 +267,10 @@ reads `closed (mismatch: NetMode)` on the side that noticed (the other side
 may show `mismatch: Proto`). Within a mode the host's delay wins. No protocol
 change was needed for this.
 
-- `NetPlay::config(rom, host, mode, delay, x3)` builds the Hello: ROM CRC32
+- `NetPlay::config(rom, host, mode, delay, x3, p1_zero)` builds the Hello: ROM CRC32
   (`rom_info().crc32`), trap-set id (FNV over the sorted trap addresses of a
   session game, co-op traps included, plus a revision constant and a byte
-  "X3 Zero set loaded": peers where only one loaded the X3 ROM refuse to
+  "X3 Zero set loaded" and a byte "P1 plays as Zero" (`--zero`): peers where only one loaded the X3 ROM refuse to
   start; the session game takes the set from the frontend's game), co-op flags
   `COOP_TWO_PLAYERS`, input delay. No WRAM is sent (MMX has no SRAM; both
   peers start from power-on).

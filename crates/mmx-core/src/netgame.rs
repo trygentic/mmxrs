@@ -20,7 +20,7 @@ use crate::{coop, Game, Pads, RomError};
 
 /// Bump when anything that changes simulation between two builds changes
 /// outside the trap addresses (mixed into [`trapset_id`]).
-const NET_REVISION: u64 = 1;
+const NET_REVISION: u64 = 2;
 
 /// Rollback save state: `u32` LE length of the encoded [`coop::CoopState`],
 /// that encoding, then [`Game::save_state`].
@@ -55,14 +55,14 @@ pub fn net_checksum(game: &Game) -> u64 {
 }
 
 /// Handshake trap-set id: FNV over the sorted trap addresses,
-/// [`NET_REVISION`] and whether the X3 Zero set is loaded (`Game::set_zero_set`:
-/// it changes P2's OAM, so both peers must agree). Peers with different ids
-/// refuse to start.
+/// [`NET_REVISION`], whether the X3 Zero set is loaded (`Game::set_zero_set`:
+/// it changes P2's OAM, so both peers must agree) and whether P1 plays as
+/// Zero (`Game::set_p1_zero`). Peers with different ids refuse to start.
 pub fn trapset_id(game: &Game) -> u64 {
     let mut addrs: Vec<u32> = game.traps.addrs().collect();
     addrs.sort_unstable();
     let bytes: Vec<u8> = addrs.iter().flat_map(|a| a.to_le_bytes()).collect();
-    hash_state(&[&NET_REVISION.to_le_bytes(), &bytes, &[u8::from(game.zero_set().is_some())]])
+    hash_state(&[&NET_REVISION.to_le_bytes(), &bytes, &[u8::from(game.zero_set().is_some()), u8::from(game.p1_zero())]])
 }
 
 /// The game a session plays: power-on, co-op traps registered, co-op on when
@@ -210,7 +210,7 @@ pub struct NetPlay<T: Transport> {
 
 impl<T: Transport> NetPlay<T> {
     /// Handshake config for `rom`: ROM CRC32, trap-set id of a session game
-    /// (with the X3 Zero set when `x3`), `COOP_TWO_PLAYERS`, input delay
+    /// (with the X3 Zero set when `x3`, P1 as Zero when `p1_zero`), `COOP_TWO_PLAYERS`, input delay
     /// `delay` (host's wins; range per [`Mode::max_delay`]). The session game
     /// takes the set from the frontend's game on start, so load it before
     /// connecting.
@@ -220,12 +220,14 @@ impl<T: Transport> NetPlay<T> {
         mode: Mode,
         delay: u8,
         x3: Option<&ZeroSet>,
+        p1_zero: bool,
     ) -> Result<NetConfig, String> {
         if delay > mode.max_delay() {
             return Err(format!("{} input delay must be 0-{}", mode.name(), mode.max_delay()));
         }
         let mut g = session_game(rom, COOP_TWO_PLAYERS).map_err(|e| e.to_string())?;
         g.set_zero_set(x3.cloned());
+        g.set_p1_zero(p1_zero)?;
         let (crc, traps) = (g.rom_info().crc32, trapset_id(&g));
         Ok(match mode {
             Mode::Rollback => {
@@ -560,6 +562,7 @@ fn start_game(
     }
     // Static art, part of the handshake id (see `NetPlay::config`).
     g.zero_set = game.zero_set.clone();
+    g.set_p1_zero(game.p1_zero())?;
     *game = g;
     Ok(())
 }
@@ -644,7 +647,7 @@ mod tests {
         let rom = synthetic_rom();
         let (link, ta, tb) = loopback_pair(LoopbackConfig::default(), 1);
         let mk = |host: bool, t| {
-            let cfg = NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Rollback, 0, None);
+            let cfg = NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Rollback, 0, None, false);
             let Ok(NetConfig::Rollback(cfg)) = cfg else { panic!("{cfg:?}") };
             RollbackSession::new(cfg, t).unwrap()
         };
@@ -912,7 +915,7 @@ mod tests {
         let (link, ta, tb) = loopback_pair(link_cfg, 7);
         let mk = |host: bool, t| {
             let mut cfg =
-                NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Rollback, 0, None).unwrap();
+                NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Rollback, 0, None, false).unwrap();
             cfg.set_check_interval(10);
             NetPlay::new(cfg, rom.clone(), t, "test").unwrap()
         };
@@ -958,7 +961,7 @@ mod tests {
         let (link, ta, tb) = loopback_pair(link_cfg, 7);
         let mk = |host: bool, t| {
             let mut cfg =
-                NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Lockstep, DELAY, None).unwrap();
+                NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, Mode::Lockstep, DELAY, None, false).unwrap();
             cfg.set_check_interval(10);
             NetPlay::new(cfg, rom.clone(), t, "test").unwrap()
         };
@@ -1008,7 +1011,7 @@ mod tests {
     fn mode_mismatch_refuses_to_start() {
         let rom = synthetic_rom();
         let (link, ta, tb) = loopback_pair(LoopbackConfig::default(), 3);
-        let cfg = |host, mode| NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, mode, 2, None).unwrap();
+        let cfg = |host, mode| NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, mode, 2, None, false).unwrap();
         let mut h = NetPlay::new(cfg(true, Mode::Rollback), rom.clone(), ta, "t").unwrap();
         let mut g = NetPlay::new(cfg(false, Mode::Lockstep), rom.clone(), tb, "t").unwrap();
         let (mut gh, mut gg) = (session_game(&rom, 0).unwrap(), session_game(&rom, 0).unwrap());

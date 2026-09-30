@@ -134,10 +134,13 @@ Code: `crates/mmx-core/src/p2tiles.rs`, PPU patch in
   `verify --coop-off` parity run stays identical).
 - **Save state.** The page is inside the PPU, so `to_save_state` clones it.
   Its bincode encoding inside `SnesEmulator` is empty (`P2TilesSlot`), and
-  `Game::save_state` appends the marker `P2T2` and the `P2Tiles` after
+  `Game::save_state` appends the marker `P2T3` and the `P2Tiles` after
   `(emu, frame_count, fired_at)`. States written before the patch (no tail)
   or with the old 512-word page (tail without the marker) load with an empty
-  page. Netplay rollback states wrap
+  page; `P2T2` states (one 768-word page) load it as page 0.
+- **Two pages.** `page` holds two 768-word pages back to back; a slot also
+  set in `page1: u128` reads the second (`Game::add_p2_tile_slots(mask,
+  page1)`). Page 0 is P2's, page 1 a Zero P1's ("Playing as Zero"). Netplay rollback states wrap
   `Game::save_state`, so they carry the page.
 - **Filling the page.** P2 keeps X's `+$18` (anchor copies X's block and only
   sets `+$17 |= $80` to force a reload), so the emitter writes X's tile numbers
@@ -615,3 +618,58 @@ dash, wall, hurt, beam-in, ...) instead of X's tiles in Zero's colours, and
 P2's X swings the saber (above). Physics, HP, hit boxes and the buster are
 X's. Netplay: both peers must load it; the handshake id includes "X3 loaded",
 so a mismatch refuses to start (docs/netplay.md).
+
+### Player 1 as Zero (`--zero`)
+
+Code: `zero::ZeroP1` (in `CoopState`, so rollback carries it), `Game::set_p1_zero`,
+the traps in `zero::register_zero_traps`. Needs the X3 set (`set_p1_zero(true)`
+errors without it); registers the co-op trap group, whose P2 hooks stay idle
+while co-op is off. Works alone, in local co-op and online (both peers pass
+`--zero`; the handshake id has a "P1 is Zero" byte). A game without `--zero`
+is unchanged (`verify --coop-off` identical, `coop-qa.sh check` idle parity
+yes at every milestone).
+
+- **Drawing.** The OAM build calls the armour-part emitter `$80:D640` and
+  the player emitter `$80:D671` by `JSR`. Both get an `Observe` trap that,
+  outside `call_isolated` (P2's own calls still run), returns for the ROM
+  (`RTS` by hand): `D640` draws nothing (no armour overlays on Zero), `D671`
+  runs `zero::emit_p1`, which writes P1's X3 frame the way the ROM emitter
+  writes X: entries at the build cursor `$E4`, 2 high bits per slot shifted
+  into `$E6` and stored at `$0900 + $E5` every 4 slots (the build's tail
+  flushes a partial byte, the hide loop and `$E3` see the slots as the
+  game's). So P1 keeps X's place in the sprite order (in front of the
+  Highway cars, as X is) and is drawn on paused frames too. Frame from P1's
+  live block (`+02`/`+17`, saber pose first), nothing while `+0E = 0` (the
+  i-frame blink), origin and flips as for P2 (`X3_Y_OFFSET`), attr = `+11 &
+  $3E` (X's priority and palette). Tiles: shadow page 1, refilled when the
+  frame changes (`ZeroP1::frame`). Stops short of slot 127 (the ROM's
+  overflow exit is left to the lists after it).
+- **Palette.** The OAM build hook writes Zero's palette over X's sprite
+  palette 1 in the `$0300` mirror every frame (only when it changed), so
+  stage loads and weapon swaps are repaired the same frame. Weapon colours
+  and X's charge flash do not show on Zero; the charge sparkles and dash
+  dust (other objects) do.
+- **Saber.** An `Observe` trap on the input remapper `$80:E518` (outside
+  `call_isolated`, i.e. P1's call) runs `saber::update` on pad 1 and writes
+  the result back to `$A7` (held) and `$AB` (pressed): X starts a swing,
+  during one the pad is masked as for P2 (Start/Select pass). Damage: the
+  `$80:D1FF` shot and the physics hook's take-back handle both swings (each
+  `Saber` has its own slot). The buster stays on Y.
+
+Controls:
+
+| | move | jump | dash | buster | saber |
+|---|---|---|---|---|---|
+| P1 keyboard | arrows | Z | C | X | V |
+| P2 keyboard | WASD | G | H | F | T |
+| pad | d-pad | B (South) | A (East) | Y (West) | X (North) |
+
+Checked on the real ROMs (PNG strips in `target/z1/`, `x` = `xtask dump --x3 PATH`):
+
+```
+x --load states/highway-start.state --frames 130 --out target/z1/walk --at 10,40,58,96,110,120 --hold 0100 --p1tap 8000@90:20 --zero   # stand, walk, jump, fall; in front of the truck
+x --load states/highway-start.state --frames 120 --out target/z1/act --at 44,48,62,66,100,118 --poke 7E1F99=08@1-120 --p1tap 0080@38:12,4000@60:1,4000@70:48 --zero   # dash, buster from the cannon, charge
+x --load states/hw-c.state --frames 440 --out target/z1/wall --at 320-440/8 --hold 0100 --p1tap "$T" --refill --zero   # T = coop-qa's m5 route: wall slide 39/40, kick 43
+x --load states/hw-spiky.state --frames 50 --out target/z1/saber26 --at 24-50/2 --p1tap 0100@1:26,0040@28:2 --zero   # arc (88) takes the Spiky 2 -> 1 (test saber_p1_hits_spiky)
+x --load states/highway-start.state --frames 130 --out target/z1/coop --at 30,60,100,120 --hold 0100 --p2-hold 0100 --p2tap 8000@90:20,0040@112:2 --p1tap 0040@50:2 --coop --zero   # both Zeros, both sabers
+```

@@ -225,6 +225,10 @@ fn dump(args: &[String]) -> i32 {
             g.traps.set_untrapped(u32::from_str_radix(a.trim_start_matches('$'), 16).unwrap_or_else(|_| die("--untrap")), true);
         }
     }
+    // `--zero`: P1 plays as X3 Zero (needs `--x3` / MMX_X3_ROM).
+    if args.iter().any(|a| a == "--zero") {
+        g.set_p1_zero(true).unwrap_or_else(|e| die(&format!("--zero: {e}")));
+    }
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("{}: {e}", out.display())));
     let refill = args.iter().any(|a| a == "--refill");
     // `--poke ADDR=VAL@A[-B],..`: write WRAM byte ADDR (hex, e.g. 7E1FAE) before frames A..=B.
@@ -286,6 +290,10 @@ fn dump(args: &[String]) -> i32 {
                 w16(ram::X_POS_X), w16(ram::X_POS_Y), b(ram::X_ACTION), w16(ram::X_VEL_Y) as i16, b(ram::X_HP) & 0x7F, b(ram::LIVES), w16(ram::CAMERA_X), w16(ram::CAMERA_Y), b(ram::PAUSE), w16(ram::PAD1_HELD), b(ram::X_INPUT_HELD), b(ram::X_INPUT_HELD + 1), g.coop.p2_hidden,
                 g.traplog.last().map(|t| (t.name, t.frame))
             );
+            if g.p1_zero() {
+                let e = |k: usize| w[ram::wram_index(ram::ENEMIES_BASE) + k * ram::ENEMY_STRIDE + ram::ENEMY_HP] & 0x7F;
+                println!("    P1 zero zf {} saber t {} hit {} enemy hp {:?}", g.coop.p1.frame as i16, g.coop.p1.saber.t, g.coop.p1.saber.hit, (0..4).map(e).collect::<Vec<_>>());
+            }
             if g.coop.enabled {
                 let p2 = &g.coop.p2;
                 let p16 = |o: usize| u16::from_le_bytes([p2[o], p2[o + 1]]);

@@ -115,7 +115,7 @@ pub fn fill_page(game: &mut Game, o: usize, bytes: &[u8]) {
 
 /// OAM build start (`$80:D544`): no P2 slots until the display slice says so.
 pub fn clear_slots(game: &mut Game) {
-    if game.coop.enabled {
+    if game.coop.enabled || game.coop.p1.on {
         game.set_p2_tile_slots(0);
     }
 }
@@ -133,7 +133,7 @@ pub fn mark_p2_slots(game: &mut Game) {
             mask |= 1 << slot;
         }
     }
-    game.set_p2_tile_slots(mask);
+    game.add_p2_tile_slots(mask, false);
 }
 
 #[cfg(test)]

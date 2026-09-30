@@ -359,18 +359,24 @@ pub struct Ppu {
 /// row, tiles `$30-$3F`, wraps to row 0: `P2_PAGE_TILES` modulo).
 pub const P2_PAGE_WORDS: usize = 768;
 pub const P2_PAGE_TILES: u16 = 48;
+/// Two pages back to back: page 1 is for slots also set in `page1` (a second
+/// Zero, mmx-core's P1).
+pub const P2_PAGES: usize = 2;
 
 /// A sprite whose OAM slot bit is set in `slots` reads its tiles from `page`
 /// (index `(tile_number & 0x3F) % 48`) instead of VRAM. The host writes `next_*`;
 /// they go live on the next OAMDATA write (the game's OAM upload), so the page
-/// and mask switch together with the OAM they describe.
+/// and mask switch together with the OAM they describe. A slot also set in
+/// `page1` reads the second page.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct P2Tiles {
-    pub page: Box<[u16; P2_PAGE_WORDS]>,
+    pub page: Box<[u16; P2_PAGE_WORDS * P2_PAGES]>,
     pub slots: u128,
-    pub next_page: Box<[u16; P2_PAGE_WORDS]>,
+    pub next_page: Box<[u16; P2_PAGE_WORDS * P2_PAGES]>,
     pub next_slots: u128,
     pub pending: bool,
+    pub page1: u128,
+    pub next_page1: u128,
 }
 
 impl Default for P2Tiles {
@@ -382,17 +388,20 @@ impl Default for P2Tiles {
 impl P2Tiles {
     pub fn new() -> Self {
         Self {
-            page: Box::new([0; P2_PAGE_WORDS]),
+            page: Box::new([0; P2_PAGE_WORDS * P2_PAGES]),
             slots: 0,
-            next_page: Box::new([0; P2_PAGE_WORDS]),
+            next_page: Box::new([0; P2_PAGE_WORDS * P2_PAGES]),
             next_slots: 0,
             pending: false,
+            page1: 0,
+            next_page1: 0,
         }
     }
 
     fn latch(&mut self) {
         self.page.copy_from_slice(self.next_page.as_ref());
         self.slots = self.next_slots;
+        self.page1 = self.next_page1;
         self.pending = false;
     }
 }
@@ -1576,13 +1585,14 @@ impl Ppu {
     }
 
     // mmxrs patch: P2 shadow tile page (pending copy; goes live on the next OAM upload)
-    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; P2_PAGE_WORDS] {
+    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; P2_PAGE_WORDS * P2_PAGES] {
         self.p2_tiles.0.pending = true;
         &mut self.p2_tiles.0.next_page
     }
 
-    pub fn set_p2_tile_slots(&mut self, mask: u128) {
+    pub fn set_p2_tile_slots(&mut self, mask: u128, page1: u128) {
         self.p2_tiles.0.next_slots = mask;
+        self.p2_tiles.0.next_page1 = page1;
         self.p2_tiles.0.pending = true;
     }
 

@@ -146,33 +146,49 @@ pub fn shot_bytes(p2: &[u8], air: bool) -> [u8; SHOT_LEN] {
     s
 }
 
-/// [`HOOK_SHOTS_DONE`]: put the arc's shot into a free slot for the enemy loop.
+/// [`HOOK_SHOTS_DONE`]: put each swing's arc shot (a Zero P1's, P2's) into
+/// a free slot for the enemy loop.
 pub fn shots_done(game: &mut Game) {
-    let c = &game.coop;
-    if !c.enabled || c.p2_hidden || game.zero_set.is_none() || !arc(&c.saber) {
+    if game.zero_set.is_none() {
         return;
     }
-    let shot = shot_bytes(&c.p2, c.saber.air);
-    let w = game.wram_mut();
-    let Some(k) = (0..8).find(|&k| w[ix(SHOTS) + k * SHOT_LEN] == 0) else { return };
-    w[ix(SHOTS) + k * SHOT_LEN..][..SHOT_LEN].copy_from_slice(&shot);
-    game.coop.saber.slot = k as u8;
+    if game.coop.p1.on && arc(&game.coop.p1.saber) {
+        let b = ix(crate::ram::X_BASE);
+        let shot = shot_bytes(&game.wram()[b..b + crate::ram::X_BLOCK_LEN], game.coop.p1.saber.air);
+        game.coop.p1.saber.slot = put_shot(game, &shot);
+    }
+    let c = &game.coop;
+    if c.enabled && !c.p2_hidden && arc(&c.saber) {
+        let shot = shot_bytes(&c.p2, c.saber.air);
+        game.coop.saber.slot = put_shot(game, &shot);
+    }
 }
 
-/// Physics hook (after the enemy loop): take the shot back out; a hit
+/// Into the first free slot; the slot, or `0xFF` when the table is full.
+fn put_shot(game: &mut Game, shot: &[u8; SHOT_LEN]) -> u8 {
+    let w = game.wram_mut();
+    let Some(k) = (0..8).find(|&k| w[ix(SHOTS) + k * SHOT_LEN] == 0) else { return 0xFF };
+    w[ix(SHOTS) + k * SHOT_LEN..][..SHOT_LEN].copy_from_slice(shot);
+    k as u8
+}
+
+/// Physics hook (after the enemy loop): take the shots back out; a hit
 /// (`+30` bumped by `$84:9E15`) ends the swing's damage.
 pub fn take_back(game: &mut Game) {
-    let k = game.coop.saber.slot;
-    if k == 0xFF {
-        return;
+    let mut p1 = game.coop.p1.saber;
+    let mut p2 = game.coop.saber;
+    for s in [&mut p1, &mut p2] {
+        let k = std::mem::replace(&mut s.slot, 0xFF);
+        if k == 0xFF {
+            continue;
+        }
+        let o = ix(SHOTS) + usize::from(k) * SHOT_LEN;
+        let w = game.wram_mut();
+        s.hit |= w[o + 0x30] != 0;
+        w[o..o + SHOT_LEN].fill(0);
     }
-    game.coop.saber.slot = 0xFF;
-    let o = ix(SHOTS) + usize::from(k) * SHOT_LEN;
-    let w = game.wram_mut();
-    if w[o + 0x30] != 0 {
-        game.coop.saber.hit = true;
-    }
-    game.wram_mut()[o..o + SHOT_LEN].fill(0);
+    game.coop.p1.saber = p1;
+    game.coop.saber = p2;
 }
 
 #[cfg(test)]
@@ -256,6 +272,40 @@ mod tests {
         assert_eq!(g.wram()[0x0BDD], 0, "P1's shot count untouched");
     }
 
+    /// Single player, P1 as Zero (`hw-spiky`): walk right 26 frames, X at 28;
+    /// the Spiky loses 1 HP on the arc pose, P1's buster count stays 0.
+    #[test]
+    fn saber_p1_hits_spiky() {
+        let (Some(x1), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
+            eprintln!("MMX_ROM / MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/hw-spiky.state");
+        let Ok(state) = std::fs::read(st) else {
+            eprintln!("{st} missing; skipping");
+            return;
+        };
+        let mut g = crate::Game::from_rom(std::fs::read(x1).unwrap()).unwrap();
+        assert!(g.set_p1_zero(true).is_err(), "needs the X3 set");
+        g.set_x3_rom(&std::fs::read(x3).unwrap()).unwrap();
+        g.load_state(&state).unwrap();
+        g.set_p1_zero(true).unwrap();
+        let hp = |g: &crate::Game| g.wram()[0x0E68 + 0x27] & 0x7F;
+        let mut seen = Vec::new();
+        for f in 1..=44 {
+            let p1 = match f {
+                ..=26 => BTN_RIGHT,
+                28 | 29 => BTN_X,
+                _ => 0,
+            };
+            g.step(crate::Pads { p1, p2: 0 });
+            seen.push((g.coop.p1.frame, hp(&g)));
+        }
+        assert_eq!(seen[30].1, 2, "alive before the arc: {seen:?}");
+        assert!(seen[31..44].iter().any(|&(zf, hp)| zf == 88 && hp == 1), "{seen:?}");
+        assert_eq!(g.wram()[0x0BDD], 0);
+    }
+
     /// Netplay: a 2-frame rollback every frame through the swing draws the
     /// same pictures as the straight run (page, mask and `zero_frame` travel
     /// together in `net_save`).
@@ -276,9 +326,13 @@ mod tests {
             g.load_state(&state).unwrap();
             g.coop.enabled = true;
             crate::coop::register_coop_traps(&mut g);
+            g.set_p1_zero(true).unwrap(); // both Zeros: shadow pages 0 and 1
             g
         };
-        let pad = |f: usize| crate::Pads { p1: 0, p2: if f <= 20 { BTN_RIGHT } else if f == 22 { BTN_X } else { 0 } };
+        let pad = |f: usize| crate::Pads {
+            p1: if f == 12 { BTN_X } else { 0 },
+            p2: if f <= 20 { BTN_RIGHT } else if f == 22 { BTN_X } else { 0 },
+        };
         let (mut a, mut b) = (new(), new());
         let mut saves = Vec::new();
         for f in 1..=40 {
