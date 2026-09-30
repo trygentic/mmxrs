@@ -43,11 +43,11 @@
 //!         s.update(t, now_ms); // receive, timers, send
 //!         for _ in 0..2 {
 //!             // frame budget for this tick
-//!             s.latch_local(0); // this tick's local pad
+//!             s.latch_local(0); // this tick's local pad (u16, SNES layout)
 //!             let Some((frame, pad1, pad2)) = s.poll() else { break };
 //!             // game.step2(pad1, pad2);
 //!             if s.needs_hash(frame) {
-//!                 s.report_hash(frame, mmx_net::hash_state(&[&[pad1, pad2]]));
+//!                 s.report_hash(frame, mmx_net::hash_state(&[&pad1.to_le_bytes(), &pad2.to_le_bytes()]));
 //!             }
 //!             stepped += 1;
 //!         }
@@ -91,7 +91,7 @@ pub use transport::{Channel, ConnectStage, LinkState, Transport, TransportError}
 pub use wire::{ByeReason, DecodeError, Hello, Message, Role, Start};
 
 /// Envelope version: first byte of every packet. Bumped on any layout change.
-pub const WIRE_VERSION: u8 = 1;
+pub const WIRE_VERSION: u8 = 2;
 /// Protocol (semantics) version carried in [`Hello`].
 pub const PROTO_VERSION: u16 = 1;
 /// Default input delay in frames.
@@ -103,6 +103,8 @@ pub const DEFAULT_HASH_INTERVAL: u16 = 60;
 /// Most pads carried by one Input packet (oldest unacknowledged first).
 pub const MAX_BATCH: usize = 32;
 /// Size of the battery-backed WRAM snapshot the host may send in [`Start`].
+/// NES leftover: MMX has no SRAM and `mmx_core::netgame` never sends one, so
+/// every Start carries 0 bytes; kept because it threads through configs/events.
 pub const WRAM_LEN: usize = 0x2000;
 /// Largest valid packet: a Start carrying a full WRAM snapshot (8207 bytes).
 pub const MAX_PACKET_LEN: usize = wire::START_HEADER_LEN + WRAM_LEN;

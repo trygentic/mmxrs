@@ -21,14 +21,18 @@ Crates:
 
 ## Protocol
 
-Every packet is `[WIRE_VERSION=1, tag, payload]`, little-endian, exact length
-(trailing bytes are rejected). Largest packet: 8207 bytes (Start with WRAM).
+Every packet is `[WIRE_VERSION=2, tag, payload]`, little-endian, exact length
+(trailing bytes are rejected); a peer with another version is refused at the
+handshake. Pads are `u16` in the `mmx_core::Pads` layout (all twelve buttons).
+Largest packet: 8207 bytes (Start with WRAM; MMX always sends 0 WRAM bytes, so
+in practice it is a full Input batch, 75 bytes). The WRAM field is a NES
+leftover kept only because it threads through the configs and events.
 
 | tag  | message | channel    | contents |
 |------|---------|------------|----------|
 | 0x01 | Hello   | reliable   | proto, role, rom_crc32, trapset_id, coop_flags, delay, hash_interval |
 | 0x02 | Start   | reliable   | host to guest: frame 0, effective delay / coop_flags / hash_interval, host WRAM (0 or 8192 bytes) |
-| 0x10 | Input   | unreliable (+reliable fallback) | ack, first frame, 0..32 pads |
+| 0x10 | Input   | unreliable (+reliable fallback) | ack, first frame, 0..32 pads (u16 LE each) |
 | 0x20 | Hash    | reliable   | frame, FNV-1a 64 |
 | 0x30/0x31 | Ping/Pong | unreliable | token (RTT) |
 | 0x32 | Status  | unreliable | rollback only: frame, lead (time sync) |
@@ -250,10 +254,8 @@ Both frontends run **rollback** (no lockstep option yet) through one driver,
   dropped. On `Running` it replaces the game with a power-on game with the
   co-op traps registered and `coop.enabled` set from the flags.
 - `status()` is the one-line status both frontends show.
-- **Wire pad**: `mmx-net` carries one byte per pad, so only B, Y, A, Start and
-  the d-pad travel (`netgame::WIRE_BUTTONS`). X, L, R and Select are dropped
-  online; pick weapons from the Start menu. Widening `mmx-net`'s pads to
-  `u16` lifts this.
+- **Wire pad**: the full SNES `u16` pad travels as-is (X, L, R and Select
+  included).
 
 Host = player 1, guest = player 2; each peer plays with its own P1 keys / first
 gamepad. Pause, fast-forward, frame-step and save states are disabled while a

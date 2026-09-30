@@ -4,7 +4,7 @@
 //! |------|---------|---------------------------------------------------------------------------|-------|
 //! | 0x01 | Hello   | proto u16, role u8, rom_crc32 u32, trapset_id u64, coop_flags u32, delay u8, hash_interval u16 | 24 |
 //! | 0x02 | Start   | frame u32, delay u8, coop_flags u32, hash_interval u16, wram_len u16 (0 or 8192), wram | 15 + wram_len |
-//! | 0x10 | Input   | ack u32, first u32, count u8 (0..=32), pads[count]                         | 11 + count |
+//! | 0x10 | Input   | ack u32, first u32, count u8 (0..=32), pads u16[count]                     | 11 + 2*count |
 //! | 0x20 | Hash    | frame u32, hash u64                                                        | 14 |
 //! | 0x30 | Ping    | token u32                                                                  | 6 |
 //! | 0x31 | Pong    | token u32                                                                  | 6 |
@@ -40,7 +40,7 @@ pub const TAG_BYE: u8 = 0x40;
 pub const HELLO_LEN: usize = 24;
 /// Encoded Start length without the WRAM bytes.
 pub const START_HEADER_LEN: usize = 15;
-/// Encoded Input length without the pads.
+/// Encoded Input length without the pads (2 bytes each).
 pub const INPUT_HEADER_LEN: usize = 11;
 /// Encoded Hash length.
 pub const HASH_LEN: usize = 14;
@@ -190,8 +190,8 @@ pub enum Message {
         ack: u32,
         /// Frame of `pads[0]`.
         first: u32,
-        /// 0..=[`MAX_BATCH`] consecutive pads.
-        pads: Vec<u8>,
+        /// 0..=[`MAX_BATCH`] consecutive pads (SNES layout, `mmx_core::Pads`).
+        pads: Vec<u16>,
     },
     /// State hash after stepping `frame`.
     Hash {
@@ -309,7 +309,9 @@ impl Message {
                 o.extend_from_slice(&first.to_le_bytes());
                 let n = pads.len().min(MAX_BATCH);
                 o.push(n as u8);
-                o.extend_from_slice(&pads[..n]);
+                pads[..n]
+                    .iter()
+                    .for_each(|p| o.extend_from_slice(&p.to_le_bytes()));
             }
             Message::Hash { frame, hash } => {
                 o.push(TAG_HASH);
@@ -389,7 +391,7 @@ impl Message {
                 if usize::from(count) > MAX_BATCH || first.checked_add(u32::from(count)).is_none() {
                     return Err(DecodeError::BadCount(count));
                 }
-                let pads = r.take(usize::from(count))?.to_vec();
+                let pads = (0..count).map(|_| r.u16()).collect::<Result<_, _>>()?;
                 Message::Input { ack, first, pads }
             }
             TAG_HASH => Message::Hash {

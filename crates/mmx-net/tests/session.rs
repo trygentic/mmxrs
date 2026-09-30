@@ -29,8 +29,8 @@ struct Peer {
     s: Session,
     t: LoopbackTransport,
     rng: Rng,
-    stream: Vec<(u32, u8, u8)>,
-    latched: Vec<u8>,
+    stream: Vec<(u32, u16, u16)>,
+    latched: Vec<u16>,
     game: Fnv64,
     game_hist: Vec<u64>,
     events: Vec<SessionEvent>,
@@ -55,7 +55,7 @@ impl Peer {
     fn tick(&mut self, now_ms: u64, budget: u32) {
         self.s.update(&mut self.t, now_ms);
         for _ in 0..budget {
-            let pad = self.rng.next() as u8;
+            let pad = self.rng.next() as u16;
             if self.s.latch_local(pad) {
                 self.latched.push(pad);
             }
@@ -64,7 +64,8 @@ impl Peer {
             };
             assert_eq!(frame as usize, self.stream.len(), "in order, no skip/dup");
             self.stream.push((frame, p1, p2));
-            self.game.write(&[p1, p2]);
+            self.game
+                .write(&[p1.to_le_bytes(), p2.to_le_bytes()].concat());
             self.game_hist.push(self.game.finish());
             if self.s.needs_hash(frame) {
                 let mut h = hash_state(&[&self.game.finish().to_le_bytes(), &frame.to_le_bytes()]);
@@ -578,7 +579,7 @@ fn malformed_and_contradictory_start_are_protocol_errors() {
         Message::Start(s).encode()
     };
     let bad: Vec<Vec<Vec<u8>>> = vec![
-        vec![vec![1, 0x7F]],
+        vec![vec![mmx_net::WIRE_VERSION, 0x7F]],
         vec![start(&|_| {})], // Start before Hello
         vec![host_hello_bytes(), start(&|s| s.delay = MAX_DELAY + 1)],
         vec![host_hello_bytes(), start(&|s| s.coop_flags = 3)],
@@ -653,7 +654,7 @@ fn link_failures_close() {
 
 #[test]
 fn rewritten_remote_input_is_a_protocol_error() {
-    let input = |pads: Vec<u8>| {
+    let input = |pads: Vec<u16>| {
         Message::Input {
             ack: 2,
             first: 2,

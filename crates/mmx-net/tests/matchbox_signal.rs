@@ -40,7 +40,7 @@ fn start_signal() -> SocketAddr {
 struct Peer {
     s: Session,
     t: MatchboxTransport,
-    frames: Vec<(u32, u8, u8)>,
+    frames: Vec<(u32, u16, u16)>,
     hello: bool,
 }
 
@@ -49,12 +49,15 @@ impl Peer {
         self.s.update(&mut self.t, now_ms);
         let role = self.s.role().as_u8() as u32;
         for _ in 0..4 {
-            let pad = ((self.s.frame() * 7 + role * 3) & 0xFF) as u8;
+            let pad = ((self.s.frame() * 7 + role * 3) & 0xFFFF) as u16;
             self.s.latch_local(pad);
             let Some(fr) = self.s.poll() else { break };
             self.frames.push(fr);
             if self.s.needs_hash(fr.0) {
-                self.s.report_hash(fr.0, hash_state(&[&[fr.1, fr.2]]));
+                self.s.report_hash(
+                    fr.0,
+                    hash_state(&[&fr.1.to_le_bytes(), &fr.2.to_le_bytes()]),
+                );
             }
         }
         self.s.update(&mut self.t, now_ms);
@@ -296,7 +299,7 @@ impl RbPeer {
 
     fn tick(&mut self, now_ms: u64) {
         let role = self.s.role().as_u8() as u32;
-        let pad = ((self.s.frame() / 16 * 7 + role * 3) & 0xFF) as u8;
+        let pad = ((self.s.frame() / 16 * 7 + role * 3) & 0xFFFF) as u16;
         self.s.add_local_input(pad);
         let reqs = match self.s.advance(now_ms) {
             Ok(r) => r,
@@ -319,7 +322,11 @@ impl RbPeer {
                     frame, pad1, pad2, ..
                 } => {
                     assert_eq!(self.game.0, frame);
-                    self.game.1 = hash_state(&[&self.game.1.to_le_bytes(), &[pad1, pad2]]);
+                    self.game.1 = hash_state(&[
+                        &self.game.1.to_le_bytes(),
+                        &pad1.to_le_bytes(),
+                        &pad2.to_le_bytes(),
+                    ]);
                     self.game.0 += 1;
                     self.latest.insert(frame, self.sum());
                 }

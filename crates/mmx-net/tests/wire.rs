@@ -67,17 +67,17 @@ fn samples() -> Vec<(Message, usize)> {
             Message::Input {
                 ack: 0,
                 first: u32::MAX - 1,
-                pads: vec![0xFF],
+                pads: vec![0xFFF0],
             },
-            INPUT_HEADER_LEN + 1,
+            INPUT_HEADER_LEN + 2,
         ),
         (
             Message::Input {
                 ack: 1000,
                 first: 990,
-                pads: (0..MAX_BATCH as u8).collect(),
+                pads: (0..MAX_BATCH as u16).map(|i| i * 0x0811).collect(),
             },
-            INPUT_HEADER_LEN + MAX_BATCH,
+            INPUT_HEADER_LEN + 2 * MAX_BATCH,
         ),
         (
             Message::Hash {
@@ -117,6 +117,14 @@ fn round_trip_and_lengths() {
         assert_eq!(bytes[0], WIRE_VERSION);
         assert_eq!(Message::decode(&bytes), Ok(m));
     }
+    // Pads are u16 little-endian: all twelve SNES buttons survive.
+    let b = Message::Input {
+        ack: 0,
+        first: 0,
+        pads: vec![0xFFF0],
+    }
+    .encode();
+    assert_eq!(b[INPUT_HEADER_LEN - 1..], [1, 0xF0, 0xFF]);
 }
 
 // The largest message (Start with a full WRAM snapshot) must fit the packet
@@ -156,8 +164,8 @@ fn every_prefix_is_truncated() {
 fn malformed_rejected() {
     assert_eq!(Message::decode(&[]), Err(DecodeError::Empty));
     assert_eq!(
-        Message::decode(&[2, TAG_BYE, 0]),
-        Err(DecodeError::BadVersion(2))
+        Message::decode(&[1, TAG_BYE, 0]),
+        Err(DecodeError::BadVersion(1))
     );
     assert_eq!(
         Message::decode(&[WIRE_VERSION, 0x7F]),
@@ -186,7 +194,7 @@ fn malformed_rejected() {
     input.extend_from_slice(&0u32.to_le_bytes());
     input.extend_from_slice(&0u32.to_le_bytes());
     input.push(MAX_BATCH as u8 + 1);
-    input.extend(std::iter::repeat_n(0, MAX_BATCH + 1));
+    input.extend(std::iter::repeat_n(0, 2 * (MAX_BATCH + 1)));
     assert_eq!(
         Message::decode(&input),
         Err(DecodeError::BadCount(MAX_BATCH as u8 + 1))

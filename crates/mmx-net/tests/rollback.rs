@@ -42,11 +42,12 @@ impl RollbackGame for MockGame {
     fn load(&mut self, state: &MockGame) {
         *self = *state;
     }
-    fn advance(&mut self, pad1: u8, pad2: u8) {
+    fn advance(&mut self, pad1: u16, pad2: u16) {
         self.acc = hash_state(&[
             &self.acc.to_le_bytes(),
             &self.frame.to_le_bytes(),
-            &[pad1, pad2],
+            &pad1.to_le_bytes(),
+            &pad2.to_le_bytes(),
         ]);
         self.frame += 1;
     }
@@ -56,7 +57,7 @@ impl RollbackGame for MockGame {
 }
 
 /// Lockstep reference: the checksum after each frame given both true pad streams.
-fn reference(p1: &BTreeMap<u32, u8>, p2: &BTreeMap<u32, u8>, frames: u32) -> Vec<u64> {
+fn reference(p1: &BTreeMap<u32, u16>, p2: &BTreeMap<u32, u16>, frames: u32) -> Vec<u64> {
     let mut g = MockGame::default();
     (0..frames)
         .map(|f| {
@@ -69,7 +70,7 @@ fn reference(p1: &BTreeMap<u32, u8>, p2: &BTreeMap<u32, u8>, frames: u32) -> Vec
         .collect()
 }
 
-type PadFn = Box<dyn FnMut(u32, &mut Rng) -> u8>;
+type PadFn = Box<dyn FnMut(u32, &mut Rng) -> u16>;
 
 struct Peer {
     s: RollbackSession<LoopbackTransport>,
@@ -78,7 +79,7 @@ struct Peer {
     rng: Rng,
     pads: PadFn,
     /// Local pads by the frame they apply to.
-    added: BTreeMap<u32, u8>,
+    added: BTreeMap<u32, u16>,
     /// Checksum after the latest Advance of each frame not yet final.
     latest: BTreeMap<u32, u64>,
     /// Checksum after each final frame.
@@ -99,7 +100,7 @@ impl Peer {
             game: MockGame::default(),
             ring: StateRing::new(cap),
             rng: Rng(seed | 1),
-            pads: Box::new(|_, r| r.next() as u8),
+            pads: Box::new(|_, r| r.next() as u16),
             added: BTreeMap::new(),
             latest: BTreeMap::new(),
             confirmed: BTreeMap::new(),
@@ -699,9 +700,9 @@ impl RollbackGame for LeakyGame {
     fn load(&mut self, state: &MockGame) {
         self.inner = *state;
     }
-    fn advance(&mut self, pad1: u8, pad2: u8) {
+    fn advance(&mut self, pad1: u16, pad2: u16) {
         self.hidden += 1;
-        self.inner.advance(pad1 ^ self.hidden as u8, pad2);
+        self.inner.advance(pad1 ^ self.hidden as u16, pad2);
     }
     fn checksum(&self) -> u64 {
         self.inner.checksum()
@@ -713,7 +714,7 @@ fn run_sync_test<G: RollbackGame>(game: &mut G, distance: u8, frames: u32) -> Sy
     let mut ring = StateRing::new(usize::from(distance) + 2);
     let mut rng = Rng(0xC0FFEE);
     for _ in 0..frames {
-        let reqs = s.advance(rng.next() as u8, rng.next() as u8);
+        let reqs = s.advance(rng.next() as u16, rng.next() as u16);
         apply_requests(game, &mut ring, &reqs, &mut s).expect("state held");
     }
     s

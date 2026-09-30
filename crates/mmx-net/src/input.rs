@@ -19,18 +19,18 @@ pub(crate) enum Insert {
 pub(crate) struct InputLog {
     /// Frame of `slots[0]`.
     base: u32,
-    slots: VecDeque<Option<u8>>,
+    slots: VecDeque<Option<u16>>,
     /// Every frame `< contiguous` is known.
     contiguous: u32,
 }
 
 impl InputLog {
-    pub(crate) fn get(&self, frame: u32) -> Option<u8> {
+    pub(crate) fn get(&self, frame: u32) -> Option<u16> {
         let idx = frame.checked_sub(self.base)?;
         self.slots.get(idx as usize).copied().flatten()
     }
 
-    pub(crate) fn insert(&mut self, frame: u32, pad: u8) -> Insert {
+    pub(crate) fn insert(&mut self, frame: u32, pad: u16) -> Insert {
         let Some(off) = frame.checked_sub(self.base) else {
             return Insert::Stale;
         };

@@ -106,7 +106,7 @@ impl Net {
 #[cfg(all(test, feature = "netplay"))]
 mod tests {
     use super::*;
-    use mmx_core::netgame::{session_game, synthetic_rom, unpack_pad};
+    use mmx_core::netgame::{session_game, synthetic_rom};
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
@@ -153,7 +153,7 @@ mod tests {
             next += Duration::from_millis(16);
             for (net, game, seed) in peers.iter_mut() {
                 let f = net.play.session.frame();
-                let pad = unpack_pad(((f / 12).wrapping_mul(2_654_435_761).wrapping_add(*seed) >> 13) as u8);
+                let pad = ((f / 12).wrapping_mul(2_654_435_761).wrapping_add(*seed) >> 13) as u16 & 0xFFF0;
                 net.tick(game, pad);
                 assert!(net.play.last_error.is_none(), "{}", net.play.status());
             }

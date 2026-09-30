@@ -1,5 +1,5 @@
 //! Netplay glue shared by `mmx-native` and `mmx-web`: [`Game`] as an
-//! [`mmx_net::RollbackGame`], the 8-bit wire pad, and [`NetPlay`], the
+//! [`mmx_net::RollbackGame`] and [`NetPlay`], the
 //! per-tick rollback driver both frontends call (z2rs's `RollbackLink` +
 //! `rollback_tick`, shrunk). See `docs/netplay.md` "Frontend wiring".
 //!
@@ -13,38 +13,11 @@ use mmx_net::{
     COOP_TWO_PLAYERS,
 };
 
-use crate::{
-    coop, Game, Pads, RomError, BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_START, BTN_UP,
-    BTN_Y,
-};
+use crate::{coop, Game, Pads, RomError};
 
 /// Bump when anything that changes simulation between two builds changes
 /// outside the trap addresses (mixed into [`trapset_id`]).
 const NET_REVISION: u64 = 1;
-
-/// Wire pad bit `i` carries SNES button `WIRE_BUTTONS[i]`.
-// ponytail: mmx-net pads are one byte (it was built for the NES), so X, L, R
-// and Select do not travel: weapons are picked from the Start menu online.
-// Widen mmx-net's pads to u16 to lift this.
-pub const WIRE_BUTTONS: [u16; 8] = [
-    BTN_B, BTN_Y, BTN_A, BTN_START, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT,
-];
-
-/// SNES pad word -> wire byte (drops X, L, R, Select).
-pub fn pack_pad(pad: u16) -> u8 {
-    WIRE_BUTTONS
-        .iter()
-        .enumerate()
-        .fold(0, |b, (i, &m)| if pad & m != 0 { b | 1 << i } else { b })
-}
-
-/// Wire byte -> SNES pad word.
-pub fn unpack_pad(b: u8) -> u16 {
-    WIRE_BUTTONS
-        .iter()
-        .enumerate()
-        .fold(0, |p, (i, &m)| if b & (1 << i) != 0 { p | m } else { p })
-}
 
 /// Rollback save state: `u32` LE length of the encoded [`coop::CoopState`],
 /// that encoding, then [`Game::save_state`].
@@ -104,11 +77,8 @@ impl RollbackGame for Game {
     fn load(&mut self, state: &Vec<u8>) {
         net_load(self, state).expect("own rollback state loads");
     }
-    fn advance(&mut self, pad1: u8, pad2: u8) {
-        self.step(Pads {
-            p1: unpack_pad(pad1),
-            p2: unpack_pad(pad2),
-        });
+    fn advance(&mut self, pad1: u16, pad2: u16) {
+        self.step(Pads { p1: pad1, p2: pad2 });
     }
     fn checksum(&self) -> u64 {
         net_checksum(self)
@@ -196,7 +166,7 @@ impl<T: Transport> NetPlay<T> {
         } else if !self.live() {
             self.session.poll(now_ms);
         } else {
-            self.session.add_local_input(pack_pad(pad));
+            self.session.add_local_input(pad);
             match self.session.advance(now_ms) {
                 Ok(reqs) => {
                     if let Err(e) = self.apply(game, &reqs, &mut n) {
@@ -234,10 +204,7 @@ impl<T: Transport> NetPlay<T> {
                 RollbackRequest::Advance {
                     pad1, pad2, replay, ..
                 } => {
-                    game.step(Pads {
-                        p1: unpack_pad(pad1),
-                        p2: unpack_pad(pad2),
-                    });
+                    game.step(Pads { p1: pad1, p2: pad2 });
                     *n += 1;
                     if replay {
                         // Heard once already. The new frame is always the
@@ -357,17 +324,39 @@ pub fn synthetic_rom() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{BTN_A, BTN_B};
     use mmx_net::{apply_requests, loopback_pair, LoopbackConfig, SyncTestSession};
 
+    /// X, L, R and Select (dropped by the old one-byte wire pad) reach the
+    /// other peer intact, in both directions.
     #[test]
-    fn wire_pad_round_trips_the_eight_buttons() {
-        for &m in &WIRE_BUTTONS {
-            assert_eq!(unpack_pad(pack_pad(m)), m);
+    fn full_snes_pad_crosses_the_wire() {
+        use crate::{BTN_L, BTN_R, BTN_SELECT, BTN_X};
+        let rom = synthetic_rom();
+        let (link, ta, tb) = loopback_pair(LoopbackConfig::default(), 1);
+        let mk = |host: bool, t| {
+            let mut cfg = NetPlay::<mmx_net::LoopbackTransport>::config(&rom, host, 0).unwrap();
+            cfg.input_delay = 0;
+            RollbackSession::new(cfg, t).unwrap()
+        };
+        let (mut h, mut g) = (mk(true, ta), mk(false, tb));
+        let hp = BTN_X | BTN_L | BTN_R | BTN_SELECT;
+        let gp = hp | crate::BTN_B | crate::BTN_UP;
+        let (mut seen_h, mut seen_g) = (false, false);
+        for tick in 0..300u64 {
+            link.advance(1);
+            for (s, pad, seen) in [(&mut h, hp, &mut seen_h), (&mut g, gp, &mut seen_g)] {
+                s.add_local_input(pad);
+                let Ok(reqs) = s.advance(tick * 16) else { continue };
+                for r in reqs {
+                    if let RollbackRequest::Advance { pad1, pad2, confirmed: true, .. } = r {
+                        assert_eq!((pad1, pad2), (hp, gp));
+                        *seen = true;
+                    }
+                }
+            }
         }
-        let all = WIRE_BUTTONS.iter().fold(0, |a, b| a | b);
-        assert_eq!(pack_pad(0xFFFF), 0xFF);
-        assert_eq!(unpack_pad(0xFF), all);
-        assert_eq!(pack_pad(crate::BTN_L | crate::BTN_X), 0, "dropped buttons");
+        assert!(seen_h && seen_g, "no confirmed frame with both pads");
     }
 
     #[test]
@@ -404,7 +393,7 @@ mod tests {
         let mut s = SyncTestSession::new(4);
         let mut ring = StateRing::new(6);
         for f in 0..60u32 {
-            let reqs = s.advance((f / 7) as u8, (f / 5) as u8 ^ 0x5A);
+            let reqs = s.advance((f / 7) as u16, (f / 5) as u16 ^ 0x5A5A);
             apply_requests(&mut g, &mut ring, &reqs, &mut s).unwrap();
         }
         assert_eq!(s.mismatches(), 0);
@@ -438,7 +427,7 @@ mod tests {
             link.advance(1);
             for (net, game, seed) in peers.iter_mut() {
                 let f = net.session.frame();
-                let pad = unpack_pad(((f / 9).wrapping_mul(2_654_435_761).wrapping_add(*seed) >> 11) as u8);
+                let pad = ((f / 9).wrapping_mul(2_654_435_761).wrapping_add(*seed) >> 11) as u16 & 0xFFF0;
                 net.tick(game, pad, tick * 16);
                 assert!(net.last_error.is_none(), "{}", net.status());
             }

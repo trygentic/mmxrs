@@ -87,9 +87,9 @@ pub enum RollbackRequest {
         /// Frame being simulated (the state moves from `frame` to `frame + 1`).
         frame: u32,
         /// Player 1 (host) pad.
-        pad1: u8,
+        pad1: u16,
         /// Player 2 (guest) pad.
-        pad2: u8,
+        pad2: u16,
         /// Every remote pad up to and including `frame` is real, so this
         /// frame's result is final. A frame first simulated on a prediction
         /// that proves right is not re-issued; use
@@ -331,7 +331,7 @@ pub trait RollbackGame {
     /// Restore a snapshot.
     fn load(&mut self, state: &Self::State);
     /// Simulate one frame.
-    fn advance(&mut self, pad1: u8, pad2: u8);
+    fn advance(&mut self, pad1: u16, pad2: u16);
     /// Deterministic checksum of the current state.
     fn checksum(&self) -> u64;
 }
@@ -420,7 +420,7 @@ pub struct RollbackSession<T: Transport> {
     local: InputLog,
     remote: InputLog,
     /// Remote pads used as predictions, by frame, for frames already simulated.
-    predicted: BTreeMap<u32, u8>,
+    predicted: BTreeMap<u32, u16>,
     /// Earliest simulated frame whose prediction proved wrong.
     first_incorrect: Option<u32>,
     peer_ack: u32,
@@ -597,7 +597,7 @@ impl<T: Transport> RollbackSession<T> {
     /// Record this tick's local pad for frame `frame() + input_delay()`.
     /// Returns false when that frame already has a pad (e.g. while stalled)
     /// or the session is not running.
-    pub fn add_local_input(&mut self, pad: u8) -> bool {
+    pub fn add_local_input(&mut self, pad: u16) -> bool {
         if !self.is_running() {
             return false;
         }
@@ -944,7 +944,7 @@ impl<T: Transport> RollbackSession<T> {
         });
     }
 
-    fn on_input(&mut self, ack: u32, first: u32, pads: &[u8]) {
+    fn on_input(&mut self, ack: u32, first: u32, pads: &[u16]) {
         if !self.is_running() {
             return;
         }
@@ -1120,7 +1120,7 @@ impl<T: Transport> RollbackSession<T> {
         if contiguous > self.peer_ack {
             let first = self.peer_ack;
             let end = contiguous.min(first + MAX_BATCH as u32);
-            let pads: Vec<u8> = (first..end).filter_map(|f| self.local.get(f)).collect();
+            let pads: Vec<u16> = (first..end).filter_map(|f| self.local.get(f)).collect();
             debug_assert_eq!(pads.len() as u32, end - first, "local log pruned too far");
             let msg = Message::Input {
                 ack: known,
@@ -1189,7 +1189,7 @@ fn push_window(w: &mut VecDeque<i32>, v: i32) {
 pub struct SyncTestSession {
     check_distance: u32,
     frame: u32,
-    inputs: VecDeque<(u8, u8)>,
+    inputs: VecDeque<(u16, u16)>,
     inputs_base: u32,
     first_checksums: BTreeMap<u32, u64>,
     events: Vec<RollbackEvent>,
@@ -1227,7 +1227,7 @@ impl SyncTestSession {
 
     /// Requests for one frame with pads `(pad1, pad2)`: a rollback of
     /// `check_distance` frames once enough history exists, then the new frame.
-    pub fn advance(&mut self, pad1: u8, pad2: u8) -> Vec<RollbackRequest> {
+    pub fn advance(&mut self, pad1: u16, pad2: u16) -> Vec<RollbackRequest> {
         let cur = self.frame;
         self.inputs.push_back((pad1, pad2));
         let mut reqs = Vec::new();

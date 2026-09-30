@@ -464,7 +464,7 @@ impl Session {
 
     /// Latch `pad` for frame `frame() + delay()` unless already latched.
     /// Returns true when the pad was taken. Call once before each `poll`.
-    pub fn latch_local(&mut self, pad: u8) -> bool {
+    pub fn latch_local(&mut self, pad: u16) -> bool {
         if !self.is_live() {
             return false;
         }
@@ -481,7 +481,7 @@ impl Session {
 
     /// The next frame to step as `(frame, pad1, pad2)` when both pads are
     /// known; advances the session. Frames come in order, exactly once.
-    pub fn poll(&mut self) -> Option<(u32, u8, u8)> {
+    pub fn poll(&mut self) -> Option<(u32, u16, u16)> {
         if !self.is_live() {
             return None;
         }
@@ -739,7 +739,7 @@ impl Session {
         });
     }
 
-    fn on_input(&mut self, ack: u32, first: u32, pads: &[u8]) {
+    fn on_input(&mut self, ack: u32, first: u32, pads: &[u16]) {
         if !self.is_live() {
             return;
         }
@@ -830,7 +830,7 @@ impl Session {
         if contiguous > self.peer_ack {
             let first = self.peer_ack;
             let end = contiguous.min(first + MAX_BATCH as u32);
-            let pads: Vec<u8> = (first..end).filter_map(|f| self.local.get(f)).collect();
+            let pads: Vec<u16> = (first..end).filter_map(|f| self.local.get(f)).collect();
             debug_assert_eq!(pads.len() as u32, end - first, "local log pruned too far");
             let msg = Message::Input {
                 ack: known,
