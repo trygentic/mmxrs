@@ -526,7 +526,7 @@ entries into the same slots (from `$E3` rounded up to 4, padding hidden):
   P2 owns whole bytes. Checked against the ROM emitter on X's own layouts in
   both facings (test `zero_emitter_matches_rom`, walk/jump from `highway-start`).
 - tiles: `set.page(f)` (48 tiles, 1.5 KiB) into the shadow page when `f`
-  changes (`CoopState::zero_frame`, reset by `Game::load_state`); every P2
+  changes (`CoopState::zero_frame`, restored with the page by `Game::load_state`, reset for a state without co-op data); every P2
   slot gets its mask bit. The X1 streamer interception still runs for P2 but
   copies nothing (`p2tiles::stream_exit`).
 - palette: `ZeroSet.palette` into sprite palette 3 through `$0300`/`$A1`

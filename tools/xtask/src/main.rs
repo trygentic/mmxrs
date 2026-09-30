@@ -1,4 +1,4 @@
-//! `cargo xtask <verify|dump|ledger|rominfo>`. Plain `std::env::args`.
+//! `cargo xtask <verify|dump|ledger|rominfo|stateinfo|..>`. Plain `std::env::args`.
 //! All fs lives here, never in the libs.
 
 mod net;
@@ -15,11 +15,13 @@ const USAGE: &str = "usage: cargo xtask <command>
   lagdiff --frames N [script] [--refill] [--untrap HEX,..] [--dump A-B]   solo vs co-op (P2 idle): first real-time
        opcode fetch where P1's PC or master clock differs; --dump writes both frames' traces (PC, mclk) to target/
   dump --frames N --out DIR [--at F,F,...] [--movie F] [--tap F,F,...] [--hold HEX] [--p2-hold HEX] [--coop]
-       [--rom-any PATH] [--x3 PATH] [--poke ADDR=VAL@A[-B],..] [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..] [--wav PATH] [--apu] [--mute HEX]  start from / write a save state (P2 re-anchors after a load)
+       [--rom-any PATH] [--x3 PATH] [--poke ADDR=VAL@A[-B],..] [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..] [--wav PATH] [--apu] [--mute HEX]  start from / write a save state (P2 restored
+       from the state's co-op data; a state saved before it re-anchors P2 on P1)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
   ledger
   rominfo
+  stateinfo PATH   what a save state holds (frame count, tile pages, co-op data, P2); docs/savestates.md
   zerosheet [--x3 PATH [--wave|--slash|--sfx]] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data; --wave: the saber wave, --slash: the slash arc) -> DIR/NN_name.png + DIR/sheet.png; --sfx: his X3 sounds -> DIR/swing.wav
   netsim [--mode rollback|lockstep] [--rtt MS] [--jitter MS] [--loss PCT] [--delay N] [--prediction N] [--frames N]
        [--load STATE] [--x3 PATH] [--zero] [--timing ntsc|pal] [--seed N] [--report F.json] [--record PREFIX] [--no-smoothing] [script]
@@ -39,6 +41,7 @@ fn main() {
         Some("lagdiff") => lagdiff(&args[1..]),
         Some("ledger") => ledger(),
         Some("rominfo") => rominfo(),
+        Some("stateinfo") => stateinfo(&args[1..]),
         Some("zerosheet") => zerosheet(&args[1..]),
         Some("netsim") => netsim(&args[1..]),
         Some("netreplay") => netreplay(&args[1..]),
@@ -48,6 +51,28 @@ fn main() {
         }
     };
     exit(code);
+}
+
+/// `stateinfo PATH`: a save state's frame count, tile-page marker and co-op
+/// state (no ROM needed), e.g. a user's `~/.mmxrs/slotN.state`.
+fn stateinfo(args: &[String]) -> i32 {
+    use mmx_core::coop::{OFF_HP, OFF_POS_X, OFF_POS_Y};
+    let Some(p) = args.first() else { die("stateinfo: want PATH") };
+    let s = std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+    let i = Game::state_info(&s).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+    println!("{p}: {} bytes", s.len());
+    println!("frame count   {}", i.frame_count);
+    println!("shadow pages  {}", i.tiles.as_deref().unwrap_or("none (pre-P2T2)"));
+    let Some(c) = i.coop else {
+        println!("co-op         none (saved before the COOP tail: loads with a default co-op state, P2 re-anchors on P1)");
+        return 0;
+    };
+    let w = |o: usize| u16::from_le_bytes([c.p2[o], c.p2[o + 1]]);
+    println!("co-op         yes (enabled when saved: {})", c.enabled);
+    println!("P2            pos ({}, {}) hp {} hidden {} down {} warp {} away {}", w(OFF_POS_X), w(OFF_POS_Y), c.p2[OFF_HP] & 0x7F, c.p2_hidden, c.down_frames, c.p2_warp, c.p2_away);
+    println!("P2 bookkeeping shots {:02x} fx {:08x} items {:x} on_obj {:x} saber t {} revive {:?}", c.p2_shots, c.p2_fx, c.p2_items, c.p2_on_obj, c.saber.t, c.revive.spot);
+    println!("P1 as Zero    {} (saber t {})", c.p1.on, c.p1.saber.t);
+    0
 }
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {

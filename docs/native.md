@@ -44,7 +44,8 @@ WebRTC transport; `--no-default-features` builds without it.
 
 Hotkeys: Tab hold fast-forward (8 frames per present, muted), F5 save state,
 F7 load state, 1-9 pick slot, F11 fullscreen, P or F6 pause, `.` single-step
-while paused, Esc quit. States live in `$HOME/.mmxrs/slotN.state`.
+while paused, Esc quit. States live in `$HOME/.mmxrs/slotN.state` (format and
+bug reports: [savestates.md](savestates.md)).
 Title bar: fps, `[coop]` or `[NET ...]`, `[SLOT n]`, `[PAUSED]`, `[FF]`.
 
 ## Gamepads

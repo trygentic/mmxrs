@@ -632,8 +632,8 @@ change was needed for this.
   once live, **lockstep** latches the local pad and steps the next frame if
   both pads are known (one frame per tick, 0 while waiting; hashes every 60
   frames), **rollback** adds the local pad, advances, and runs the requests. Rollback save states
-  are `Game::save_state` **plus the co-op state** (`CoopState`, bincode),
-  because `save_state` alone would not rewind P2. Checksums are FNV-1a over
+  are `Game::save_state`, which carries the co-op state (`CoopState`, the
+  `COOP` tail, [savestates.md](savestates.md)) so a rollback rewinds P2 too. Checksums are FNV-1a over
   WRAM `$7E:0000..$2000` and P2's shadow block. Replayed frames' audio is
   dropped. On `Running` / `Started` it replaces the game with a power-on game with the
   co-op traps registered and `coop.enabled` set from the flags.
