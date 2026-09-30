@@ -92,6 +92,19 @@ pub fn p2_lost(p2_y: u16, cam_y: u16) -> bool {
     (p2_y.wrapping_sub(0x20).wrapping_sub(cam_y.wrapping_add(0xE0)) as i16) >= 0
 }
 
+/// The level's side walls: the camera's follow mode (`$80:E0DE` Rev 1,
+/// after the limit clamps) keeps X within 8 px of the camera limits
+/// (`left` = `$1E56`, `right` = `$1E58`, both camera X), i.e. in
+/// `[left + 8, right + 248]`; P1 only. Signed compares, as the ROM's `BPL`.
+pub fn p2_level_clamp(x: u16, left: u16, right: u16) -> u16 {
+    let x = if (x.wrapping_add(8).wrapping_sub(right.wrapping_add(0x100)) as i16) >= 0 { right.wrapping_add(0xF8) } else { x };
+    if (x.wrapping_sub(8).wrapping_sub(left) as i16) < 0 {
+        left.wrapping_add(8)
+    } else {
+        x
+    }
+}
+
 /// P2's anchor is inside the 256x224 window.
 pub fn p2_on_screen(x: u16, y: u16, cam_x: u16, cam_y: u16) -> bool {
     x.wrapping_sub(cam_x) < 256 && in_view_y(y, cam_y)
@@ -107,6 +120,14 @@ pub fn p2_far(x: u16, y: u16, cam_x: u16, cam_y: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn level_clamp() {
+        assert_eq!(p2_level_clamp(0xFFF0, 0, 0x1000), 8); // highway-start, walking left
+        assert_eq!(p2_level_clamp(8, 0, 0x1000), 8);
+        assert_eq!(p2_level_clamp(300, 0, 0x1000), 300);
+        assert_eq!(p2_level_clamp(0x1100, 0, 0x1000), 0x10F8);
+    }
 
     fn wram() -> Box<Wram> {
         vec![0u8; 0x20000].into_boxed_slice().try_into().unwrap()
