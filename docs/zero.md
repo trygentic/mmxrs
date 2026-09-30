@@ -134,14 +134,17 @@ Code: `crates/mmx-core/src/p2tiles.rs`, PPU patch in
   `verify --coop-off` parity run stays identical).
 - **Save state.** The page is inside the PPU, so `to_save_state` clones it.
   Its bincode encoding inside `SnesEmulator` is empty (`P2TilesSlot`), and
-  `Game::save_state` appends the marker `P2T3` and the `P2Tiles` after
+  `Game::save_state` appends the marker `P2T4` and the `P2Tiles` after
   `(emu, frame_count, fired_at)`. States written before the patch (no tail)
   or with the old 512-word page (tail without the marker) load with an empty
-  page; `P2T2` states (one 768-word page) load it as page 0.
-- **Two pages.** `page` holds two 768-word pages back to back; a slot also
-  set in `page1: u128` reads the second (`Game::add_p2_tile_slots(mask,
-  page1)`). Page 0 is P2's, page 1 a Zero P1's ("Playing as Zero"). Netplay rollback states wrap
-  `Game::save_state`, so they carry the page.
+  page; `P2T2` states (one 768-word page) load it as page 0, `P2T3` states
+  (two pages) as pages 0 and 1.
+- **Three pages.** `page` holds three 768-word pages back to back; a slot
+  also set in `page1: u128` reads the second, one set in `page2` the third
+  (`Game::add_p2_tile_slots(mask, page)`, which never sets both). Page 0 is
+  P2's, page 1 a Zero P1's ("Playing as Zero"), page 2 the saber waves (P2's
+  in columns 0-7, P1's in 8-15; "The saber"). Netplay rollback states wrap
+  `Game::save_state`, so they carry the pages.
 - **Filling the page.** P2 keeps X's `+$18` (anchor copies X's block and only
   sets `+$17 |= $80` to force a reload), so the emitter writes X's tile numbers
   for P2. Two `Observe` traps on the streamer: at `$84:8FCA`, if the call runs
@@ -475,10 +478,12 @@ shoot twins (58, 108, 59, 109-111) run instead.
 the big green buster shot (act `$4A`, frames 82-85, the projectile is its own
 object), and Y again swings the saber (act `$4C` 86-90 on the ground, `$50`
 95-98 in the air). The blade is part of the body frames (84, 88, 93, 97: a
-blue-white arc). No separate saber object appears for Zero. `$8F:DBA5` (the
-Zero Project's "Z-Saber projectile", lists `$85:E672`) is X's beam-saber wave
-after he receives Zero's saber, not Zero's; the fan sheet's green arcs are
-not what the USA ROM draws for Zero. Not extracted.
+blue-white arc). The green wave is a separate object, but it comes with the
+*release* (act `$4A`/`$4E`, on the blade flourish 84/93), not with the `$4C`
+swing (which fires a blue buster ball, set `$4E`, on frame 89). Extracted as
+`ZeroSet.wave`, see "The saber" below. `$8F:DBA5` (the Zero Project's
+"Z-Saber projectile") is set `$4F` frame 12, not Zero's green wave (the old
+guess: X's beam-saber wave); not extracted.
 
 **X1 -> X3 mapping.** X1's set 0 uses the same frame numbers as Zero's set
 `$4A` (measured on X1 from `hw-c` with jumps and shots, and the beam-in from
@@ -574,17 +579,17 @@ carries it). Only with the X3 set; without it X does nothing (buster-only Zero).
   takes the slot out again (zeroed), after the enemy loop. The shot's update
   (`$80:F666[+0A]`) never runs, it is never drawn and never counted, so the
   `$0BDD` bookkeeping (docs/coop.md "Shots (B3)") never sees it. The damage
-  routine does `INC +30` on the shot: that ends the swing's damage (one hit
-  per swing).
+  routine does `INC +30` on the shot, or the enemy sets `+01 = 6`: either
+  ends the swing's damage (one hit per swing).
 - **Checked.** `hw-spiky`, P2 walks right 20 frames, X at 22: the arc (frame
   31) hits the Spiky with the tip, 2 HP -> 1 (test `saber_hits_spiky`, P1's
   `$0BDD` stays 0; id 2 does 1 to it, `$86:F049`). The old reach hit it on
   two frames in a row: that hit left the shot at `+01 = 6`, `+30 = 0`, so
-  `hit` stayed false. unverified: which hits set `+30`; "one hit per
-  swing" only holds for those.
+  `hit` stayed false; `take_back` now counts `+01 != 0` too.
   `hw-bee2`, P2 jumps every 40 frames and taps X 8 frames into the jump:
   Bee Blader (`$0E68+$27`) 29 -> 25 -> 21 -> 17 -> 13 -> 9, 4 per connecting
-  swing, until it drifts out of reach.
+  swing, until it drifts out of reach (blade only; with the wave it dies,
+  below).
 - **The blade on screen.** A playtest said the saber was invisible. Not
   reproduced: frames 86-90 / 95-98 are selected (`zf`), all 48 page tiles
   are filled and every P2 slot is masked, the layouts have no palette bits,
@@ -599,6 +604,86 @@ carries it). Only with the X3 set; without it X does nothing (buster-only Zero).
 xtask dump --load states/hw-spiky.state --frames 40 --out target/z/saber --at 27,32 --p2tap 0100@1:20,0040@22:2 --coop --wram
 T=$(seq 10 40 1190 | awk '{printf "8000@%d:20,0040@%d:2,", $1, $1+8}' | sed 's/,$//')
 xtask dump --load states/hw-bee2.state --frames 1200 --out target/z/bee --at 50-1200/50 --refill --coop --p2tap "$T" --wram
+```
+
+### The green wave
+
+A playtest: "some blue on Zero's saber, but I thought the sprite had green
+and a longer arc / range". The blue-white crescent is the blade in the body
+frame; the green is X3's wave object, which the port now draws and hits
+with on every swing's arc.
+
+**In X3** (`states/x3-zero-stand.state`, hold Y 150 frames, release; states
+`x3-zero-wave` = that run's frame 173, wave in flight):
+
+- Object in X3's shot table at `$10D8` (stride `$40`; first free slot), id
+  `+0A = 1`, set `+16 = $4D` (table `$0D:9B60`, layouts `$0F:D92E..`),
+  lists `+31 = $85:DD84`, `+18 = 8`, `+11 = $66` (palette 3, facing right).
+  Spawned on the release's blade pose (84 ground, 93 air), 1 frame after the
+  pose appears. Zero's `$4C` swing spawns set `$4E` (a blue buster ball) on
+  frame 89 instead; no green there.
+- Flight, relative to Zero's origin at the spawn (`zero_data::x3_wave_step`):
+  `t0 (+8, -8)` frame 0; `t1 (+29, -5)` frame 0; `t2 (+29, -2)`, `t3 (+29,
+  +1)` frame 1; then +6 px a frame, frames 3, 4, 2, 3, ... In the air: `+27`
+  and it keeps its height (`-8`); on the ground it drops to `+1`. Gone after
+  31 frames (`+02 = 4` at t = 31, about 197 px out: off screen). `+30` stays 0.
+- Hit box `+20` (bank `$86`, `x y half-w half-h`, x toward the facing): t0
+  `$B7FB` = `00 00 04 04`, t1 `$B807` = `FF 00 10 09`, then `$B80B`/`$B80F`
+  = `F1 00 10 09` (32 x 18 px, centred 15 px in front of the object).
+- Tiles: streamed per frame like Zero's (6-byte entries; frame 0: 6 tiles
+  `$B2:E000 -> $6300`, 6 `$B2:E0C0 -> $6400`, + `+18 * 16` words), raw 4bpp in
+  bank `$B2`; layout tiles `$30-$35` / `$40-$45` (OAM `+8`), at most 10 tiles,
+  4 sprites, 48 x 16 px. Frames 5-6 exist but were never seen.
+- Palette: X3 sprite palette 3, static, `$8C:B5A0` (right after Zero's):
+  `4108 739C 738C 7308 7284 7200 5394 338C 2308 2288 439C 039C 029C 731C 621C 1084`.
+  The wave draws with 1 (white) and 6-9 (greens) only.
+
+Sheet: `xtask zerosheet --x3 PATH --wave --out DIR`. It is a green blast
+with a crescent head and a ringed tail, not the fan sheet's 48 x 32 arcs.
+Test `zero_data_extract_x3_wave` (decode == VRAM `$6380`/`$6480` in
+`x3-zero-wave`).
+
+**In the port.** `Saber.wave` (`saber.rs`, so rollback carries it): the
+first frame of the arc pose (88 / 97) throws it from Zero's drawn origin,
+then it follows `x3_wave_step` for `WAVE_FRAMES` = 31 frames, past the end
+of the swing; a new arc replaces it. Drawn by `zero::wave_entries` in front
+of Zero (P2: before its body in its slots, P1: before its body at the build
+cursor), mirrored by the facing at the spawn, tiles in shadow page 2 (P2
+columns 0-7, P1 8-15; `CoopState::wave_frames` tracks what is loaded).
+Drawn during the i-frame blink too.
+
+**Palette: remapped onto Zero's.** No sprite palette is free with co-op
+on: 0 flashes, 1 X (or a Zero P1), 2 the HUD, 3 P2's Zero, 4-7 enemies
+(table above). Zero's own palette has white and two greens, so the wave's
+five colours map onto it (`zero::WAVE_ON_ZERO`: 1 -> 4 `639C`, 6/7 -> 12
+`2388`, 8/9 -> 1 `1284`) and it draws with its wearer's palette (P1: 1, P2:
+3). No CGRAM writes.
+
+**Damage.** The wave is its own shot (`saber::wave_shot_bytes`, slot
+`Saber::wave_slot`, same insert/take-back as the blade's): id 2, position =
+the box centre, box `$86:BDC1` (`00 00 04 04`) on t0 and `$86:D381` (`00 00
+10 09`, X3's 32 x 18) after. One hit per swing, blade and wave together:
+`take_back` now also counts `+01 != 0` as a hit (the enemy sets `+01 = 6`
+and leaves `+30 = 0` on the Spiky; before this the Spiky took 2 hits from
+one swing once the wave passed through it). Checked:
+
+- `hw-spiky`, P2 swings where it stands, 88 px from the Spiky: 2 -> 1 at
+  frame 16, once (test `saber_wave_hits_spiky_from_afar`).
+- `hw-bee2` (the run below): Bee Blader 29 -> 25 -> 21 -> 17 -> 13 -> 9 ->
+  5 -> 1 -> 0, 4 per connecting swing, hits from 17 px out to 101 px (P2 at
+  x 3452, Bee 3435 -> 3351); the blade alone stopped at 9 when it drifted
+  out of reach.
+
+Strips (`target/z1/`, `target/z/`): `z1/wave_strip_3x.png` (P1 ground,
+frames 16-42 every 2), `z1/wave_air_strip_3x.png`, `z/wave_strip_3x.png`
+(P2), `z/x3_wave_strip_3x.png` (X3's own, frames 164-190); `x` = `xtask
+dump --x3 PATH`.
+
+```
+x --load states/highway-start.state --frames 44 --out target/z1/wave --at 16-44/1 --p1tap 0040@10:2 --zero
+x --load states/highway-start.state --frames 50 --out target/z1/wave_air --at 18-48/1 --p1tap 8000@10:20,0040@16:2 --zero
+x --load states/highway-start.state --frames 44 --out target/z/wave --at 16-44/1 --p2tap 0040@10:2 --coop
+xtask dump --rom-any X3 --load states/x3-zero-stand.state --frames 260 --out DIR --at 150-260/1 --wram --vram --p1tap 4000@10:150,4000@185:2
 ```
 
 ## Playing as Zero
