@@ -53,7 +53,25 @@ const PICKUP_TAKEN: u8 = 0x06;
 /// P2 only tries pickups this close (px, both axes).
 const PICKUP_NEAR: u16 = 48;
 
+/// Effect pool (dash dust, sparks, the hurt flash): 31 slots of `$20` from
+/// `$1928`, `+0` = active, `+$0A` = type. Updated by the loop `$80:D31A`
+/// (`JSR` from the object master), `D` = the slot; per active slot the hook
+/// is `LDA #$80; TRB $0E; LDA $0A; ASL; TAX; JSR (tbl,X)` and the loop
+/// step follows at `+11`.
+pub const HOOK_EFFECT_SLOT: HookId = HookId::EffectSlot;
+const FX_FIRST: u16 = 0x1928;
+const FX_SLOTS: u16 = 31;
+const FX_STRIDE: u16 = 0x20;
+
+/// Active effect slots, bit n = slot n.
+pub fn effects_live(w: &[u8; 0x20000]) -> u32 {
+    (0..FX_SLOTS).filter(|&k| w[usize::from(FX_FIRST + k * FX_STRIDE)] != 0).fold(0, |m, k| m | 1 << k)
+}
+
 pub fn register(game: &mut Game) {
+    game.traps.register(game.hook(HOOK_EFFECT_SLOT), "coop_effect", TrapReturn::Observe, effect_slot);
+    let emitter = emitter(game);
+    game.traps.register(emitter, "coop_effect_oam", TrapReturn::Observe, effect_oam);
     game.traps.register(game.hook(HOOK_PLATFORM), "coop_platform", TrapReturn::Observe, platform);
     game.traps.register(game.hook(HOOK_PLATFORM_TOUCH), "coop_platform_touch", TrapReturn::Observe, platform);
     game.traps.register(game.hook(HOOK_CAR), "coop_car", TrapReturn::Observe, platform);
@@ -152,6 +170,72 @@ fn pickup(game: &mut Game) {
     *game.wram_mut() = *snap;
     game.coop.p2 = p2;
     game.coop.p2_scratch = scratch;
+}
+
+/// [`HOOK_EFFECT_SLOT`]: an effect P2 spawned (`CoopState::p2_fx`) updates
+/// isolated with P2's block in place, and the ROM's pass is skipped. Effects
+/// read their owner's block by absolute address (the hurt flash, type `$0B`,
+/// sits on `$0BAD/$0BB0` and ends with the i-frames), so in the ROM's pass
+/// P2's flash was drawn on P1, and its real-time cost made P1 lag a frame
+/// early on NTSC (M3 of the Rev 1 QA route; docs/rom-variants.md).
+fn effect_slot(game: &mut Game) {
+    let r = game.regs();
+    let k = r.d.wrapping_sub(FX_FIRST) / FX_STRIDE;
+    if !game.coop.enabled || game.coop.in_contact || k >= FX_SLOTS || game.coop.p2_fx >> k & 1 == 0 {
+        return;
+    }
+    let (pc, base) = (r.pbr_pc(), usize::from(r.d));
+    let bank = pc & 0xFF_0000;
+    let table = u16::from_le_bytes([game.rom_read(pc + 9), game.rom_read(pc + 10)]);
+    let w = game.wram_mut();
+    w[base + 0x0E] &= !0x80;
+    let x = w[base + 0x0A] << 1;
+    let at = bank | u32::from(table.wrapping_add(u16::from(x)));
+    let target = bank | u32::from(u16::from_le_bytes([game.rom_read(at), game.rom_read(at + 1)]));
+    let mut regs = r;
+    regs.a = (regs.a & 0xFF00) | u16::from(x);
+    regs.x = u16::from(x);
+    game.set_regs(regs);
+    game.coop.in_contact = true;
+    with_p2_swapped(game, |game| game.call_isolated_ret(target, TrapReturn::Rts));
+    game.coop.in_contact = false;
+    if game.wram()[base] == 0 {
+        game.coop.p2_fx &= !(1 << k);
+    }
+    regs.pc = (pc as u16).wrapping_add(11);
+    game.set_regs(regs);
+}
+
+/// The object sprite emitter (listing `$80:D67C`, `X` = the object; `JSR`
+/// from the OAM build's draw lists), found through the player's own call
+/// `LDX #$0BA8; LDA $0E,X; BEQ; JSR emitter` ([`crate::coop::PLAYER_OAM`]).
+fn emitter(game: &Game) -> u32 {
+    let at = game.hook(crate::coop::PLAYER_OAM) + 8;
+    (at & 0xFF_0000) | u32::from(u16::from_le_bytes([game.rom_read(at), game.rom_read(at + 1)]))
+}
+
+/// OAM cursor (next slot) during the build.
+const OAM_CURSOR: usize = 0xE4;
+
+/// The emitter is about to draw a P2 effect (it queued itself on a draw
+/// list in its isolated update): draw it isolated too and return from the
+/// `JSR`, so P2's effects cost P1 no CPU time. The emitter's overflow exit
+/// (after slot 127: `PLX; PLX; JMP`) would unwind through the isolated
+/// call's sentinel, so an effect that might not fit is not drawn.
+fn effect_oam(game: &mut Game) {
+    let r = game.regs();
+    let k = r.x.wrapping_sub(FX_FIRST) / FX_STRIDE;
+    if !game.coop.enabled || game.coop.in_contact || k >= FX_SLOTS || !r.x.wrapping_sub(FX_FIRST).is_multiple_of(FX_STRIDE) || game.coop.p2_fx >> k & 1 == 0 {
+        return;
+    }
+    let base = usize::from(r.x);
+    let need = crate::coop::layout_len(game, &game.wram()[base..base + usize::from(FX_STRIDE)]);
+    if usize::from(game.wram()[OAM_CURSOR]) + need < 128 - crate::coop_hud::HUD_SLOTS {
+        game.coop.in_contact = true; // the call starts on this trap
+        game.call_isolated_ret(r.pbr_pc(), TrapReturn::Rts);
+        game.coop.in_contact = false;
+    }
+    game.emulate_return(false);
 }
 
 fn run_isolated(game: &mut Game, pc: u32, p2: bool) {

@@ -205,6 +205,9 @@ pub struct CoopState {
     pub p2_items: u64,
     /// Slots of the shot table ([`X_SHOTS`]) holding P2's shots (bit n = slot n).
     pub p2_shots: u8,
+    /// Effect-pool slots P2's slices spawned (bit n = `$1928 + n * $20`),
+    /// see `coop_objects::effect_slot`.
+    pub p2_fx: u32,
     /// X3 Zero frame whose tiles are in the PPU's P2 page (`u16::MAX`: none
     /// yet). Only used with `Game::set_zero_set`.
     pub zero_frame: u16,
@@ -241,6 +244,7 @@ impl Default for CoopState {
             p2_on_obj: 0,
             p2_items: 0,
             p2_shots: 0,
+            p2_fx: 0,
             zero_frame: u16::MAX,
             saber: Default::default(),
             wave_frames: [u16::MAX; 2],
@@ -588,6 +592,8 @@ pub(crate) fn with_p2_swapped(game: &mut Game, f: impl FnOnce(&mut Game)) {
     let mut p2 = game.coop.p2;
     let mut scratch = game.coop.p2_scratch;
     let snd = game.wram()[SND_WRITE];
+    let fx = crate::coop_objects::effects_live(game.wram());
+    game.coop.p2_fx &= fx;
     let w = game.wram_mut();
     swap_block(w, &mut p2);
     swap_scratch(w, &mut scratch);
@@ -606,13 +612,15 @@ pub(crate) fn with_p2_swapped(game: &mut Game, f: impl FnOnce(&mut Game)) {
     }
     game.coop.p2 = p2;
     game.coop.p2_scratch = scratch;
+    // Effects P2 spawned are P2's (they read the owner's block every frame).
+    game.coop.p2_fx |= crate::coop_objects::effects_live(game.wram()) & !fx;
     if let Some(b) = before {
         let d: Vec<String> = (0..0x20000)
             .filter(|&i| b[i] != game.wram()[i])
             .map(|i| format!("${:05X}:{:02X}->{:02X}", 0x7E0000 + i, b[i], game.wram()[i]))
             .collect();
         if !d.is_empty() {
-            eprintln!("coop diff frame {} {}", game.frame_count(), d.join(" "));
+            eprintln!("coop diff frame {} {:?} {}", game.frame_count(), game.traplog.last().map(|t| t.name), d.join(" "));
         }
     }
 }
@@ -732,7 +740,7 @@ fn p2_display(game: &mut Game) {
 /// Sprites the emitter `$80:D67C` would write for object `obj` (upper bound:
 /// it skips off-screen pieces): 0 unless `+$0E` (visible), else the first
 /// byte of its frame layout (see [`LAYOUT_SETS`]).
-fn layout_len(game: &Game, obj: &[u8]) -> usize {
+pub(crate) fn layout_len(game: &Game, obj: &[u8]) -> usize {
     if obj[0x0E] == 0 {
         return 0;
     }

@@ -58,6 +58,7 @@ pub enum HookId {
     PickupC,
     Streamer,
     StreamerExit,
+    EffectSlot,
 }
 
 const fn hook(id: HookId, name: &'static str, addr_pal: u32, sig_offset: i32, sig: &'static str) -> Hook {
@@ -69,7 +70,7 @@ use HookId::*;
 /// Indexed by `HookId as usize`. Signatures extracted from the PAL dump
 /// (unique in the whole ROM with their wildcards; `hooks::tests`).
 #[rustfmt::skip]
-pub const HOOKS: [Hook; 27] = [
+pub const HOOKS: [Hook; 28] = [
     hook(P2Update, "p2_update", 0x80D1EF, -4, "22 ?? ?? ?? 9C D4 0B AE 13 1F F0 05 20 ?? ?? 80"),
     hook(P2Physics, "p2_physics", 0x80D241, -4, "22 ?? ?? ?? 9C 1C 1F AE 19 1F D0 09 20 ?? ?? 20"),
     hook(P2Display, "p2_display", 0x809A86, -3, "20 ?? ?? AD 30 1F C9 80 D0 07 9C 30 1F A9 0F 85"),
@@ -99,6 +100,7 @@ pub const HOOKS: [Hook; 27] = [
     hook(PickupC, "pickup_c", 0x81E33A, 18, "64 18 64 28 A9 FF 85 26 AD B9 0B 29 30 09 02 85"),
     hook(Streamer, "streamer", 0x848FCA, 0, "08 E2 30 AF ?? ?? ?? CF ?? ?? ?? F0 03 EE 9D 1F"),
     hook(StreamerExit, "streamer_exit", 0x849083, 0, "AB 28 6B 08 C2 20 AD A6 0B 0A 18 6D A6 0B EB E2"),
+    hook(EffectSlot, "effect_slot", 0x80D326, -12, "C2 20 A9 28 19 5B E2 30 A5 00 F0 0B A9 80 14 0E"),
 ];
 
 impl HookId {
