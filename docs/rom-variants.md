@@ -1,6 +1,6 @@
 # ROM variants
 
-Every routine the co-op, Zero and display traps hook or call (27 of them) is
+Every routine the co-op, Zero and display traps hook or call (28 of them) is
 listed in `crates/mmx-core/src/hooks.rs` with its address on our dump and a
 16-byte signature (`??` over operands that point into ROM: call/jump targets,
 long addresses into banks `$80+`, words `>= $8000`). At load
@@ -16,7 +16,7 @@ moved on v1.1.
 | dump | sha256 | hooks | checked |
 |---|---|---|---|
 | Europe (PAL) v1.0, `$FFD9 = 2` | `1c41bb11c9df5aa8…` | all where traced (the table's own addresses) | everything: tests, verify, `coop-qa.sh`, netplay |
-| USA (NTSC) v1.1 (Rev 1), `$FFD9 = 1` | `b8f70a6e7fb93819…` | 16 relocated: bank `$80` `+$20` (`$9A86`, `$9A94`), `+$2B` (from `$D1EF` on); banks `$81/$82/$84` as PAL | parity verify, `zero_p1_palette_stable`, `hooks::resolves_on_usa_v11`, `coop-qa.sh` on its own states |
+| USA (NTSC) v1.1 (Rev 1), `$FFD9 = 1` | `b8f70a6e7fb93819…` | 17 relocated: bank `$80` `+$20` (`$9A86`, `$9A94`), `+$2B` (from `$D1EF` on); banks `$81/$82/$84` as PAL | parity verify, `zero_p1_palette_stable`, `hooks::resolves_on_usa_v11`, `coop-qa.sh` on its own states |
 | USA (NTSC) v1.0 | - | not seen yet (the disassembly's PCs are up to `0x41` off ours in bank `$80`) | - |
 
 `cargo xtask rominfo` prints where each hook landed ("as PAL", "relocated by
@@ -29,14 +29,27 @@ send back:
     MMX_ROM=path/to/dump cargo xtask dump --out target/v --frames 1500 --tap 200,400,600,800,1000 --at 1500 --save 1500=states/NEW-highway-start.state
     QA_STATES=states/NEW HIGHWAY_START=states/NEW-highway-start.state QA_OUT=target/qa-NEW MMX_ROM=path/to/dump scripts/coop-qa.sh all
 
-On v1.1 (`states/usa11/`, NTSC) `coop-qa.sh` gives P1 idle parity yes for
-M0-M2, M4-M6 and M8, but **no** for M3 (P1 gets one extra lag frame at f269,
-both players in knockback; parity comes back with `--untrap 849B03`, the
-contact pass) and M7 (camera 3 px off at f600). The same route replayed on
-v1.1 at PAL timing (`MMX_TIMING=pal`, `states/usa11pal/`) is idle-clean on
-all nine, and the contact routine `$84:9B03..$84:9E00` is byte-identical on
-both dumps, so this is P2's presence tipping NTSC's shorter frame budget,
-not a misplaced hook. Open.
+On v1.1 (`states/usa11/`, NTSC) `coop-qa.sh check` (with
+`HIGHWAY_START=states/usa11-highway-start.state`) gives P1 idle parity yes
+on all nine milestones; mirror no on M3 and M7 (P2's shots and contacts
+change the fight). Same on v1.1 at PAL timing (`MMX_TIMING=pal`,
+`states/usa11pal/`: mirror no on M3, M4) and on the PAL dump (mirror no on
+M3, M6, M7).
+
+It used to be no on M3 (one extra P1 lag frame at f269) and M7 (a lag
+frame at f67, camera off at f600). Not a leak from `call_isolated`: `cargo
+xtask lagdiff` (solo and co-op side by side, real-time opcode fetches with
+master-clock stamps) showed P1's main loop identical up to the object
+master call at `$80:D287` (Rev 1), which took 1.6-1.8k master cycles more
+every frame in co-op, and M7's OAM build ~6.5k more. Both were P2's hurt
+flash (effect type `$0B`): P2's player update spawns it into the shared
+effect pool `$1928`, and the ROM then updated it (it sits on `$0BAD/$0BB0`,
+so it was drawn on P1) and drew it in real time. The game already runs at
+30 fps there (every other frame lags) and NTSC's frame is shorter, so the
+extra work tipped one more lag frame; PAL had the slack. Fix: effects
+spawned by a P2 slice are P2's (`CoopState::p2_fx`); their update runs
+isolated with P2's block (hook `effect_slot`) and their draw isolated (trap
+on the sprite emitter), docs/coop.md "Effects".
 
 (QA states are per dump; at PAL timing the boot needs taps up to 1400 and
 ~1700 frames. A save state from one dump does not load on

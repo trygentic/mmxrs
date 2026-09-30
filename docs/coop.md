@@ -320,6 +320,27 @@ Option (a) (a few lines): the three slots are swapped with the block
 `$80:D640` runs in P2's display slice before `$80:D671`. P2 gets its own
 armour parts, positioned on P2.
 
+## Effects `$1928`
+
+31 slots of `$20` (`+0` active, `+$0A` type): dash dust, sparks, the hurt
+flash. Updated by the loop `$80:D31A` (PAL; `$80:D345` Rev 1), `JSR` from
+the object master, `D` = the slot: `LDA #$80; TRB $0E; LDA $0A; ASL; TAX;
+JSR (tbl,X)` per active slot (hook `effect_slot`, the `LDA #$80`). An
+update queues the effect on a draw list; the OAM build draws it with the
+sprite emitter (listing `$80:D67C`, `X` = the object).
+
+Every slot a P2 slice makes active is P2's (`CoopState::p2_fx`, bookkept in
+`with_p2_swapped`; dropped when the slot is free). For those,
+`coop_objects::effect_slot` does the `TRB`, runs the table entry isolated
+with P2's block swapped in and skips to the loop step (`+11`), and
+`effect_oam` runs the emitter isolated and returns from its `JSR` (not
+drawn if it might pass OAM slot 127: the emitter's overflow exit would
+unwind through the sentinel). The hurt flash (`$0B`) reads its owner's
+position every frame: before this it sat on P1, and its real-time update
+and draw made P1 lag a frame early on NTSC (docs/rom-variants.md).
+ponytail: a P2 effect freed by someone else and reused by P1 before P2's
+next slice would stay P2's for a frame.
+
 ## Shots (B3)
 
 X's shots live in `$1228` (8 slots of `$40`, `+0` = active; `ram::ITEMS_BASE`).

@@ -175,3 +175,8 @@ fall, `$0A` land, `$0C` death, `$0E` hurt, `$10` wall kick, `$12` wall slide,
 
 Every idle run keeps P1 byte-identical to solo; every mirror "no" is a gameplay
 difference P2 causes on purpose, not a leak.
+
+After P2's effects went isolated (docs/coop.md "Effects"): idle yes on all
+nine; mirror now yes on m4 and no on m6 (P2 is hit there, and its hurt
+flash no longer costs P1 CPU time, so the fight's lag frames and the boss's
+death move).
