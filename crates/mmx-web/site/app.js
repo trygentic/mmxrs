@@ -32,6 +32,7 @@ async function loadRom(file) {
     const e = new Emu(rom);
     e.set_coop(coop);
     if (x3) e.set_x3_rom(x3);
+    if (x3 && zero) e.set_p1_zero(true);
     emu = e;
     const info = JSON.parse(emu.rom_info_json());
     msg = `${info.title.trim()} v1.${info.version} sha256 ${info.sha256.slice(0, 16)}…`;
@@ -52,7 +53,8 @@ $('x3rom').addEventListener('change', async (e) => {
     const bytes = new Uint8Array(await f.arrayBuffer());
     emu?.set_x3_rom(bytes);
     x3 = bytes;
-    msg = 'X3 loaded: P2 is Zero';
+    if (zero) emu?.set_p1_zero(true);
+    msg = zero ? 'X3 loaded: P1 and P2 are Zero' : 'X3 loaded: P2 is Zero';
   } catch (err) {
     msg = `X3 ROM rejected: ${err}`;
   }
@@ -65,6 +67,16 @@ addEventListener('drop', (e) => {
   document.body.classList.remove('drag');
   const f = e.dataTransfer.files[0];
   if (f) loadRom(f);
+});
+
+// Play as Zero (P1): needs the X3 ROM; unchecks itself without one.
+let zero = false;
+$('zero').addEventListener('change', (e) => {
+  zero = e.target.checked && !!x3;
+  e.target.checked = zero;
+  if (!zero && !x3) msg = 'Play as Zero needs the Mega Man X3 ROM: load it first';
+  emu?.set_p1_zero(zero);
+  status();
 });
 
 $('coop').checked = coop;

@@ -38,8 +38,12 @@ fn main() {
             std::process::exit(1);
         })
     });
+    if args.zero && x3.is_none() {
+        eprintln!("--zero needs a Mega Man X3 (USA) ROM: pass --x3-rom PATH or set MMX_X3_ROM");
+        std::process::exit(2);
+    }
     let net = args.net.as_ref().map(|(host, room)| {
-        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.mode, args.net_delay(), x3.as_ref())
+        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.mode, args.net_delay(), x3.as_ref(), args.zero)
             .unwrap_or_else(|e| {
                 eprintln!("netplay: {e}");
                 std::process::exit(2);
@@ -56,6 +60,8 @@ fn main() {
     if game.coop.enabled {
         mmx_core::coop::register_coop_traps(&mut game);
     }
+    // `--zero`: P1 plays as Zero (single player, local co-op or online).
+    game.set_p1_zero(args.zero).expect("X3 set checked above");
 
     if args.headless {
         match headless::run(&mut game, &args) {
