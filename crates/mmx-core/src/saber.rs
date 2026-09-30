@@ -146,33 +146,49 @@ pub fn shot_bytes(p2: &[u8], air: bool) -> [u8; SHOT_LEN] {
     s
 }
 
-/// [`HOOK_SHOTS_DONE`]: put the arc's shot into a free slot for the enemy loop.
+/// [`HOOK_SHOTS_DONE`]: put each swing's arc shot (a Zero P1's, P2's) into
+/// a free slot for the enemy loop.
 pub fn shots_done(game: &mut Game) {
-    let c = &game.coop;
-    if !c.enabled || c.p2_hidden || game.zero_set.is_none() || !arc(&c.saber) {
+    if game.zero_set.is_none() {
         return;
     }
-    let shot = shot_bytes(&c.p2, c.saber.air);
-    let w = game.wram_mut();
-    let Some(k) = (0..8).find(|&k| w[ix(SHOTS) + k * SHOT_LEN] == 0) else { return };
-    w[ix(SHOTS) + k * SHOT_LEN..][..SHOT_LEN].copy_from_slice(&shot);
-    game.coop.saber.slot = k as u8;
+    if game.coop.p1.on && arc(&game.coop.p1.saber) {
+        let b = ix(crate::ram::X_BASE);
+        let shot = shot_bytes(&game.wram()[b..b + crate::ram::X_BLOCK_LEN], game.coop.p1.saber.air);
+        game.coop.p1.saber.slot = put_shot(game, &shot);
+    }
+    let c = &game.coop;
+    if c.enabled && !c.p2_hidden && arc(&c.saber) {
+        let shot = shot_bytes(&c.p2, c.saber.air);
+        game.coop.saber.slot = put_shot(game, &shot);
+    }
 }
 
-/// Physics hook (after the enemy loop): take the shot back out; a hit
+/// Into the first free slot; the slot, or `0xFF` when the table is full.
+fn put_shot(game: &mut Game, shot: &[u8; SHOT_LEN]) -> u8 {
+    let w = game.wram_mut();
+    let Some(k) = (0..8).find(|&k| w[ix(SHOTS) + k * SHOT_LEN] == 0) else { return 0xFF };
+    w[ix(SHOTS) + k * SHOT_LEN..][..SHOT_LEN].copy_from_slice(shot);
+    k as u8
+}
+
+/// Physics hook (after the enemy loop): take the shots back out; a hit
 /// (`+30` bumped by `$84:9E15`) ends the swing's damage.
 pub fn take_back(game: &mut Game) {
-    let k = game.coop.saber.slot;
-    if k == 0xFF {
-        return;
+    let mut p1 = game.coop.p1.saber;
+    let mut p2 = game.coop.saber;
+    for s in [&mut p1, &mut p2] {
+        let k = std::mem::replace(&mut s.slot, 0xFF);
+        if k == 0xFF {
+            continue;
+        }
+        let o = ix(SHOTS) + usize::from(k) * SHOT_LEN;
+        let w = game.wram_mut();
+        s.hit |= w[o + 0x30] != 0;
+        w[o..o + SHOT_LEN].fill(0);
     }
-    game.coop.saber.slot = 0xFF;
-    let o = ix(SHOTS) + usize::from(k) * SHOT_LEN;
-    let w = game.wram_mut();
-    if w[o + 0x30] != 0 {
-        game.coop.saber.hit = true;
-    }
-    game.wram_mut()[o..o + SHOT_LEN].fill(0);
+    game.coop.p1.saber = p1;
+    game.coop.saber = p2;
 }
 
 #[cfg(test)]

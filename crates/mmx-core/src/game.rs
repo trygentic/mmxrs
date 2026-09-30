@@ -9,7 +9,7 @@ use jgenesis_common::frontend::{
 };
 use sha2::{Digest, Sha256};
 use snes_config::SnesJoypadState;
-use snes_core::api::{CoprocessorRoms, P2Tiles, SnesEmulator, SnesEmulatorConfig, P2_PAGE_WORDS};
+use snes_core::api::{CoprocessorRoms, P2Tiles, SnesEmulator, SnesEmulatorConfig, P2_PAGES, P2_PAGE_WORDS};
 use snes_core::input::{SnesController, SnesInputs};
 
 use crate::traps::{TrapRecord, TrapReturn};
@@ -22,9 +22,11 @@ use crate::{coop, Pads, Registers, RomError, RomInfo, TrapLog, TrapTable};
 const SENTINEL_PC: u16 = 0xFFFF;
 /// CPU cycles `call_isolated` allows before giving up (a few frames' worth).
 const CALL_ISOLATED_BUDGET: u32 = 2_000_000;
-/// Version marker before the appended P2 tile page in a save state. v1 (no
-/// marker) had a 512-word page; its tail is ignored (empty page).
-const P2_TILES_MAGIC: &[u8; 4] = b"P2T2";
+/// Version marker before the appended P2 tile pages in a save state. v1 (no
+/// marker) had a 512-word page; its tail is ignored (empty page). v2
+/// (`P2T2`) had one 768-word page: it loads as page 0.
+const P2_TILES_MAGIC: &[u8; 4] = b"P2T3";
+const P2_TILES_MAGIC_V2: &[u8; 4] = b"P2T2";
 
 pub struct Game {
     pub traps: TrapTable,
@@ -202,6 +204,7 @@ impl Game {
     pub fn set_zero_set(&mut self, set: Option<crate::zero_data::ZeroSet>) {
         self.zero_set = set.map(std::sync::Arc::new);
         self.coop.zero_frame = u16::MAX; // refill the page on the next draw
+        self.coop.p1.frame = u16::MAX;
     }
 
     /// [`Game::set_zero_set`] from a Mega Man X3 (USA) image (copier header ok).
@@ -213,6 +216,24 @@ impl Game {
 
     pub fn zero_set(&self) -> Option<&crate::zero_data::ZeroSet> {
         self.zero_set.as_deref()
+    }
+
+    /// Player 1 plays as X3 Zero (docs/zero.md "Playing as Zero"): needs the
+    /// X3 set ([`Game::set_x3_rom`]); registers the co-op trap group (its
+    /// P2 hooks stay idle while `coop.enabled` is false).
+    pub fn set_p1_zero(&mut self, on: bool) -> Result<(), String> {
+        if on && self.zero_set.is_none() {
+            return Err("playing as Zero needs a Mega Man X3 (USA) ROM (--x3-rom PATH or MMX_X3_ROM)".into());
+        }
+        self.coop.p1 = crate::zero::ZeroP1 { on, ..Default::default() };
+        if on {
+            coop::register_coop_traps(self);
+        }
+        Ok(())
+    }
+
+    pub fn p1_zero(&self) -> bool {
+        self.coop.p1.on
     }
 
     pub fn rom_info(&self) -> &RomInfo {
@@ -301,7 +322,7 @@ impl Game {
     }
 
     /// Pop the return address the `JSR`/`JSL` pushed; `PC = word + 1`.
-    fn emulate_return(&mut self, long: bool) {
+    pub(crate) fn emulate_return(&mut self, long: bool) {
         let mut r = self.regs();
         let lo = self.pop(&mut r);
         let hi = self.pop(&mut r);
@@ -360,19 +381,28 @@ impl Game {
         self.emu.obsel()
     }
 
-    /// P2's shadow sprite tile page (pending; live on the next OAM upload).
-    /// See `p2tiles.rs`. Part of the save state.
-    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; P2_PAGE_WORDS] {
+    /// The shadow sprite tile pages (pending; live on the next OAM upload):
+    /// page 0 is P2's, page 1 (`P2_PAGE_WORDS..`) a Zero P1's. See
+    /// `p2tiles.rs`. Part of the save state.
+    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; P2_PAGE_WORDS * P2_PAGES] {
         self.emu.p2_tile_page_mut()
     }
 
-    /// OAM slots (bit n = slot n) that read the P2 page instead of VRAM.
+    /// OAM slots (bit n = slot n) that read the shadow pages instead of VRAM
+    /// (all of them page 0).
     pub fn set_p2_tile_slots(&mut self, mask: u128) {
-        self.emu.set_p2_tile_slots(mask);
+        self.emu.set_p2_tile_slots(mask, 0);
     }
 
-    /// Live P2 page and slot mask (what the renderer uses now).
-    pub fn p2_tiles(&self) -> (&[u16; P2_PAGE_WORDS], u128) {
+    /// Add `mask` to the pending slot mask, reading page 1 when `page1`.
+    pub fn add_p2_tile_slots(&mut self, mask: u128, page1: bool) {
+        let t = self.emu.p2_tiles();
+        let p1 = if page1 { t.next_page1 | mask } else { t.next_page1 & !mask };
+        self.emu.set_p2_tile_slots(t.next_slots | mask, p1);
+    }
+
+    /// Live shadow pages and slot mask (what the renderer uses now).
+    pub fn p2_tiles(&self) -> (&[u16; P2_PAGE_WORDS * P2_PAGES], u128) {
         let t = self.emu.p2_tiles();
         (&t.page, t.slots)
     }
@@ -500,16 +530,24 @@ impl Game {
         let ((state, frame_count, fired_at), n): ((SnesEmulator, u64, Option<u32>), _) =
             bincode::decode_from_slice(s, cfg).map_err(|e| e.to_string())?;
         self.emu.load_state(state);
-        match s[n..].strip_prefix(P2_TILES_MAGIC.as_slice()) {
-            Some(tail) => {
-                let (t, _) = bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
-                self.emu.set_p2_tiles(t);
-            }
-            None => self.emu.set_p2_tiles(P2Tiles::default()),
+        if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC.as_slice()) {
+            let (t, _) = bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
+            self.emu.set_p2_tiles(t);
+        } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V2.as_slice()) {
+            type V2 = (Box<[u16; P2_PAGE_WORDS]>, u128, Box<[u16; P2_PAGE_WORDS]>, u128, bool);
+            let ((page, slots, next, next_slots, pending), _): (V2, _) =
+                bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
+            let mut t = P2Tiles { slots, next_slots, pending, ..P2Tiles::default() };
+            t.page[..P2_PAGE_WORDS].copy_from_slice(&page[..]);
+            t.next_page[..P2_PAGE_WORDS].copy_from_slice(&next[..]);
+            self.emu.set_p2_tiles(t);
+        } else {
+            self.emu.set_p2_tiles(P2Tiles::default());
         }
         self.frame_count = frame_count;
         self.fired_at = fired_at;
         self.coop.zero_frame = u16::MAX; // the page came from the state: refill it
+        self.coop.p1.frame = u16::MAX;
         Ok(())
     }
 }

@@ -7,7 +7,7 @@ use crate::input::SnesInputs;
 use crate::memory::dma::{DmaStatus, DmaUnit};
 use crate::memory::{CpuInternalRegisters, Memory};
 use crate::ppu::{Ppu, PpuTickEffect};
-pub use crate::ppu::{P2_PAGE_TILES, P2_PAGE_WORDS, P2Tiles}; // mmxrs patch
+pub use crate::ppu::{P2_PAGE_TILES, P2_PAGE_WORDS, P2_PAGES, P2Tiles}; // mmxrs patch
 use crate::{bus, ppu};
 use bincode::error::EncodeError;
 use bincode::{Decode, Encode};
@@ -314,12 +314,12 @@ impl SnesEmulator {
     }
 
     // mmxrs patch: P2 shadow sprite tile page (see `ppu::P2Tiles`)
-    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; ppu::P2_PAGE_WORDS] {
+    pub fn p2_tile_page_mut(&mut self) -> &mut [u16; ppu::P2_PAGE_WORDS * ppu::P2_PAGES] {
         self.ppu.p2_tile_page_mut()
     }
 
-    pub fn set_p2_tile_slots(&mut self, mask: u128) {
-        self.ppu.set_p2_tile_slots(mask);
+    pub fn set_p2_tile_slots(&mut self, mask: u128, page1: u128) {
+        self.ppu.set_p2_tile_slots(mask, page1);
     }
 
     /// The whole P2 page state (live and pending). Not in the bincode

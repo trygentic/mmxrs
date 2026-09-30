@@ -7,8 +7,8 @@
 //! CGRAM when `$A1 != 0`, then clears it).
 
 use crate::ram::{self, wram_index as ix};
-use crate::coop::CoopState;
 use crate::traps::TrapReturn;
+use crate::saber::Saber;
 use crate::zero_data::{zero_x3_frame_for, Sprite, ZeroSet};
 use crate::Game;
 
@@ -59,13 +59,13 @@ pub fn sprite_palette_offset(pal: u8) -> usize {
 
 // ------------------------------------------------------------ X3 Zero emitter
 
-/// X3 Zero frame for P2 (a saber swing's pose, else from the block's `+$02`
-/// action and `+$17` frame), `None` when the block is invisible (`+$0E = 0`,
-/// the i-frame blink). An action X3 has no pose for draws the stand frame.
-pub fn x3_frame(c: &CoopState) -> Option<usize> {
-    let obj = &c.p2;
+/// X3 Zero frame for a player block (a saber swing's pose, else from its
+/// `+$02` action and `+$17` frame), `None` when the block is invisible
+/// (`+$0E = 0`, the i-frame blink). An action X3 has no pose for draws the
+/// stand frame.
+pub fn x3_frame(obj: &[u8], saber: &Saber) -> Option<usize> {
     (obj[0x0E] != 0).then(|| {
-        crate::saber::frame(&c.saber).unwrap_or_else(|| zero_x3_frame_for(obj[0x02], obj[0x17]).unwrap_or(0))
+        crate::saber::frame(saber).unwrap_or_else(|| zero_x3_frame_for(obj[0x02], obj[0x17]).unwrap_or(0))
     })
 }
 
@@ -96,21 +96,26 @@ pub fn oam_entry(s: &Sprite, (ox, oy): (i16, i16), right: bool, attr: u8) -> Opt
 }
 
 /// P2 as X3 Zero, from OAM slot `first` (4-aligned): its frame's page into
-/// the PPU's P2 page (when the frame changed), its sprites into `$0700` and
+/// shadow page 0 (when the frame changed), its sprites into `$0700` and
 /// the high table `$0900`. Returns the slot past P2's last one.
 pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
     let p2 = game.coop.p2;
-    let Some(f) = x3_frame(&game.coop) else { return first };
+    let Some(f) = x3_frame(&p2, &game.coop.saber) else { return first };
     if game.coop.zero_frame != f as u16 {
         crate::p2tiles::fill_page(game, 0, &set.page(f));
         game.coop.zero_frame = f as u16;
     }
+    emit_frame(game, set, &p2, f, first, p2[0x11] & 0x30 | (pal & 7) << 1)
+}
+
+/// Frame `f` of `obj` (a player block) into OAM from slot `first`, `attr` =
+/// priority / palette bits. Returns the slot past the last one written.
+fn emit_frame(game: &mut Game, set: &ZeroSet, obj: &[u8], f: usize, first: u8, attr: u8) -> u8 {
     let w = game.wram();
     let cam = |a: u32| u16::from_le_bytes([w[ix(a)], w[ix(a) + 1]]);
-    let (ox, oy) = screen_origin(&p2, cam(ram::CAMERA_X), cam(ram::CAMERA_Y));
+    let (ox, oy) = screen_origin(obj, cam(ram::CAMERA_X), cam(ram::CAMERA_Y));
     let origin = (ox, oy + X3_Y_OFFSET);
-    let attr = p2[0x11] & 0x30 | (pal & 7) << 1;
-    let right = p2[0x11] & 0x40 != 0;
+    let right = obj[0x11] & 0x40 != 0;
     let mut slot = usize::from(first);
     let mut hi = 0u32;
     let w = game.wram_mut();
@@ -123,8 +128,8 @@ pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
         hi |= u32::from(h) << (2 * (slot - usize::from(first)));
         slot += 1;
     }
-    // High table: P2 owns whole bytes from `first`; keep the game's bits
-    // above P2's last slot in the last partial byte.
+    // High table: the player owns whole bytes from `first`; keep the game's
+    // bits above its last slot in the last partial byte.
     for (k, b) in (usize::from(first)..slot).step_by(4).enumerate() {
         let i = ix(OAM_HI) + b / 4;
         let n = (slot - b).min(4);
@@ -133,6 +138,106 @@ pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
     }
     slot as u8
 }
+
+// ------------------------------------------------------------ P1 as Zero
+
+/// P1 plays as Zero (`Game::set_p1_zero`). In `CoopState`, so rollback
+/// carries the swing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+pub struct ZeroP1 {
+    pub on: bool,
+    /// X3 frame in shadow page 1 (`u16::MAX`: none yet).
+    pub frame: u16,
+    pub saber: Saber,
+}
+
+impl Default for ZeroP1 {
+    fn default() -> Self {
+        Self { on: false, frame: u16::MAX, saber: Saber { slot: 0xFF, ..Default::default() } }
+    }
+}
+
+/// `$80:D640` (armour parts, `JSR` from the OAM build): not drawn on a Zero
+/// P1. `$80:D671` (the player emitter, next): Zero's frame goes through the
+/// build's own cursor instead ([`emit_p1`]), so P1 keeps X's place in the
+/// sprite order. Both then return for the ROM (Observe + `RTS` by hand);
+/// P2's isolated calls of the same routines run as before.
+fn skip_p1_parts(game: &mut Game) {
+    if game.coop.p1.on && game.isolated_depth == 0 {
+        game.emulate_return(false);
+    }
+}
+
+fn p1_emitter(game: &mut Game) {
+    if game.coop.p1.on && game.isolated_depth == 0 {
+        emit_p1(game);
+        game.emulate_return(false);
+    }
+}
+
+/// `$80:E518` entry (the input remapper, reads pad 1 `$A7`): P1's saber.
+/// X starts a swing; during one the pad is masked as for P2 (Start and
+/// Select pass). `$A7` (held) and `$AB` (pressed) are edited in place.
+fn p1_pad(game: &mut Game) {
+    if !game.coop.p1.on || game.isolated_depth > 0 || game.zero_set.is_none() {
+        return;
+    }
+    let w = game.wram();
+    let held = u16::from_le_bytes([w[ix(ram::PAD1_HELD)], w[ix(ram::PAD1_HELD) + 1]]);
+    let action = w[ix(ram::X_ACTION)];
+    let keep = held & (crate::BTN_START | crate::BTN_SELECT);
+    let pad = crate::saber::update(&mut game.coop.p1.saber, action, held) | keep;
+    let w = game.wram_mut();
+    w[ix(ram::PAD1_HELD)..][..2].copy_from_slice(&pad.to_le_bytes());
+    let pr = ix(ram::PAD1_PRESSED);
+    let pressed = u16::from_le_bytes([w[pr], w[pr + 1]]) & pad;
+    w[pr..pr + 2].copy_from_slice(&pressed.to_le_bytes());
+}
+
+/// P1 as Zero, the way `$80:D671` writes X: entries at the build's cursor
+/// `$E4`, 2 high-table bits per slot shifted into `$E6` and flushed to
+/// `$0900 + $E5` every 4 slots (the build's tail flushes a partial byte).
+/// Stops before slot 127 (the ROM's overflow exit is left to the lists after
+/// it). Tiles from shadow page 1, palette/priority from `+$11` (X's slot 1,
+/// which [`write_palette`] fills with Zero's colours); nothing while `+$0E =
+/// 0` (the i-frame blink).
+pub fn emit_p1(game: &mut Game) {
+    let Some(set) = game.zero_set.clone() else { return };
+    let b = ix(ram::X_BASE);
+    let obj: [u8; ram::X_BLOCK_LEN] = game.wram()[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
+    let Some(f) = x3_frame(&obj, &game.coop.p1.saber) else { return };
+    if game.coop.p1.frame != f as u16 {
+        crate::p2tiles::fill_page(game, crate::p2tiles::SHADOW_WORDS, &set.page(f));
+        game.coop.p1.frame = f as u16;
+    }
+    let w = game.wram_mut();
+    let cam = |a: u32| u16::from_le_bytes([w[ix(a)], w[ix(a) + 1]]);
+    let (ox, oy) = screen_origin(&obj, cam(ram::CAMERA_X), cam(ram::CAMERA_Y));
+    let right = obj[0x11] & 0x40 != 0;
+    let mut mask = 0u128;
+    for s in &set.frames[f].sprites {
+        let Some((e, h)) = oam_entry(s, (ox, oy + X3_Y_OFFSET), right, obj[0x11] & 0x3E) else { continue };
+        let slot = usize::from(w[OAM_CURSOR] & 0x7F);
+        if slot >= 127 {
+            break;
+        }
+        w[ix(ram::OAM_BUF) + slot * 4..][..4].copy_from_slice(&e);
+        mask |= 1 << slot;
+        w[OAM_HI_ACC] = w[OAM_HI_ACC] >> 2 | h << 6;
+        w[OAM_CURSOR] += 1;
+        if w[OAM_CURSOR] & 3 == 0 {
+            w[ix(OAM_HI) + usize::from(w[OAM_HI_INDEX])] = w[OAM_HI_ACC];
+            w[OAM_HI_INDEX] += 1;
+        }
+    }
+    game.add_p2_tile_slots(mask, true);
+}
+
+/// The OAM build's direct-page cursor (`$E4`), high-table byte index (`$E5`)
+/// and accumulator (`$E6`).
+const OAM_CURSOR: usize = 0xE4;
+const OAM_HI_INDEX: usize = 0xE5;
+const OAM_HI_ACC: usize = 0xE6;
 
 /// X3 Zero stands 8 px lower in his layouts than X (stand frame: feet at
 /// `+24` against X's `+16`, same in X1 and X3; X3 gives Zero his own,
@@ -144,6 +249,10 @@ const OAM_HI: u32 = 0x7E0900;
 
 pub fn register_zero_traps(game: &mut Game) {
     game.traps.register(HOOK_OAM_BUILD, "zero_oam_build", TrapReturn::Observe, oam_build);
+    // Observe: the bodies return early themselves when P1 is Zero.
+    game.traps.register(crate::coop::PLAYER_OAM, "zero_p1_emitter", TrapReturn::Observe, p1_emitter);
+    game.traps.register(crate::coop::FX_OAM, "zero_p1_skip_parts", TrapReturn::Observe, skip_p1_parts);
+    game.traps.register(crate::coop::INPUT_REMAP, "zero_p1_pad", TrapReturn::Observe, p1_pad);
     crate::p2tiles::register(game);
 }
 
@@ -153,18 +262,27 @@ fn oam_build(game: &mut Game) {
     write_palette(game);
 }
 
-/// Trap body: keep P2's sprite palette = `palette_for(X's)` in the mirror;
-/// flag an upload only when it changed (the game reloads palettes on stage
-/// load, fades and weapon swaps, so the check doubles as a repair).
+/// Trap body: keep P2's sprite palette = `palette_for(X's)` in the mirror
+/// (and a Zero P1's: Zero's palette over X's slot 1); flag an upload only
+/// when it changed (the game reloads palettes on stage load, fades and
+/// weapon swaps, so the check doubles as a repair).
 pub fn write_palette(game: &mut Game) {
+    if let Some(z) = game.zero_set.as_ref().filter(|_| game.coop.p1.on) {
+        let pal = z.palette;
+        put_palette(game, X_SPRITE_PALETTE, &pal);
+    }
     if !game.coop.enabled || game.coop.p2_hidden {
         return;
     }
-    let dst = sprite_palette_offset(game.coop.zero_palette);
     let src = sprite_palette_offset(X_SPRITE_PALETTE);
     let w = game.wram_mut();
     let x: [u16; 16] = std::array::from_fn(|i| u16::from_le_bytes([w[src + 2 * i], w[src + 2 * i + 1]]));
     let want = game.zero_set.as_ref().map_or_else(|| palette_for(&x), |z| z.palette);
+    put_palette(game, game.coop.zero_palette, &want);
+}
+
+fn put_palette(game: &mut Game, pal: u8, want: &[u16; 16]) {
+    let dst = sprite_palette_offset(pal);
     let w = game.wram_mut();
     let mut dirty = false;
     for (i, c) in want.iter().enumerate() {
