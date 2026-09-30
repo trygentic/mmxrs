@@ -11,8 +11,9 @@
 //!
 //! Hooks (all `TrapReturn::Observe`: the body runs, then the ROM bytes; real
 //! cartridge PCs, see the constants below): update slice after `$81:812E`,
-//! physics slice after `$81:9D67`, display slice after the player emitter,
-//! and a contact pass on every enemy's `JSL $84:9B03`.
+//! physics slice after `$81:9D67`, display slice after the whole OAM build
+//! (plus a hide of P2's old slots at the build's start), and a contact pass
+//! on every enemy's `JSL $84:9B03`.
 //!
 //! Default off: every body returns first thing when `enabled` is false, so a
 //! registered-but-disabled group leaves the game byte-identical.
@@ -21,6 +22,7 @@
 //! which ticks only the CPU (no PPU/APU/master clock), so P2 never makes the
 //! main loop lag.
 
+use crate::coop_stages;
 use crate::ram::{self, wram_index as ix, X_BLOCK_LEN};
 use crate::traps::TrapReturn;
 use crate::{Game, BTN_SELECT, BTN_START};
@@ -36,9 +38,20 @@ pub const HOOK_UPDATE: u32 = 0x80D1EF;
 /// P2 physics slice hook: the instruction after `JSL $81:9D67` at `$80:D23D`
 /// (the object master, after the enemy loops). Confirmed by trace.
 pub const HOOK_PHYSICS: u32 = 0x80D241;
-/// P2 display slice hook: `$80:D5FA` (OAM lists 3-5), the call right after the
-/// player emitter inside the OAM build `$80:D544`. Confirmed by trace.
-pub const HOOK_DISPLAY: u32 = 0x80D5FA;
+/// P2 display slice hook: `$80:9A86`, the instruction after `JSR $80:D544`
+/// (the OAM build) at `$80:9A83` in the per-frame stage code. The build ends
+/// with the hide loop over slots `$E4..$E3` and leaves `$E3` = slots used,
+/// `$E4..$EB` = 0; `trace --calls` shows D544 entered once, from 9A83, and
+/// nothing after 9A86 in the frame touches `$E3`/`$E4`. Emitting here (and
+/// putting `$E3`/`$E4` back) keeps the ROM's hide loop, and so P1's lag
+/// frames, identical to a solo run (B4: emitting inside the build shortened
+/// the loop and dropped a lag frame). The camera is final for the frame here.
+pub const HOOK_DISPLAY: u32 = 0x809A86;
+/// Second instruction of the OAM build (`$80:D544 PHP`, `$D545 PHB`): P2's
+/// slots from the previous frame are hidden here, every build, including the
+/// weapon menu's (paused frames `JMP $D544` and never reach [`HOOK_DISPLAY`]).
+/// `$D544` itself is taken by `zero::HOOK_OAM_BUILD`.
+pub const HOOK_OAM_HIDE: u32 = 0x80D545;
 /// Enemy-vs-X contact routine: every enemy's AI `JSL`s it with `D` = the
 /// enemy (154 call sites; `$82:9C41` for the Highway bikes), `RTL`, A=1 on a
 /// hit. It checks X's i-frames (`$0C30`/`$0C32`, in the block), runs the box
@@ -68,9 +81,15 @@ pub const FX_OAM: u32 = 0x80D640;
 /// Direct-page OAM cursor: next free OAM slot (`AND #$7F`, `*4` = byte
 /// offset into `$0700`). `$E5` = high-table byte index, `$E6` = accumulator.
 const OAM_CURSOR: usize = 0x00E4;
-/// `$D2` / `$D3` values for "in stage" / "gameplay".
-const MODE_IN_STAGE: u8 = 4;
-const PHASE_GAMEPLAY: u8 = 4;
+const OAM_HI_INDEX: usize = 0x00E5;
+const OAM_HI_ACC: usize = 0x00E6;
+/// Slots the game used last build (`$E3`, written at the end of `$80:D544`).
+const OAM_USED: usize = 0x00E3;
+/// OAM high table (`$0900`, 2 bits per slot: X bit 8, size).
+const OAM_HI: u32 = 0x7E0900;
+/// Y the ROM's hide loop (`$80:D594`) writes into unused slots. It writes
+/// nothing else (no size / high-table bits), so neither do we.
+const OAM_HIDDEN_Y: u8 = 0xE0;
 /// Pad-2 held word (`$AD` low = `$4218`, `$AE` high = `$4219`).
 const PAD2_HELD: u32 = ram::PAD2_HELD;
 
@@ -129,10 +148,10 @@ pub const P2_DOWN_FRAMES: u16 = 120;
 pub const ZERO_PALETTE: u8 = 3;
 /// P2's VRAM tile base (`+$18`), see `respawn_anchor`.
 pub const P2_TILE_BASE: u8 = 0x40; // free on every stage measured (docs/zero.md); 7 belongs to enemies
-/// Skip the P2 display pass when fewer OAM slots than this are left: the
-/// emitter's overflow exit (`$80:D77B`: `PLX; PLX; JMP $D5E2`) would unwind
-/// through `call_isolated`'s sentinel frame. unverified: X's max sprite count.
-const P2_MAX_SPRITES: u8 = 32;
+/// Frame-layout table of the sprite emitter (`$80:D6AA`): `+$16` (set) * 3
+/// -> 24-bit pointer to the set's frame list, `+$17 & $7F` (frame) * 3 ->
+/// 24-bit pointer to the layout, whose first byte is its sprite count.
+const LAYOUT_SETS: u32 = 0x8D8000;
 
 // ------------------------------------------------------------ state
 
@@ -145,13 +164,13 @@ pub struct CoopState {
     pub p2: [u8; X_BLOCK_LEN],
     /// Not in play (outside stage gameplay, or down). Re-anchors on show.
     pub p2_hidden: bool,
-    /// First OAM slot P2 got this frame (diagnostic).
+    /// First OAM slot past the game's (`$E3`) when P2 was last emitted; P2's
+    /// slots (and alignment padding) are `base..base + count`, hidden again
+    /// at the next OAM build ([`HOOK_OAM_HIDE`]).
     pub p2_oam_base: usize,
-    /// P1's Y on the previous frame while P2 waits to be anchored.
-    pub last_p1_y: Option<u16>,
     /// P2's copy of [`P2_SWAPPED`].
     pub p2_scratch: [u8; P2_SWAPPED_LEN],
-    /// OAM slots the emitter wrote for P2 this frame (diagnostic).
+    /// See [`CoopState::p2_oam_base`].
     pub p2_oam_count: usize,
     /// `(D, DB, P)` seen at the display hook (diagnostic).
     pub dbg_regs: (u16, u8, u8),
@@ -172,7 +191,6 @@ impl Default for CoopState {
             p2: [0; X_BLOCK_LEN],
             p2_hidden: true,
             p2_oam_base: 0,
-            last_p1_y: None,
             p2_scratch: [0; P2_SWAPPED_LEN],
             p2_oam_count: 0,
             dbg_regs: (0, 0, 0),
@@ -206,11 +224,11 @@ pub fn sound_pending(write: u8, read: u8) -> u8 {
     (write.wrapping_sub(read) & 0x1E) / 2
 }
 
-/// Clamp P2's world X into the visible window `[cam, cam + 256 - 16]`.
-/// unverified: `$05` is the sprite anchor (emitter offsets are -8/-16), so a
-/// tighter window may look better once seen on screen.
+/// Clamp P2's world X into `[cam + 8, cam + 248]`. `$05` is the sprite
+/// centre (the emitter draws X at -8/-16 around it), so the whole 16 px body
+/// stays on screen (B5: `[cam, cam + 240]` showed half a sprite on the left).
 pub fn clamp_p2_x(x: u16, camera_x: u16) -> u16 {
-    x.clamp(camera_x, camera_x.saturating_add(256 - 16))
+    x.clamp(camera_x.saturating_add(8), camera_x.saturating_add(248))
 }
 
 /// Force sprite palette `pal` (0-7) on one 4-byte OAM entry (attribute byte
@@ -242,12 +260,6 @@ pub fn respawn_anchor(wram: &[u8; 0x20000]) -> [u8; X_BLOCK_LEN] {
     p2
 }
 
-/// Pit rule of the camera code `$80:E14A`: more than `$20` px below the
-/// bottom of the 224-line screen. Signed like the ROM's `CMP`/`BMI`.
-pub fn fell_off(y: u16, cam_y: u16) -> bool {
-    (y.wrapping_sub(0x20).wrapping_sub(cam_y.wrapping_add(0xE0)) as i16) >= 0
-}
-
 /// P2 is dead: `$81:96CB` sets action `$0C` and HP `$80`.
 pub fn p2_is_down(p2: &[u8; X_BLOCK_LEN]) -> bool {
     p2[OFF_ACTION] == ACTION_DEATH || p2[OFF_HP] & 0x7F == 0
@@ -260,6 +272,7 @@ pub fn register_coop_traps(game: &mut Game) {
     crate::zero::register_zero_traps(game);
     game.traps.register(HOOK_UPDATE, "coop_p2_update", TrapReturn::Observe, p2_update);
     game.traps.register(HOOK_PHYSICS, "coop_p2_physics", TrapReturn::Observe, p2_physics);
+    game.traps.register(HOOK_OAM_HIDE, "coop_p2_oam_hide", TrapReturn::Observe, oam_hide);
     game.traps.register(HOOK_DISPLAY, "coop_p2_display", TrapReturn::Observe, p2_display);
     game.traps.register(HOOK_CONTACT, "coop_contact", TrapReturn::Observe, contact);
 }
@@ -279,9 +292,15 @@ fn p2_update(game: &mut Game) {
         return;
     }
     let w = game.wram();
-    if w[ix(ram::MODE_D2)] != MODE_IN_STAGE || w[ix(ram::STAGE_PHASE)] != PHASE_GAMEPLAY {
-        game.coop.p2_hidden = true;
-        game.coop.down_frames = 0;
+    if !coop_stages::p2_should_exist(w) {
+        // Pause: freeze P2 where it is (its slots are hidden by the OAM
+        // build hook, the update doesn't run). Anything else sends it home.
+        // ponytail: in practice the object master doesn't run while `$1F24`
+        // is set, so this is only the Start frame.
+        if w[ix(ram::PAUSE)] == 0 {
+            game.coop.p2_hidden = true;
+            game.coop.down_frames = 0;
+        }
         return;
     }
     if game.coop.down_frames > 0 {
@@ -289,13 +308,10 @@ fn p2_update(game: &mut Game) {
         return;
     }
     if game.coop.p2_hidden {
-        // Anchor only once P1 stands still vertically: a copy taken during the
-        // stage-entry drop inherits an action that never lands (seen on the
-        // real ROM: P2 fell through the floor).
-        let y = word(game.wram(), ram::X_POS_Y);
-        let grounded = word(game.wram(), ram::X_VEL_Y) == 0 && Some(y) == game.coop.last_p1_y;
-        game.coop.last_p1_y = Some(y);
-        if !grounded {
+        // Anchor only from a grounded, in-control, on-screen P1: a copy taken
+        // during the stage-entry drop inherits an action that never lands
+        // (seen on the real ROM: P2 fell through the floor).
+        if !coop_stages::p2_anchor_ok(game.wram()) {
             return;
         }
         game.coop.p2 = respawn_anchor(game.wram());
@@ -338,8 +354,9 @@ fn p2_update(game: &mut Game) {
 /// `$80:D241` (after the object master's `JSL $81:9D67`): P2's terrain /
 /// physics phase, the second half of the player's frame that runs after the
 /// enemy loops. Without it P2 kept a stale ground flag (`$0BD3` bit 2) and
-/// "landed" at the apex of every jump. Then clamp P2 into the camera window
-/// and check for death.
+/// "landed" at the apex of every jump. Then the vertical "lost" check (pits,
+/// B1; left behind by a vertical scroll, B2). The horizontal clamp is in the
+/// display slice, against the camera the ROM scrolled to this frame.
 fn p2_physics(game: &mut Game) {
     if !game.coop.enabled || game.coop.p2_hidden || p2_is_down(&game.coop.p2) {
         return;
@@ -347,22 +364,14 @@ fn p2_physics(game: &mut Game) {
     with_p2_swapped(game, |game| {
         game.call_isolated(PLAYER_PHYSICS);
         game.call_isolated_ret(FX_UPDATE, crate::TrapReturn::Rts);
-        let w = game.wram_mut();
-        let cam = word(w, ram::CAMERA_X);
-        let x = word(w, ram::X_POS_X);
-        let cx = clamp_p2_x(x, cam);
-        if cx != x {
-            // ponytail: no collision check; a clamp can push P2 into a wall.
-            w[ix(ram::X_POS_X)..ix(ram::X_POS_X) + 2].copy_from_slice(&cx.to_le_bytes());
-            w[ix(ram::X_VEL_X)..ix(ram::X_VEL_X) + 2].fill(0);
-        }
     });
     let cam_y = word(game.wram(), ram::CAMERA_Y);
     let p2 = &mut game.coop.p2;
-    if fell_off(u16::from_le_bytes([p2[OFF_POS_Y], p2[OFF_POS_Y + 1]]), cam_y) {
-        // The ROM's pit death lives in the camera code (`$80:E14A`, P1 only):
-        // Y - $20 >= camera Y + $E0 -> `$84:9F2A` with $7F damage. Same rule
-        // here, but the result is just "P2 down" (no stage-wide death flow).
+    if coop_stages::p2_lost(u16::from_le_bytes([p2[OFF_POS_Y], p2[OFF_POS_Y + 1]]), cam_y) {
+        // The ROM's pit death lives in the camera code (`$80:E14A`, P1 only),
+        // so P2 never dies in a pit by itself, and nothing drags it along a
+        // vertical scroll. Either way it's just "P2 down": respawn next to P1
+        // after `P2_DOWN_FRAMES`, no life cost, no stage-wide death flow.
         p2[OFF_ACTION] = ACTION_DEATH;
         p2[OFF_HP] = 0x80;
     }
@@ -412,21 +421,70 @@ fn with_p2_swapped(game: &mut Game, f: impl FnOnce(&mut Game)) {
     }
 }
 
-/// [`HOOK_DISPLAY`]: P2 display slice. Runs the ROM's own emitters on P2's
-/// block through the game's OAM cursor `$E4`, so P2 lands in the next free
-/// slots (no collision with the game's entries by construction), then forces
-/// the Zero palette on exactly the slots it got.
+/// [`HOOK_OAM_HIDE`]: hide last frame's P2 slots before the game rebuilds
+/// OAM. The ROM's hide loop only reaches the game's own previous count
+/// (`$E3`, which P2 no longer raises), so without this a P2 that moved or
+/// hid would leave its old sprite behind. The game overwrites whatever of
+/// these slots it uses this frame.
+fn oam_hide(game: &mut Game) {
+    if !game.coop.enabled {
+        return;
+    }
+    let (base, n) = (game.coop.p2_oam_base, game.coop.p2_oam_count);
+    let w = game.wram_mut();
+    for slot in base..(base + n).min(128) {
+        w[ix(ram::OAM_BUF) + slot * 4 + 1] = OAM_HIDDEN_Y;
+    }
+    game.coop.p2_oam_count = 0;
+}
+
+/// [`HOOK_DISPLAY`]: P2 display slice, after the ROM's OAM build is done.
+/// Clamps P2 into the final camera window (B5), then runs the ROM's own
+/// emitters on P2's block into the slots past the game's (`$E3`), from a
+/// 4-aligned slot so P2 owns whole high-table bytes, forces the Zero palette
+/// on them, and puts direct page (`$E3..$EB` included) back as the game left
+/// it. ponytail: P2 now sorts behind every game sprite (it used to sit
+/// between P1 and OAM lists 3-5).
 fn p2_display(game: &mut Game) {
     if !game.coop.enabled || game.coop.p2_hidden {
         return;
     }
-    let r = game.regs();
-    game.coop.dbg_regs = (r.d, r.dbr, r.p);
-    let first = game.wram()[OAM_CURSOR] & 0x7F;
-    if first > 128 - P2_MAX_SPRITES {
-        return;
+    // B5: the camera update `$80:DDB0` ran after P2's physics slice, so clamp
+    // here, against where the screen really is this frame.
+    let cam = word(game.wram(), ram::CAMERA_X);
+    let x = u16::from_le_bytes([game.coop.p2[OFF_POS_X], game.coop.p2[OFF_POS_X + 1]]);
+    let cx = clamp_p2_x(x, cam);
+    if cx != x {
+        // ponytail: no collision check; a clamp can push P2 into a wall.
+        game.coop.p2[OFF_POS_X..OFF_POS_X + 2].copy_from_slice(&cx.to_le_bytes());
+        game.coop.p2[OFF_VEL_X..OFF_VEL_X + 2].fill(0);
     }
+    let saved = game.regs();
+    game.coop.dbg_regs = (saved.d, saved.dbr, saved.p);
+    let dp: [u8; 0x100] = game.wram()[..0x100].try_into().unwrap();
+    // `$E3` = 128 when the build ran out of slots (its overflow exit skips
+    // the hide loop). The emitter's own overflow exit (`$80:D739`, after slot
+    // 127's high-table byte: `PLX; PLX; JMP $D5A1`) would unwind through
+    // `call_isolated`'s sentinel frame, so P2 must end below slot 127: when
+    // the game left too few slots, P2 takes the game's last (lowest priority)
+    // ones. Measured at M3 (hw-a f240..300): the game uses 100-128 slots.
+    let used = dp[OAM_USED].min(128);
+    let fx = &game.coop.p2_scratch[P2_SWAPPED_LEN - 0x60..];
+    let need = layout_len(game, &game.coop.p2)
+        + (0..3).map(|k| &fx[k * 0x20..k * 0x20 + 0x20]).filter(|o| o[0] != 0).map(|o| layout_len(game, o)).sum::<usize>();
+    let Some(room) = 127usize.checked_sub(need) else { return };
+    let first = ((used + 3) & !3).min(room as u8 & !3);
     let pal = game.coop.zero_palette;
+    let w = game.wram_mut();
+    w[OAM_CURSOR] = first;
+    w[OAM_HI_INDEX] = first / 4;
+    w[OAM_HI_ACC] = 0;
+    // The emitters want what the build gave them: M=1, X=0, D=0, DB=$8D.
+    let mut r = saved;
+    r.d = 0;
+    r.dbr = 0x8D;
+    r.p = (r.p | 0x20) & !0x10;
+    game.set_regs(r);
     let mut p2 = game.coop.p2;
     let mut scratch = game.coop.p2_scratch;
     swap_block(game.wram_mut(), &mut p2);
@@ -438,13 +496,38 @@ fn p2_display(game: &mut Game) {
     let w = game.wram_mut();
     swap_block(w, &mut p2);
     swap_scratch(w, &mut scratch);
-    let last = w[OAM_CURSOR] & 0x7F;
-    for slot in usize::from(first)..usize::from(last.max(first)) {
+    let last = (w[OAM_CURSOR] & 0x7F).max(first);
+    // Flush the partial high-table byte like the build's tail (`$80:D565`),
+    // keeping the bits of any game slots above P2's in that byte.
+    let r = last & 3;
+    if r != 0 {
+        let hi = ix(OAM_HI) + usize::from(last / 4);
+        w[hi] = w[OAM_HI_ACC] >> (2 * (4 - r)) | w[hi] & (0xFF << (2 * r));
+    }
+    for slot in usize::from(used)..usize::from(first) {
+        w[ix(ram::OAM_BUF) + slot * 4 + 1] = OAM_HIDDEN_Y; // alignment padding
+    }
+    for slot in usize::from(first)..usize::from(last) {
         let o = ix(ram::OAM_BUF) + slot * 4;
         set_oam_palette(&mut w[o..o + 4], pal);
     }
-    game.coop.p2_oam_base = usize::from(first);
-    game.coop.p2_oam_count = usize::from(last.max(first) - first);
+    w[..0x100].copy_from_slice(&dp);
+    game.set_regs(saved);
+    let base = used.min(first);
+    game.coop.p2_oam_base = usize::from(base);
+    game.coop.p2_oam_count = usize::from(last - base);
+}
+
+/// Sprites the emitter `$80:D67C` would write for object `obj` (upper bound:
+/// it skips off-screen pieces): 0 unless `+$0E` (visible), else the first
+/// byte of its frame layout (see [`LAYOUT_SETS`]).
+fn layout_len(game: &Game, obj: &[u8]) -> usize {
+    if obj[0x0E] == 0 {
+        return 0;
+    }
+    let long = |a: u32| u32::from_le_bytes([game.rom_read(a), game.rom_read(a + 1), game.rom_read(a + 2), 0]);
+    let frames = long(LAYOUT_SETS + 3 * u32::from(obj[0x16]));
+    usize::from(game.rom_read(long(frames + 3 * u32::from(obj[0x17] & 0x7F))))
 }
 
 /// `$84:9B03` entry, `D` = the enemy: run the same contact routine once more
@@ -512,18 +595,11 @@ mod tests {
 
     #[test]
     fn coop_clamp() {
-        assert_eq!(clamp_p2_x(0x0100, 0x0100), 0x0100);
-        assert_eq!(clamp_p2_x(0x00F0, 0x0100), 0x0100);
-        assert_eq!(clamp_p2_x(0x0300, 0x0100), 0x01F0);
+        assert_eq!(clamp_p2_x(0x0108, 0x0100), 0x0108);
+        assert_eq!(clamp_p2_x(0x00F0, 0x0100), 0x0108);
+        assert_eq!(clamp_p2_x(0x0300, 0x0100), 0x01F8);
         assert_eq!(clamp_p2_x(0x0180, 0x0100), 0x0180);
         assert_eq!(clamp_p2_x(0xFFFF, 0xFFF0), 0xFFFF);
-    }
-
-    #[test]
-    fn coop_fell_off() {
-        assert!(!fell_off(0x01FF, 0x0100));
-        assert!(fell_off(0x0200, 0x0100));
-        assert!(!fell_off(0x0010, 0x0000));
     }
 
     #[test]
