@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mmx-core",
+]
+# Vendored third-party sources (vendor/jgenesis, vendor/matchbox_socket) are
+# path dependencies, not workspace members: not linted or formatted as ours.
+exclude = ["vendor"]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-only"
+rust-version = "1.96"
+
+[profile.release]
+debug = 1
+
+[profile.dev.package."*"]
+# The vendored emulator core is unusable unoptimised; z2rs learnt this the hard way.
+opt-level = 2
