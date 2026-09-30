@@ -491,4 +491,33 @@ mod tests {
         assert_eq!(sprite_palette_offset(3), 0x0460);
         assert_eq!(sprite_palette_offset(7), 0x04E0);
     }
+
+    /// P1 as Zero on whatever dump `MMX_ROM` is (booted from power-on, no
+    /// state): sprite palette 1 in the PPU's CGRAM is Zero's on every one of
+    /// 300 gameplay frames. On USA v1.1 with PAL addresses the OAM-build
+    /// hook missed and the palette flipped between X's and Zero's.
+    #[test]
+    fn zero_p1_palette_stable() {
+        let (Some(rom), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
+            eprintln!("MMX_ROM / MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let mut g = Game::from_rom(std::fs::read(rom).unwrap()).unwrap();
+        g.set_x3_rom(&std::fs::read(x3).unwrap()).unwrap();
+        // The intro-stage script (`--tap 200,400,600,800,1000`): Start for 4 frames.
+        for f in 1..=1500usize {
+            let start = [200, 400, 600, 800, 1000].iter().any(|&t| (t..t + 4).contains(&f));
+            g.step(crate::Pads { p1: if start { crate::BTN_START } else { 0 }, p2: 0 });
+        }
+        g.set_p1_zero(true).unwrap();
+        let want = g.zero_set().unwrap().palette;
+        let pal1 = |g: &Game| -> [u16; 16] { std::array::from_fn(|i| g.cgram()[128 + 16 + i]) };
+        for _ in 0..2 {
+            g.step(crate::Pads::default());
+        }
+        for f in 0..300 {
+            g.step(crate::Pads { p1: if f % 60 < 30 { crate::BTN_RIGHT } else { 0 }, p2: 0 });
+            assert_eq!(pal1(&g), want, "frame {f}: CGRAM sprite palette 1 is not Zero's");
+        }
+    }
 }
