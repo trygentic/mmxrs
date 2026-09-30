@@ -309,6 +309,16 @@ impl Game {
         self.emu.cgram()
     }
 
+    /// Raw VRAM (64 KiB as words). Debug / research.
+    pub fn vram(&self) -> &[u16; 0x8000] {
+        self.emu.vram()
+    }
+
+    /// OBSEL: (sprite tile base, name-table gap), both VRAM word addresses.
+    pub fn obsel(&self) -> (u16, u16) {
+        self.emu.obsel()
+    }
+
     pub fn regs(&self) -> Registers {
         let r = self.emu.cpu_registers();
         Registers {

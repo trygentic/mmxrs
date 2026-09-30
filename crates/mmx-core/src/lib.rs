@@ -7,6 +7,7 @@ pub mod coop;
 mod game;
 pub mod ram;
 pub mod traps;
+pub mod zero;
 
 pub use game::Game;
 pub use traps::{TrapFn, TrapLog, TrapReturn, TrapTable};
