@@ -6,7 +6,7 @@
 [meta]
 disassembly = "MarkAlarm Mega Man X disassembly (USA v1.0)"
 # ponytail: URL not recorded in PLAN.md; fill in the exact repo when known.
-url = "https://github.com/MarkAlarm"
+url = "https://github.com/MarkAlarm/MMX1-Disassembly"
 commit = "e6d6130"
 rom_version = "USA v1.0"
 
