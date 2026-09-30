@@ -272,6 +272,40 @@ mod tests {
         assert_eq!(g.wram()[0x0BDD], 0, "P1's shot count untouched");
     }
 
+    /// Single player, P1 as Zero (`hw-spiky`): walk right 26 frames, X at 28;
+    /// the Spiky loses 1 HP on the arc pose, P1's buster count stays 0.
+    #[test]
+    fn saber_p1_hits_spiky() {
+        let (Some(x1), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
+            eprintln!("MMX_ROM / MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/hw-spiky.state");
+        let Ok(state) = std::fs::read(st) else {
+            eprintln!("{st} missing; skipping");
+            return;
+        };
+        let mut g = crate::Game::from_rom(std::fs::read(x1).unwrap()).unwrap();
+        assert!(g.set_p1_zero(true).is_err(), "needs the X3 set");
+        g.set_x3_rom(&std::fs::read(x3).unwrap()).unwrap();
+        g.load_state(&state).unwrap();
+        g.set_p1_zero(true).unwrap();
+        let hp = |g: &crate::Game| g.wram()[0x0E68 + 0x27] & 0x7F;
+        let mut seen = Vec::new();
+        for f in 1..=44 {
+            let p1 = match f {
+                ..=26 => BTN_RIGHT,
+                28 | 29 => BTN_X,
+                _ => 0,
+            };
+            g.step(crate::Pads { p1, p2: 0 });
+            seen.push((g.coop.p1.frame, hp(&g)));
+        }
+        assert_eq!(seen[30].1, 2, "alive before the arc: {seen:?}");
+        assert!(seen[31..44].iter().any(|&(zf, hp)| zf == 88 && hp == 1), "{seen:?}");
+        assert_eq!(g.wram()[0x0BDD], 0);
+    }
+
     /// Netplay: a 2-frame rollback every frame through the swing draws the
     /// same pictures as the straight run (page, mask and `zero_frame` travel
     /// together in `net_save`).
@@ -292,9 +326,13 @@ mod tests {
             g.load_state(&state).unwrap();
             g.coop.enabled = true;
             crate::coop::register_coop_traps(&mut g);
+            g.set_p1_zero(true).unwrap(); // both Zeros: shadow pages 0 and 1
             g
         };
-        let pad = |f: usize| crate::Pads { p1: 0, p2: if f <= 20 { BTN_RIGHT } else if f == 22 { BTN_X } else { 0 } };
+        let pad = |f: usize| crate::Pads {
+            p1: if f == 12 { BTN_X } else { 0 },
+            p2: if f <= 20 { BTN_RIGHT } else if f == 22 { BTN_X } else { 0 },
+        };
         let (mut a, mut b) = (new(), new());
         let mut saves = Vec::new();
         for f in 1..=40 {
