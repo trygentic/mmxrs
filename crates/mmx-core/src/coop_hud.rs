@@ -43,6 +43,21 @@ const OAM_USED: usize = 0xE3;
 const OAM_HI: u32 = 0x7E0900;
 const OAM_HIDDEN_Y: u8 = 0xE0;
 
+/// With X3 loaded, the bar icon (X's `$86`, 16x16) is X3's "Z" instead: its
+/// four tiles live in shadow page 3 (the HUD page; pages 0-2 are full with
+/// X3 Zero frames and slash arcs), at the cells the PPU reads for tile
+/// `$86` (`(t & $3F) % 48`: 6, 7, 22, 23), so the OAM entry keeps its tile
+/// number and only its slot is flagged. One copy serves P2's icon, the down
+/// marker and a Zero P1's own icon (slot 0).
+const ICON_PAGE: u8 = 3;
+const ICON_CELLS: [usize; 4] = [6, 7, 22, 23];
+/// The icon's colours (X3's HUD palette) on Zero's palette (`$8C:B580`),
+/// which P2's and a Zero P1's sprite palettes hold: the emblem's yellow body
+/// 11 -> Zero's red 7, its red stroke ends 6 -> his gold 13 (all-red read
+/// as an X at 16 px); the plate's white 1 and greys 13, 14, 15 -> 4, 5, 6,
+/// 15.
+pub const HUD_ON_ZERO: [u8; 16] = [0, 4, 0, 0, 0, 0, 13, 0, 0, 0, 0, 7, 0, 5, 6, 15];
+
 /// P1 revives a downed P2 by standing within this many px (horizontally) of
 /// where it fell, on the same screen, for [`REVIVE_FRAMES`] frames in a row.
 pub const REVIVE_DIST: u16 = 24;
@@ -135,9 +150,31 @@ fn bar_entries(game: &mut Game, hp: u8) -> [u8; BAR_SLOTS * 4] {
     bar
 }
 
-/// [`HOOK_HUD`]: P2's bar (and the down marker) into 8 slots past P2's.
+/// Write the Z icon into shadow page 3 (see [`ICON_PAGE`]). False without X3.
+fn put_icon(game: &mut Game) -> bool {
+    let Some(tiles) = game.zero_set.as_ref().and_then(|z| z.hud_icon.as_ref()).map(|i| i.tiles.clone()) else {
+        return false;
+    };
+    for (t, cell) in tiles.chunks_exact(32).zip(ICON_CELLS) {
+        let mut t: [u8; 32] = t.try_into().unwrap();
+        crate::zero_data::remap_tile(&mut t, &HUD_ON_ZERO);
+        crate::p2tiles::fill_page(game, usize::from(ICON_PAGE) * crate::p2tiles::SHADOW_WORDS + cell * 16, &t);
+    }
+    true
+}
+
+/// [`HOOK_HUD`]: a Zero P1's icon; P2's bar (and the down marker) into 8
+/// slots past P2's.
 fn hud(game: &mut Game) {
-    if !game.coop.enabled || game.wram()[ix(BAR_STATE)] != BAR_SHOWN || !coop_stages::p2_should_exist(game.wram()) {
+    let shown = game.wram()[ix(BAR_STATE)] == BAR_SHOWN;
+    // P1 as Zero: X's own icon (slot 0, never moved by the ROM after the
+    // bar's init) becomes the Z, in Zero's palette (slot 1).
+    if game.coop.p1.on && shown && put_icon(game) {
+        let o = ix(ram::OAM_BUF);
+        coop::set_oam_palette(&mut game.wram_mut()[o..o + 4], crate::zero::X_SPRITE_PALETTE);
+        game.add_p2_tile_slots(1, ICON_PAGE);
+    }
+    if !game.coop.enabled || !shown || !coop_stages::p2_should_exist(game.wram()) {
         return;
     }
     let c = &game.coop;
@@ -183,6 +220,10 @@ fn hud(game: &mut Game) {
         }
         None => e[1] = OAM_HIDDEN_Y,
     }
+    if put_icon(game) {
+        game.add_p2_tile_slots(1 << start | u128::from(marker.is_some()) << (start + BAR_SLOTS), ICON_PAGE);
+    }
+    let w = game.wram_mut();
     // All 8 large (bit 1), X bit 8 clear.
     w[ix(OAM_HI) + start / 4..][..2].fill(0xAA);
     // Hidden again by `coop::oam_hide` at the next build.

@@ -179,8 +179,9 @@ in the way. `p2_oam_base/count` grow to cover them, so
 `oam_hide` clears them at the next build like P2's sprites. P2's display
 slice leaves `HUD_SLOTS` slots free below 128 (`room`); with P2 hidden and
 the game at 128 slots the bar takes the game's last 8. The bar is rebuilt
-every frame from P2's block, so there is no cache to carry. ponytail: P2's
-bar reuses X's "X" icon, recoloured.
+every frame from P2's block, so there is no cache to carry. The icon: X's
+"X" recoloured to palette 3; with X3 loaded, X3's "Z" emblem from shadow
+page 3 (also for a Zero P1's own icon; docs/zero.md "The HUD icon").
 
 **Down and revive.** `go_down` (HP 0, pit, left behind) hides P2 for
 `P2_DOWN_FRAMES` (600 = 10 s) and records the fall spot (`Revive::spot`,

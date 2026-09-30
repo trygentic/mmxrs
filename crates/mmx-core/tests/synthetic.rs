@@ -224,12 +224,15 @@ fn save_state_carries_p2_tile_page() {
     let mut g = game();
     step(&mut g, 2);
     g.p2_tile_page_mut()[5] = 0xBEEF;
+    g.p2_tile_page_mut()[3 * 768 + 5] = 0xCAFE; // page 3 (HUD icon)
     g.set_p2_tile_slots(1 << 3);
     let s = g.save_state();
     g.p2_tile_page_mut()[5] = 0;
+    g.p2_tile_page_mut()[3 * 768 + 5] = 0;
     g.set_p2_tile_slots(0);
     g.load_state(&s).unwrap();
     assert_eq!(g.p2_tile_page_mut()[5], 0xBEEF);
+    assert_eq!(g.p2_tile_page_mut()[3 * 768 + 5], 0xCAFE);
     // Not live until the game's next OAM upload.
     assert_eq!(g.p2_tiles().1, 0);
 }
