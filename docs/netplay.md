@@ -238,6 +238,18 @@ Native frontends call this from the winit loop; `MatchboxTransport` runs its
 message loop on its own thread. On the web, call it from the
 `requestAnimationFrame` tick; the loop runs through `spawn_local`.
 
+## Picking a mode and a delay for the distance
+
+| link | mode | flags | why |
+|---|---|---|---|
+| same region (round trip under ~80 ms) | lockstep | `--mode lockstep --delay 3` | no snapping; the 50 ms delay hides the round trip |
+| across continents (round trip 250-350 ms, 15-20 frames) | rollback | `--mode rollback --delay 3 --prediction 20` | lockstep's max delay (8 frames) cannot cover it and the game waits every frame; rollback keeps running, the remote player snaps after corrections |
+
+`--prediction` is rollback's window (frames it will run ahead of confirmed
+remote input; default 8, max 30). It is local policy, not negotiated, so each
+side may set its own. A window smaller than the round trip makes the session
+stall until inputs arrive, which looks like a low frame rate.
+
 ## Frontend wiring
 
 Both frontends run either mode through one driver,

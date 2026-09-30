@@ -2,7 +2,7 @@
 //! `mmx_core::netgame::NetPlay` (the per-tick rollback or lockstep driver
 //! shared with the web build). The window loop calls [`Net::tick`] once per 60 Hz tick.
 
-use mmx_core::netgame::{Mode, NetPlay};
+use mmx_core::netgame::{Mode, NetConfig, NetPlay};
 use mmx_core::Game;
 use mmx_net::ConnectStage;
 
@@ -24,7 +24,7 @@ pub struct Net {
     epoch: std::time::Instant,
 }
 
-/// `--coop-host/--coop-join ROOM [--signal] [--ice] [--mode] [--delay]` -> a connecting session.
+/// `--coop-host/--coop-join ROOM [--signal] [--ice] [--mode] [--delay] [--prediction]` -> a connecting session.
 #[allow(clippy::too_many_arguments)]
 pub fn connect(
     rom: &[u8],
@@ -34,10 +34,14 @@ pub fn connect(
     ice: Option<&str>,
     mode: Mode,
     delay: u8,
+    prediction: Option<u8>,
     x3: Option<&mmx_core::zero_data::ZeroSet>,
     zero: bool,
 ) -> Result<Net, String> {
-    let cfg = NetPlay::<NetTransport>::config(rom, host, mode, delay, x3, zero)?;
+    let mut cfg = NetPlay::<NetTransport>::config(rom, host, mode, delay, x3, zero)?;
+    if let (NetConfig::Rollback(c), Some(p)) = (&mut cfg, prediction) {
+        c.max_prediction = p; // local policy, not negotiated
+    }
     let url = mmx_net::room_url(signal, room).map_err(|e| e.to_string())?;
     let ice = ice
         .map(mmx_net::IceConfig::parse)
@@ -141,7 +145,7 @@ mod tests {
             Mode::Rollback => 0,
             Mode::Lockstep => mode.default_delay(),
         };
-        let mk = |host| connect(rom, host, room, &url, Some("none"), mode, delay, None, false).expect("connect");
+        let mk = |host| connect(rom, host, room, &url, Some("none"), mode, delay, None, None, false).expect("connect");
         let mut peers = [
             (mk(true), session_game(rom, 0).unwrap(), 0x1111u32),
             (mk(false), session_game(rom, 0).unwrap(), 0x7777u32),

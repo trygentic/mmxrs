@@ -6,14 +6,16 @@ pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local]
        mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
              [--ice 'stun:.. turn:.. username=U credential=C' | none]
-             [--mode rollback|lockstep] [--delay N]
+             [--mode rollback|lockstep] [--delay N] [--prediction N]
        mmxrs --headless --frames N [--rom PATH] [--dump-at F=out.png,...]
              [--hold P1MASK] [--p2-hold MASK] [--coop-local]
 ROM defaults to $MMX_ROM, --x3-rom (Mega Man X3 USA: P2 is drawn as X3 Zero, X swings
 the saber) to $MMX_X3_ROM. --zero: player 1 plays as Zero too (needs the X3 ROM). Masks are SNES pad words (hex 0x.. or decimal).
 Online: both players pass the same --mode (default rollback). --delay is the input delay
 in frames, host's wins: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
-same-region link --mode lockstep --delay 3 plays smoothest (see docs/netplay.md).";
+same-region link --mode lockstep --delay 3 plays smoothest; across continents use
+--mode rollback --delay 3 --prediction 20 (rollback's window must cover the round
+trip in frames, default 8; see docs/netplay.md).";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -41,6 +43,9 @@ pub struct Args {
     pub mode: Mode,
     /// `--delay`; None = the mode's default ([`Args::net_delay`]).
     pub delay: Option<u8>,
+    /// `--prediction`: rollback's prediction window in frames (1-30; default 8).
+    /// Long links (intercontinental, ~15-20 frame round trip) need ~20.
+    pub prediction: Option<u8>,
 }
 
 impl Args {
@@ -70,6 +75,7 @@ impl Default for Args {
             ice: None,
             mode: Mode::Rollback,
             delay: None,
+            prediction: None,
         }
     }
 }
@@ -140,6 +146,14 @@ pub fn parse<I: IntoIterator<Item = String>>(
             "--delay" => {
                 let v = val("--delay")?;
                 a.delay = Some(v.parse().map_err(|_| format!("bad --delay {v:?}"))?);
+            }
+            "--prediction" => {
+                let v = val("--prediction")?;
+                let n: u8 = v.parse().map_err(|_| format!("bad --prediction {v:?}"))?;
+                if !(1..=30).contains(&n) {
+                    return Err("--prediction is 1-30 frames".into());
+                }
+                a.prediction = Some(n);
             }
             "-h" | "--help" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),

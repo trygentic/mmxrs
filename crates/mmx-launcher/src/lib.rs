@@ -80,6 +80,9 @@ pub struct Settings {
     pub mode: Mode,
     /// None = the mode's default ("auto").
     pub delay: Option<u8>,
+    /// Rollback prediction window in frames (None = the game's default 8).
+    #[serde(default)]
+    pub prediction: Option<u8>,
     /// Empty = the game's default ICE servers; `none` = no ICE servers.
     pub ice: String,
 }
@@ -99,6 +102,7 @@ impl Default for Settings {
             signal: DEFAULT_SIGNAL_URL.into(),
             mode: Mode::Rollback,
             delay: None,
+            prediction: None,
             ice: String::new(),
         }
     }
@@ -167,6 +171,15 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
                 return Err(format!("{} delay is 0-{}", s.mode.name(), s.mode.max_delay()));
             }
             push(&["--delay", &d.to_string()]);
+        }
+        if let Some(p) = s.prediction {
+            if s.mode != Mode::Rollback {
+                return Err("prediction window applies to rollback only".into());
+            }
+            if !(1..=30).contains(&p) {
+                return Err("prediction window is 1-30 frames".into());
+            }
+            push(&["--prediction", &p.to_string()]);
         }
         if !s.ice.trim().is_empty() {
             push(&["--ice", s.ice.trim()]);

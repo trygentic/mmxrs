@@ -227,6 +227,21 @@ impl App {
                         }
                     });
                 });
+                if s.mode == Mode::Rollback {
+                    ui.horizontal(|ui| {
+                        ui.label("Prediction");
+                        let shown = s.prediction.map_or("auto (8)".into(), |p| p.to_string());
+                        egui::ComboBox::from_id_salt("prediction").selected_text(shown).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut s.prediction, None, "auto (8)");
+                            for p in [4u8, 8, 12, 16, 20, 25, 30] {
+                                ui.selectable_value(&mut s.prediction, Some(p), p.to_string());
+                            }
+                        });
+                        ui.weak("frames of round trip to absorb; ~20 across continents");
+                    });
+                } else {
+                    s.prediction = None;
+                }
                 ui.horizontal(|ui| {
                     ui.label("ICE");
                     ui.add(egui::TextEdit::singleline(&mut s.ice).hint_text("game default; or none, or stun:.. turn:.. username=U credential=C"));
