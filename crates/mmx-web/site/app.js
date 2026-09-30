@@ -173,8 +173,9 @@ function loop(t) {
 requestAnimationFrame(loop);
 
 // --- online co-op (bundle built with --features netplay) ----------------------
-// The game keeps running locally while connecting; `Running` restarts both
-// peers from power-on and from then on net_tick drives it at 60 Hz.
+// The game keeps running locally while connecting; the session start restarts
+// both peers from power-on and from then on net_tick drives it at 60 Hz
+// (lockstep: a tick whose remote pad is late steps nothing and the game waits).
 function netFrame(dt) {
   const now = performance.now();
   if (!emu.net_live()) {
@@ -201,7 +202,7 @@ function netConnect(host) {
     return;
   }
   try {
-    emu.net_connect(signal, $('netRoom').value.trim(), host, +$('netDelay').value, $('netIce').value);
+    emu.net_connect(signal, $('netRoom').value.trim(), host, $('netMode').value, +$('netDelay').value, $('netIce').value);
   } catch (err) {
     $('netStatus').textContent = `netplay: ${err}`;
     return;
@@ -220,7 +221,7 @@ $('netJoin').addEventListener('click', () => netConnect(false));
 $('netLeave').addEventListener('click', netLeave);
 {
   const q = new URLSearchParams(location.search);
-  for (const k of ['signal', 'room', 'ice', 'delay']) {
+  for (const k of ['signal', 'room', 'ice', 'mode', 'delay']) {
     const v = q.get(k);
     if (v !== null) $(`net${k[0].toUpperCase()}${k.slice(1)}`).value = v;
   }

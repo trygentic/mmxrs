@@ -37,7 +37,8 @@ cargo xtask verify --frames 600         # oracle vs DUT, zero input
 cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local
 # Zero with X3's sprites and the saber (optional Mega Man X3 (USA) dump):
 cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local --x3-rom "/path/to/Mega Man X3 (USA).sfc"
-# online co-op: one side --coop-host ROOM, the other --coop-join ROOM (see docs/netplay.md)
+# online co-op: one side --coop-host ROOM, the other --coop-join ROOM, same --mode on both
+# (rollback default; on a good link --mode lockstep --delay 3 plays smoothest, see docs/netplay.md)
 ```
 
 Player 2: WASD, G jump, F buster, H dash, T saber (X3 ROM loaded). Without an

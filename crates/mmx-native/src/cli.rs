@@ -1,13 +1,19 @@
 //! Hand-rolled argv parser (no clap). See `docs/native.md`.
 
+use mmx_core::netgame::Mode;
+
 pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--x3-rom PATH] [--scale N] [--fullscreen] [--coop-local]
        mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
-             [--ice 'stun:.. turn:.. username=U credential=C' | none] [--delay 0-3]
+             [--ice 'stun:.. turn:.. username=U credential=C' | none]
+             [--mode rollback|lockstep] [--delay N]
        mmxrs --headless --frames N [--rom PATH] [--dump-at F=out.png,...]
              [--hold P1MASK] [--p2-hold MASK] [--coop-local]
 ROM defaults to $MMX_ROM, --x3-rom (Mega Man X3 USA: P2 is drawn as X3 Zero, X swings
-the saber) to $MMX_X3_ROM. Masks are SNES pad words (hex 0x.. or decimal).";
+the saber) to $MMX_X3_ROM. Masks are SNES pad words (hex 0x.. or decimal).
+Online: both players pass the same --mode (default rollback). --delay is the input delay
+in frames, host's wins: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
+same-region link --mode lockstep --delay 3 plays smoothest (see docs/netplay.md).";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -29,7 +35,17 @@ pub struct Args {
     pub net: Option<(bool, String)>,
     pub signal: String,
     pub ice: Option<String>,
-    pub delay: u8,
+    /// Online sync mode (`--mode`); both peers must agree.
+    pub mode: Mode,
+    /// `--delay`; None = the mode's default ([`Args::net_delay`]).
+    pub delay: Option<u8>,
+}
+
+impl Args {
+    /// Input delay for the session: `--delay` or the mode's default.
+    pub fn net_delay(&self) -> u8 {
+        self.delay.unwrap_or(self.mode.default_delay())
+    }
 }
 
 impl Default for Args {
@@ -49,7 +65,8 @@ impl Default for Args {
             net: None,
             signal: mmx_net::DEFAULT_SIGNAL_URL.into(),
             ice: None,
-            delay: mmx_net::DEFAULT_ROLLBACK_DELAY,
+            mode: Mode::Rollback,
+            delay: None,
         }
     }
 }
@@ -112,12 +129,13 @@ pub fn parse<I: IntoIterator<Item = String>>(
             }
             "--signal" => a.signal = val("--signal")?,
             "--ice" => a.ice = Some(val("--ice")?),
+            "--mode" => {
+                let v = val("--mode")?;
+                a.mode = Mode::parse(&v).ok_or_else(|| format!("bad --mode {v:?}: rollback or lockstep"))?;
+            }
             "--delay" => {
                 let v = val("--delay")?;
-                a.delay = v.parse().map_err(|_| format!("bad --delay {v:?}"))?;
-                if a.delay > mmx_net::MAX_ROLLBACK_DELAY {
-                    return Err(format!("--delay must be 0-{}", mmx_net::MAX_ROLLBACK_DELAY));
-                }
+                a.delay = Some(v.parse().map_err(|_| format!("bad --delay {v:?}"))?);
             }
             "-h" | "--help" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
@@ -128,6 +146,9 @@ pub fn parse<I: IntoIterator<Item = String>>(
     }
     if a.net.is_some() && (a.headless || a.coop_local) {
         return Err("--coop-host/--coop-join cannot be combined with --headless or --coop-local".into());
+    }
+    if a.net_delay() > a.mode.max_delay() {
+        return Err(format!("--delay must be 0-{} with --mode {}", a.mode.max_delay(), a.mode.name()));
     }
     if a.headless && a.frames == 0 {
         return Err("--headless needs --frames N".into());
@@ -185,13 +206,26 @@ mod tests {
     fn netplay_flags() {
         let a = p("--coop-join room_1 --signal ws://h:1 --ice none --delay 0").unwrap();
         assert_eq!(a.net, Some((false, "room_1".into())));
-        assert_eq!((a.signal.as_str(), a.ice.as_deref(), a.delay), ("ws://h:1", Some("none"), 0));
+        assert_eq!((a.signal.as_str(), a.ice.as_deref(), a.net_delay()), ("ws://h:1", Some("none"), 0));
         let a = p("--coop-host r").unwrap();
         assert_eq!(a.net, Some((true, "r".into())));
-        assert_eq!((a.signal.as_str(), a.delay), ("ws://127.0.0.1:3536", 2));
+        assert_eq!((a.signal.as_str(), a.mode, a.net_delay()), ("ws://127.0.0.1:3536", Mode::Rollback, 2));
         assert!(p("--coop-host bad/room").is_err());
         assert!(p("--coop-host r --delay 4").is_err());
+        assert!(p("--coop-host r --mode bogus").is_err());
         assert!(p("--coop-host r --coop-local").is_err());
+    }
+
+    #[test]
+    fn mode_and_delay() {
+        let a = p("--coop-host r --mode lockstep").unwrap();
+        assert_eq!((a.mode, a.net_delay()), (Mode::Lockstep, 3));
+        let a = p("--coop-join r --mode lockstep --delay 8").unwrap();
+        assert_eq!((a.mode, a.net_delay()), (Mode::Lockstep, 8));
+        assert!(p("--coop-join r --mode lockstep --delay 9").is_err());
+        assert!(p("--coop-join r --delay 5 --mode rollback").is_err());
+        let a = p("--coop-host r --mode rollback --delay 0").unwrap();
+        assert_eq!((a.mode, a.net_delay()), (Mode::Rollback, 0));
     }
 
     #[test]

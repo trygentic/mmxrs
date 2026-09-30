@@ -23,9 +23,12 @@ Checks: `cargo test -p mmx-web`, `cargo check -p mmx-web --target wasm32-unknown
 
 The panel above the screen: signal URL (default `ws://127.0.0.1:3536`, run
 `cargo run --release -p mmx-signal`), room, ICE (`none` on one machine / LAN,
-empty = default STUN), input delay 0-3, *Host* (player 1) / *Join* (player 2) /
-*Leave*. `?signal=&room=&ice=&delay=` prefill it. Each peer plays with the P1
-keys; F5/F7/Tab are off during a session; only B/Y/A/Start/d-pad travel.
+empty = default STUN), mode (rollback / lockstep, both players the same),
+input delay (auto = 2 for rollback, 3 for lockstep; rollback 0-3, lockstep
+0-8), *Host* (player 1) / *Join* (player 2) / *Leave*.
+`?signal=&room=&ice=&mode=&delay=` prefill it (`?mode=lockstep&delay=3` for a
+same-region playtest). Each peer plays with the P1 keys; F5/F7/Tab are off
+during a session; the full SNES pad travels.
 Details: `docs/netplay.md` "Frontend wiring".
 
 ## Keys (`KeyboardEvent.code`, table in `src/lib.rs`)
