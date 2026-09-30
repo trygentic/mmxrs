@@ -114,7 +114,7 @@ P1 lags a frame earlier (4-5 px behind solo from f275). Dropping P2's queue
 entries restores parity (throwaway check). Needs the shadow tile page
 (docs/zero.md A').
 
-**B5 (minor). Idle P2 drawn half off the left edge.** FIXED: clamp
+**B5 (minor). Idle P2 drawn half off the left edge.** FIXED, then superseded (the clamp dragged P2 into terrain; docs/coop.md "Following the camera"): clamp
 `[cam+8, cam+248]`, applied in the display slice against the camera the
 ROM scrolled to this frame (M0 f120: camera 171, P2 179). The clamp window
 `[cam, cam+240]` is on the sprite anchor (centre), so a P2 pushed by the

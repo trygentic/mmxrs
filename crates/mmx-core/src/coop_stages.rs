@@ -83,16 +83,25 @@ pub fn in_view_y(y: u16, cam_y: u16) -> bool {
     y >= cam_y && y < cam_y.saturating_add(224)
 }
 
-/// P2 has left the playfield vertically and will not come back on its own:
-/// fell into a pit (M0: P2 sank to Y 895 with the camera at 256 and never
-/// died), or the camera scrolled up without it (M5: P1 wall-climbed out of
-/// the Bee Blader crash, camera Y 479 -> 256, P2 stranded at Y 575), or
-/// scrolled down 64+ px past it. Either way: P2 down, respawn next to P1.
-/// The "below" half is the ROM's own pit rule for X (camera code
+/// P2 fell into a pit: the ROM's own pit rule for X (camera code
 /// `$80:E14A`): `Y - $20 >= cam Y + $E0`, signed like its `CMP`/`BMI`; X
 /// moves several px a frame, so P1 is seen dying at `y - cam_y = 257`.
+/// The caller only counts it while P2 is airborne: a grounded P2 down there
+/// was left behind by a scroll (M5, Y 575 with the camera at 256), not dead.
 pub fn p2_lost(p2_y: u16, cam_y: u16) -> bool {
-    (p2_y.wrapping_sub(0x20).wrapping_sub(cam_y.wrapping_add(0xE0)) as i16) >= 0 || p2_y.saturating_add(64) < cam_y
+    (p2_y.wrapping_sub(0x20).wrapping_sub(cam_y.wrapping_add(0xE0)) as i16) >= 0
+}
+
+/// P2's anchor is inside the 256x224 window.
+pub fn p2_on_screen(x: u16, y: u16, cam_x: u16, cam_y: u16) -> bool {
+    x.wrapping_sub(cam_x) < 256 && in_view_y(y, cam_y)
+}
+
+/// P2 is a whole screen or more outside the window: warp it now.
+pub fn p2_far(x: u16, y: u16, cam_x: u16, cam_y: u16) -> bool {
+    let dx = x.wrapping_sub(cam_x) as i16;
+    let dy = y.wrapping_sub(cam_y) as i16;
+    !(-256..512).contains(&dx) || !(-224..448).contains(&dy)
 }
 
 #[cfg(test)]
@@ -181,7 +190,17 @@ mod tests {
         assert!(p2_lost(512, 256) && !p2_lost(511, 256)); // the ROM's threshold
         assert!(!p2_lost(0x10, 0)); // signed: near the top of the level
         assert!(p2_lost(575, 256) && !p2_lost(575, 479)); // M5: stranded below after the climb
-        assert!(p2_lost(100, 256) && !p2_lost(200, 256)); // far above the window
         assert!(in_view_y(256, 256) && !in_view_y(480, 256));
+    }
+
+    #[test]
+    fn coop_stages_follow() {
+        assert!(p2_on_screen(100, 367, 0, 256) && !p2_on_screen(256, 367, 0, 256));
+        assert!(!p2_on_screen(3413, 431, 3416, 256)); // hw-e: left of the window
+        assert!(!p2_on_screen(100, 575, 0, 256));
+        assert!(!p2_far(3413, 431, 3416, 256) && !p2_far(2648, 575, 2520, 256));
+        assert!(p2_far(1000, 367, 1300, 256) && p2_far(1812, 367, 1300, 256) && !p2_far(1811, 367, 1300, 256));
+        assert!(p2_far(100, 704, 0, 256) && !p2_far(100, 703, 0, 256) && p2_far(100, 31, 0, 256));
+        assert!(!p2_far(10, 367, 0xFFF0, 256)); // wraps like the ROM's words
     }
 }

@@ -134,6 +134,8 @@ pub const OFF_POS_Y: usize = 0x08; // $0BB0 word
 pub const OFF_VEL_X: usize = 0x1A; // $0BC2 word
 pub const OFF_VEL_Y: usize = 0x1C; // $0BC4 word
 pub const OFF_HP: usize = 0x27; // $0BCF, bit7 = HUD redraw
+/// `$0BD3` terrain flags, `$0BD4` object flags: bit 2 = standing on it.
+pub const OFF_GROUND: usize = 0x2B;
 pub const OFF_INPUT: usize = 0x36; // $0BDE held, $0BE0 prev, $0BE2 pressed
 /// `$0BDD`: X's live shot count. The fire routine (`$81:93A8`) refuses when
 /// it is `>=` the cap `+$67` and does `INC $35` (direct page, so P2's own
@@ -149,8 +151,11 @@ const ACTION_DEATH: u8 = 0x0C;
 
 // ------------------------------------------------------------ tunables
 
-/// P2 spawns this many pixels right of P1.
-pub const P2_X_OFFSET: u16 = 16;
+/// P2 spawns this many pixels right of P1. 0: P1's own spot is the only
+/// one known to be clear of terrain (16 put P2 inside a wall P1 stood at).
+pub const P2_X_OFFSET: u16 = 0;
+/// Frames P2 may stay outside the camera window before it is warped to P1.
+pub const P2_AWAY_FRAMES: u16 = 90;
 /// Frames P2 stays down before respawning next to P1 at half HP (no life
 /// cost), unless P1 revives it sooner (`coop_hud::still_down`).
 pub const P2_DOWN_FRAMES: u16 = 600;
@@ -210,6 +215,10 @@ pub struct CoopState {
     pub p1: crate::zero::ZeroP1,
     /// Down spot and revive progress (coop_hud.rs).
     pub revive: crate::coop_hud::Revive,
+    /// Frames in a row P2 has been outside the camera window.
+    pub p2_away: u16,
+    /// P2 was left behind: re-anchor on P1 (HP kept) at the next `p2_anchor_ok`.
+    pub p2_warp: bool,
 }
 
 impl Default for CoopState {
@@ -234,6 +243,8 @@ impl Default for CoopState {
             wave_frames: [u16::MAX; 2],
             p1: Default::default(),
             revive: Default::default(),
+            p2_away: 0,
+            p2_warp: false,
         }
     }
 }
@@ -258,13 +269,6 @@ const P2_SOUND_CAP: u8 = 8;
 /// Pending sound entries in the ring.
 pub fn sound_pending(write: u8, read: u8) -> u8 {
     (write.wrapping_sub(read) & 0x1E) / 2
-}
-
-/// Clamp P2's world X into `[cam + 8, cam + 248]`. `$05` is the sprite
-/// centre (the emitter draws X at -8/-16 around it), so the whole 16 px body
-/// stays on screen (B5: `[cam, cam + 240]` showed half a sprite on the left).
-pub fn clamp_p2_x(x: u16, camera_x: u16) -> u16 {
-    x.clamp(camera_x.saturating_add(8), camera_x.saturating_add(248))
 }
 
 /// Force sprite palette `pal` (0-7) on one 4-byte OAM entry (attribute byte
@@ -321,6 +325,7 @@ fn word(w: &[u8; 0x20000], addr: u32) -> u16 {
 
 fn go_down(game: &mut Game) {
     game.coop.p2_hidden = true;
+    game.coop.p2_warp = false;
     game.coop.down_frames = P2_DOWN_FRAMES;
     crate::coop_hud::mark_down(game);
 }
@@ -338,6 +343,7 @@ fn p2_update(game: &mut Game) {
         // is set, so this is only the Start frame.
         if w[ix(ram::PAUSE)] == 0 {
             game.coop.p2_hidden = true;
+            game.coop.p2_warp = false;
             game.coop.down_frames = 0;
             game.coop.revive.half_hp = false;
         }
@@ -353,22 +359,18 @@ fn p2_update(game: &mut Game) {
         if !coop_stages::p2_anchor_ok(game.wram()) {
             return;
         }
-        game.coop.p2 = respawn_anchor(game.wram());
+        anchor(game);
         // Debug: `MMX_COOP_P2_HP=N` spawns P2 with N HP (to test HP-0 deaths).
         if let Some(hp) = std::env::var("MMX_COOP_P2_HP").ok().and_then(|v| v.parse().ok()) {
             game.coop.p2[OFF_HP] = hp;
         }
         crate::coop_hud::respawn_hp(game);
-        // Scratch starts as a copy of P1's (grounded) state.
-        let mut copy = [0u8; P2_SWAPPED_LEN];
-        let w = game.wram();
-        let mut o = 0;
-        for &(a, n) in &P2_SWAPPED {
-            copy[o..o + n].copy_from_slice(&w[ix(a)..ix(a) + n]);
-            o += n;
-        }
-        game.coop.p2_scratch = copy;
         game.coop.p2_hidden = false;
+    } else if game.coop.p2_warp && coop_stages::p2_anchor_ok(game.wram()) {
+        // Left behind (see `follow`): back on P1's spot, same HP, no down state.
+        let hp = game.coop.p2[OFF_HP];
+        anchor(game);
+        game.coop.p2[OFF_HP] = hp;
     }
     if p2_is_down(&game.coop.p2) {
         // Never run the death handler on P2: it drives the stage-wide death flow.
@@ -398,6 +400,21 @@ fn p2_update(game: &mut Game) {
     if game.coop.p2[OFF_SHOTS] > fired {
         game.coop.p2_shots |= shots_live(game.wram()) & !live;
     }
+}
+
+/// P2's block and scratch from P1's (grounded) ones, at P1's spot.
+fn anchor(game: &mut Game) {
+    game.coop.p2 = respawn_anchor(game.wram());
+    let mut copy = [0u8; P2_SWAPPED_LEN];
+    let w = game.wram();
+    let mut o = 0;
+    for &(a, n) in &P2_SWAPPED {
+        copy[o..o + n].copy_from_slice(&w[ix(a)..ix(a) + n]);
+        o += n;
+    }
+    game.coop.p2_scratch = copy;
+    game.coop.p2_warp = false;
+    game.coop.p2_away = 0;
 }
 
 /// Active slots of the shot table, bit n = slot n.
@@ -455,9 +472,7 @@ fn shot_books(game: &mut Game) {
 /// `$80:D241` (after the object master's `JSL $81:9D67`): P2's terrain /
 /// physics phase, the second half of the player's frame that runs after the
 /// enemy loops. Without it P2 kept a stale ground flag (`$0BD3` bit 2) and
-/// "landed" at the apex of every jump. Then the vertical "lost" check (pits,
-/// B1; left behind by a vertical scroll, B2). The horizontal clamp is in the
-/// display slice, against the camera the ROM scrolled to this frame.
+/// "landed" at the apex of every jump. Then [`follow`].
 fn p2_physics(game: &mut Game) {
     crate::saber::take_back(game); // both players' swings
     if !game.coop.enabled {
@@ -471,18 +486,40 @@ fn p2_physics(game: &mut Game) {
         game.call_isolated(PLAYER_PHYSICS);
         game.call_isolated_ret(FX_UPDATE, crate::TrapReturn::Rts);
     });
-    let cam_y = word(game.wram(), ram::CAMERA_Y);
-    let p2 = &mut game.coop.p2;
-    if coop_stages::p2_lost(u16::from_le_bytes([p2[OFF_POS_Y], p2[OFF_POS_Y + 1]]), cam_y) {
-        // The ROM's pit death lives in the camera code (`$80:E14A`, P1 only),
-        // so P2 never dies in a pit by itself, and nothing drags it along a
-        // vertical scroll. Either way it's just "P2 down": respawn next to P1
-        // after `P2_DOWN_FRAMES`, no life cost, no stage-wide death flow.
-        p2[OFF_ACTION] = ACTION_DEATH;
-        p2[OFF_HP] = 0x80;
-    }
+    follow(game);
     if p2_is_down(&game.coop.p2) {
         go_down(game);
+    }
+}
+
+/// Where P2 is against the camera, after its physics. P2 is never moved by
+/// the camera: the old clamp dragged it along with no collision check, into
+/// walls and floors (hw-e: P2 fell off a ledge behind P1 and was pushed into
+/// the ledge's side, then ejected up through the road). Instead:
+/// - airborne below the ROM's pit line (`p2_lost`, B1): a real death, down;
+/// - a screen or more outside the window (`p2_far`), or outside it for
+///   [`P2_AWAY_FRAMES`] (left behind by a scroll, B2): `p2_warp`, i.e. back
+///   on P1's spot at the next `p2_anchor_ok`, HP kept.
+///
+/// P2 keeps its own physics while off screen (collision is not camera-
+/// streamed: idle P2 800+ px behind stands where it stood, hw-a/hw-e/r3-10).
+fn follow(game: &mut Game) {
+    let w = game.wram();
+    let (cx, cy) = (word(w, ram::CAMERA_X), word(w, ram::CAMERA_Y));
+    let p2 = &mut game.coop.p2;
+    let (x, y) = (u16::from_le_bytes([p2[OFF_POS_X], p2[OFF_POS_X + 1]]), u16::from_le_bytes([p2[OFF_POS_Y], p2[OFF_POS_Y + 1]]));
+    let grounded = (p2[OFF_GROUND] | p2[OFF_GROUND + 1]) & 4 != 0;
+    if coop_stages::p2_lost(y, cy) && !grounded {
+        // The ROM's pit death lives in the camera code (`$80:E14A`, P1 only).
+        // For P2 it's just "P2 down": no life cost, no stage-wide death flow.
+        p2[OFF_ACTION] = ACTION_DEATH;
+        p2[OFF_HP] = 0x80;
+        return;
+    }
+    let c = &mut game.coop;
+    c.p2_away = if coop_stages::p2_on_screen(x, y, cx, cy) { 0 } else { c.p2_away.saturating_add(1) };
+    if c.p2_away > P2_AWAY_FRAMES || coop_stages::p2_far(x, y, cx, cy) {
+        c.p2_warp = true;
     }
 }
 
@@ -554,16 +591,6 @@ fn oam_hide(game: &mut Game) {
 fn p2_display(game: &mut Game) {
     if !game.coop.enabled || game.coop.p2_hidden {
         return;
-    }
-    // B5: the camera update `$80:DDB0` ran after P2's physics slice, so clamp
-    // here, against where the screen really is this frame.
-    let cam = word(game.wram(), ram::CAMERA_X);
-    let x = u16::from_le_bytes([game.coop.p2[OFF_POS_X], game.coop.p2[OFF_POS_X + 1]]);
-    let cx = clamp_p2_x(x, cam);
-    if cx != x {
-        // ponytail: no collision check; a clamp can push P2 into a wall.
-        game.coop.p2[OFF_POS_X..OFF_POS_X + 2].copy_from_slice(&cx.to_le_bytes());
-        game.coop.p2[OFF_VEL_X..OFF_VEL_X + 2].fill(0);
     }
     let saved = game.regs();
     game.coop.dbg_regs = (saved.d, saved.dbr, saved.p);
@@ -723,15 +750,6 @@ mod tests {
     }
 
     #[test]
-    fn coop_clamp() {
-        assert_eq!(clamp_p2_x(0x0108, 0x0100), 0x0108);
-        assert_eq!(clamp_p2_x(0x00F0, 0x0100), 0x0108);
-        assert_eq!(clamp_p2_x(0x0300, 0x0100), 0x01F8);
-        assert_eq!(clamp_p2_x(0x0180, 0x0100), 0x0180);
-        assert_eq!(clamp_p2_x(0xFFFF, 0xFFF0), 0xFFFF);
-    }
-
-    #[test]
     fn coop_sound_pending() {
         assert_eq!(sound_pending(0x04, 0x00), 2);
         assert_eq!(sound_pending(0x02, 0x1E), 2);
@@ -755,7 +773,7 @@ mod tests {
         w[ix(ram::X_POS_X)..ix(ram::X_POS_X) + 2].copy_from_slice(&0x01F8u16.to_le_bytes());
         w[ix(ram::MAX_HP)] = 0x10;
         let p2 = respawn_anchor(&w);
-        assert_eq!(u16::from_le_bytes([p2[OFF_POS_X], p2[OFF_POS_X + 1]]), 0x0208);
+        assert_eq!(u16::from_le_bytes([p2[OFF_POS_X], p2[OFF_POS_X + 1]]), 0x01F8);
         assert_eq!(p2[OFF_HP], 0x10);
         assert_eq!(&p2[OFF_VEL_X..OFF_VEL_X + 4], &[0, 0, 0, 0]);
         assert_eq!(p2[OFF_INPUT], 0x33);

@@ -29,9 +29,9 @@ The disassembly's bank-`$80` PCs drift from this cartridge by up to `0x41`
 | addr | what | P2 body |
 |---|---|---|
 | `$80:D1EF` | instruction after the object master's `JSL $81:812E` (P1's action/input phase has just returned) | update slice: ROM input remap `$80:E518` on pad 2, then `$81:812E` |
-| `$80:D241` | instruction after `JSL $81:9D67` (P1's terrain/physics phase, run after the enemy and shot loops) | physics slice: shot bookkeeping (B3), `$81:9D67`, `$80:D292`, then `coop_stages::p2_lost` (pit / left behind) |
+| `$80:D241` | instruction after `JSL $81:9D67` (P1's terrain/physics phase, run after the enemy and shot loops) | physics slice: shot bookkeeping (B3), `$81:9D67`, `$80:D292`, then `coop::follow` (pit death / left behind, see "Following the camera") |
 | `$80:D545` | second instruction of the OAM build `$80:D544` (`PHB`; `$D544` is Zero's palette trap) | hide last frame's P2 slots (Y = `$E0`) |
-| `$80:9A86` | instruction after `JSR $80:D544` at `$80:9A83` in the per-frame stage code: the whole OAM build (and its hide loop) is done, the camera is final | display slice: clamp X into `[cam+8, cam+248]`, `$80:D640` + `$80:D671` on P2's block into the slots past the game's, Zero palette, direct page put back; with the X3 set, the Rust emitter `zero::emit_x3` instead (docs/zero.md "Drawing P2 as X3 Zero") |
+| `$80:9A86` | instruction after `JSR $80:D544` at `$80:9A83` in the per-frame stage code: the whole OAM build (and its hide loop) is done, the camera is final | display slice: `$80:D640` + `$80:D671` on P2's block into the slots past the game's, Zero palette, direct page put back; with the X3 set, the Rust emitter `zero::emit_x3` instead (docs/zero.md "Drawing P2 as X3 Zero") |
 | `$80:D3B8` / `$80:D3C1` | shot loop, before / after each `$1228` slot (`D` = the slot) | P2's shots (B3): P2's block swapped in around their update |
 | `$80:D1FF` | instruction after the object master's `JSR $80:D3B2` (the shot loop; the enemy loops follow) | saber (X3 set only): the arc's shot into a free `$1228` slot, taken out at `$80:D241` (docs/zero.md "The saber") |
 | `$80:9A94` | `LDA $1F30`, where both paths after `$9A86` meet (every gameplay frame, after the display slice) | P2's HP bar and down marker (`coop_hud.rs`, "P2 HP bar and revive") |
@@ -44,8 +44,47 @@ The per-frame stage code then runs `JSR $80:D544` (OAM build) at `$80:9A83`.
 When P2 exists (`coop_stages`): `p2_update` hides P2 (re-anchor later) when
 `!p2_should_exist` (not `$D2=4/$D3=4`, P1 dead or HP 0); on the pause flag
 `$1F24` it only skips the slice, so P2 comes back where it was. A hidden P2
-anchors next to P1 only when `p2_anchor_ok` (P1 standing/ready/walking,
+anchors on P1's spot only when `p2_anchor_ok` (P1 standing/ready/walking,
 vy 0, on screen).
+
+## Following the camera
+
+Playtest: "P2 is clipping through the ground constantly after I change
+elevation / the screen scrolls". Cause: the display slice clamped P2's X
+into `[cam+8, cam+248]` with no collision check, so a scrolling camera
+dragged P2 into walls and floors. Repro (old code):
+
+```
+dump --load states/hw-e.state --frames 200 --at 30-200/2 --hold 0100 --p2-hold 0200 --refill --coop
+f44  X=(3512,383) cam 3384 / P2 (3416,383) act 08   walks off the ledge behind P1
+f64  X=(3541,383) cam 3413 / P2 (3421,431) act 08   clamp pushes it right into the ledge's side
+f66  ..                    / P2 (3424,431) act 04   "lands" inside the road structure
+f76  ..                    / P2 (3447,415) act 04   ejected up 16 px, still inside
+f174..182                  / P2 3591 -> 3719, 32 px a frame (ejection), then pops up to 399, 383
+```
+
+(the left of 3416 is the pit P1 jumps at f~190; `target/qa/follow/before-f80.png`: Zero
+drawn inside the green road block). Now P2 is never moved by the camera.
+`coop::follow`, after P2's physics:
+
+- airborne and below the ROM's pit line (`p2_lost`, B1): down (the only
+  path into the down/revive state besides HP 0);
+- a screen or more outside the window (`p2_far`: dx outside `[-256, 512)`
+  or dy outside `[-224, 448)`), or outside the window (`p2_on_screen`) for
+  more than `P2_AWAY_FRAMES` (90) frames in a row: `p2_warp`. At the next
+  `p2_anchor_ok` frame the update slice re-anchors P2 on P1's spot (block and
+  scratch copied from P1's, as a respawn) with its HP kept, no down state.
+
+`P2_X_OFFSET` is 0 now: P1's own spot is the only place known to be clear of
+terrain (16 px right put P2 inside a wall P1 stood against). Off screen P2
+keeps running its own physics: idle P2 left 800+ px behind on `hw-a`,
+`highway-start`, `hw-e`, `r3-10` stands at its Y the whole time (collision
+is not camera-streamed); what moves it there is the ROM (the collapsing
+road in `hw-f`/`r3-0`, road attackers). Same repro with the new rule: P2
+falls into that pit (`(3365,516)` act `$0C` at f72, like P1 at f222) and
+nothing moves it sideways (`target/qa/follow/after-f66.png`); P2 idle on
+`highway-start`: warped to P1's spot at f~185 (X 393) and f~365 (X 591).
+The ROM's own edge rules for P1 are untouched.
 
 ## Display slice and lag frames (B4)
 
@@ -230,11 +269,11 @@ e.g. `$81:B091`, `$82:A611`); these still hit only P1.
   below the screen (Y 895) and stood there (B1).
 - **Left behind vertically** (B2): nothing drags P2 along a vertical scroll;
   after the Bee Blader 1 climb P2 stayed at Y 575 with the camera at 256.
-- One rule for both, `coop_stages::p2_lost(y, cam_y)`: the ROM's pit rule
-  above, or 64+ px above the window. `p2_physics` applies it after P2's
-  physics and marks P2 down (action `$0C`, HP `$80`): hidden for
+- `coop_stages::p2_lost(y, cam_y)` is the ROM's pit rule above; with P2
+  airborne it marks P2 down (action `$0C`, HP `$80`): hidden for
   `P2_DOWN_FRAMES`, then re-anchored next to P1, no life lost; no ROM death
-  code runs for P2.
+  code runs for P2. Left behind (B2, or above the window) is not a death any
+  more: see "Following the camera".
 - **Spikes** (tile `$3F`) go through `$81:96CB` inside P2's update slice, so
   they are the HP-0 case. unverified: Highway has no spikes.
 - The WRAM diff (`MMX_COOP_DIFF=1`, below) on the pit and HP-0 death frames
@@ -559,7 +598,7 @@ lines shortened to mode, X, action, HP, camera and P2's pos/action/HP/OAM.
   P2 is taken out once the camera is 288 px above it and re-anchors on the
   first grounded P1 frame after the 120-frame wait. M4 (P2 falling with the
   collapsing road to Y 591 while the camera lags) is not a false positive.
-- [x] **B5, clamp.** `dump --load states/highway-start.state --frames 240
+- [x] **B5, clamp** (superseded: no clamp since "Following the camera"). `dump --load states/highway-start.state --frames 240
   --at 120,240 --hold 0100 --coop`: f120 camera 171, P2 179; f240 camera
   346, P2 354: P2 = camera + 8, same frame, whole sprite on screen
   (`target/qa/m0-walk-idle/frame_000240.png`).
