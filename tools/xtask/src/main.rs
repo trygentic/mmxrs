@@ -11,7 +11,8 @@ use mmx_verify::{movie_bk2, CompareOpts, Lockstep};
 
 const USAGE: &str = "usage: cargo xtask <command>
   verify [--movie F.bk2|F.lsmv] [--frames N] [--no-frame] [--coop-off] [--tap F,..] [--hold HEX] [--p2-hold HEX]
-  trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..]   bank histogram of frame N's opcode fetches
+  trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..] [--calls] [--pcs FILE]   bank histogram of frame N's opcode fetches (--pcs: every PC to FILE)
+  cooptrace --frame F [script] [--phase 2] [--dump PREFIX]   P1 vs P2 player update (phase 2: terrain phase $81:9D67); --dump: PREFIX.p1/.p2 PCs
   lagdiff --frames N [script] [--refill] [--untrap HEX,..] [--dump A-B]   solo vs co-op (P2 idle): first real-time
        opcode fetch where P1's PC or master clock differs; --dump writes both frames' traces (PC, mclk) to target/
   dump --frames N --out DIR [--at F,F,...] [--movie F] [--tap F,F,...] [--hold HEX] [--p2-hold HEX] [--coop]
@@ -417,6 +418,9 @@ fn trace(args: &[String]) -> i32 {
         *banks.entry(pc >> 16).or_insert(0usize) += 1;
     }
     println!("frame {frames}: {} opcode fetches", pcs.len());
+    if let Some(path) = flag(args, "--pcs") {
+        let _ = std::fs::write(path, pcs.iter().map(|pc| format!("{pc:06X}\n")).collect::<String>());
+    }
     for (b, n) in banks {
         println!("  bank ${b:02X}: {n}");
     }
@@ -512,13 +516,24 @@ fn cooptrace(args: &[String]) -> i32 {
     g.isolated_trace = Some(Vec::new());
     let pcs = g.trace_frame(script(frame, Pads::default()));
     let p2 = g.isolated_trace.take().unwrap();
-    let (update, update_ret) = (g.hook(mmx_core::coop::PLAYER_UPDATE), g.hook(mmx_core::coop::HOOK_UPDATE));
+    // `--phase 2`: the terrain/physics phase (`$81:9D67`) instead of the update.
+    let (update, update_ret) = if num(args, "--phase") == Some(2) {
+        (g.hook(mmx_core::coop::PLAYER_PHYSICS), g.hook(mmx_core::coop::HOOK_PHYSICS))
+    } else {
+        (g.hook(mmx_core::coop::PLAYER_UPDATE), g.hook(mmx_core::coop::HOOK_UPDATE))
+    };
     let start = pcs.iter().position(|&p| p == update).unwrap_or_else(|| die("P1 update not found in frame"));
     let end = start + pcs[start..].iter().position(|&p| p == update_ret).unwrap_or_else(|| die("P1 update return not found"));
     let p1 = &pcs[start..end];
     // P2's trace holds the remap call then the update; skip to the update entry.
     let p2s = p2.iter().position(|&p| p == update).unwrap_or(0);
     let p2 = &p2[p2s..];
+    let p2 = &p2[..p2.iter().skip(1).position(|&p| p == update || p == g.hook(mmx_core::coop::INPUT_REMAP)).map_or(p2.len(), |e| e + 1)];
+    if let Some(path) = flag(args, "--dump") {
+        let txt = |t: &[u32]| t.iter().map(|pc| format!("{pc:06X}\n")).collect::<String>();
+        let _ = std::fs::write(format!("{path}.p1"), txt(p1));
+        let _ = std::fs::write(format!("{path}.p2"), txt(p2));
+    }
     println!("frame {frame}: P1 update {} instrs, P2 update {} instrs", p1.len(), p2.len());
     // Walk both traces; at each split, report the last common PC (the branch)
     // and resynchronise on the nearest later common PC.

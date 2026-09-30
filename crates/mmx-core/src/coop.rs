@@ -132,6 +132,16 @@ fn swap_scratch(w: &mut [u8; 0x20000], shadow: &mut [u8; P2_SWAPPED_LEN]) {
 pub const OFF_ACTION: usize = 0x02; // $0BAA: $0C death, $0E hurt
 pub const OFF_POS_X: usize = 0x05; // $0BAD word
 pub const OFF_POS_Y: usize = 0x08; // $0BB0 word
+/// `$0BCA`/`$0BCC`: last frame's X/Y, saved by the object master (not the
+/// player code) unless [`FREEZE_PREV_POS`] is set.
+pub const OFF_PREV_X: usize = 0x22;
+/// Camera struct (`D` = `$1E48` in `$80:DDDB`): mode `+$01` (2 = follow),
+/// left / right limits `+$0E` / `+$10` (camera X).
+const CAM_MODE: u32 = 0x7E1E49;
+const CAM_LEFT: u32 = 0x7E1E56;
+const CAM_RIGHT: u32 = 0x7E1E58;
+/// `$1F19`: the object master skips the previous-position save while set.
+const FREEZE_PREV_POS: u32 = 0x7E1F19;
 pub const OFF_VEL_X: usize = 0x1A; // $0BC2 word
 pub const OFF_VEL_Y: usize = 0x1C; // $0BC4 word
 pub const OFF_HP: usize = 0x27; // $0BCF, bit7 = HUD redraw
@@ -398,6 +408,16 @@ fn p2_update(game: &mut Game) {
         return go_down(game);
     }
 
+    // Walls: the object master's entry (`$80:D1ED` Rev 1, before its `JSL
+    // $81:812E`) saves X's position as last frame's, `$0BCA/$0BCC` (block
+    // `+$22/+$24`), unless `$1F19`. The terrain phase (`$84:91BE`) picks the
+    // side it probes from `pos - prev`; with P2's stale copy it probed the
+    // wrong side and walked into walls and floors (docs/coop.md "Walls").
+    if game.wram()[ix(FREEZE_PREV_POS)] == 0 {
+        let p2 = &mut game.coop.p2;
+        p2.copy_within(OFF_POS_X..OFF_POS_X + 2, OFF_PREV_X);
+        p2.copy_within(OFF_POS_Y..OFF_POS_Y + 2, OFF_PREV_X + 2);
+    }
     let mut pad = word(game.wram(), PAD2_HELD) & !(BTN_START | BTN_SELECT);
     if game.zero_set.is_some() {
         // X swings the saber; during a swing the ROM gets a masked pad.
@@ -563,6 +583,8 @@ fn p2_physics(game: &mut Game) {
 fn follow(game: &mut Game) {
     let w = game.wram();
     let (cx, cy) = (word(w, ram::CAMERA_X), word(w, ram::CAMERA_Y));
+    // The level's side walls are the camera's (follow mode 2 only).
+    let walls = (w[ix(CAM_MODE)] == 2).then(|| (word(w, CAM_LEFT), word(w, CAM_RIGHT)));
     let p2 = &mut game.coop.p2;
     let (x, y) = (u16::from_le_bytes([p2[OFF_POS_X], p2[OFF_POS_X + 1]]), u16::from_le_bytes([p2[OFF_POS_Y], p2[OFF_POS_Y + 1]]));
     let grounded = (p2[OFF_GROUND] | p2[OFF_GROUND + 1]) & 4 != 0;
@@ -573,6 +595,8 @@ fn follow(game: &mut Game) {
         p2[OFF_HP] = 0x80;
         return;
     }
+    let x = walls.map_or(x, |(left, right)| coop_stages::p2_level_clamp(x, left, right));
+    p2[OFF_POS_X..OFF_POS_X + 2].copy_from_slice(&x.to_le_bytes());
     let c = &mut game.coop;
     c.p2_away = if coop_stages::p2_on_screen(x, y, cx, cy) { 0 } else { c.p2_away.saturating_add(1) };
     if c.p2_away > P2_AWAY_FRAMES || coop_stages::p2_far(x, y, cx, cy) {

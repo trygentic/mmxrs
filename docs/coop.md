@@ -32,8 +32,8 @@ bank `$80` `+$20`/`+$2B`) find them too; see `docs/rom-variants.md`.
 
 | addr | what | P2 body |
 |---|---|---|
-| `$80:D1EF` | instruction after the object master's `JSL $81:812E` (P1's action/input phase has just returned) | update slice: ROM input remap `$80:E518` on pad 2, then `$81:812E` |
-| `$80:D241` | instruction after `JSL $81:9D67` (P1's terrain/physics phase, run after the enemy and shot loops) | physics slice: shot bookkeeping (B3), `$81:9D67`, `$80:D292`, then `coop::follow` (pit death / left behind, see "Following the camera") |
+| `$80:D1EF` | instruction after the object master's `JSL $81:812E` (P1's action/input phase has just returned) | update slice: P2's previous position `+$22/+$24` (what the master's entry does for X, see "Walls"), ROM input remap `$80:E518` on pad 2, then `$81:812E` |
+| `$80:D241` | instruction after `JSL $81:9D67` (P1's terrain/physics phase, run after the enemy and shot loops) | physics slice: shot bookkeeping (B3), `$81:9D67`, `$80:D292`, then `coop::follow` (pit death / left behind, see "Following the camera"; the level's side walls, see "Walls") |
 | `$80:D545` | second instruction of the OAM build `$80:D544` (`PHB`; `$D544` is Zero's palette trap) | hide last frame's P2 slots (Y = `$E0`) |
 | `$80:9A86` | instruction after `JSR $80:D544` at `$80:9A83` in the per-frame stage code: the whole OAM build (and its hide loop) is done, the camera is final | display slice: `$80:D640` + `$80:D671` on P2's block into the slots past the game's, Zero palette, direct page put back; with the X3 set, the Rust emitter `zero::emit_x3` instead (docs/zero.md "Drawing P2 as X3 Zero") |
 | `$80:D3B8` / `$80:D3C1` | shot loop, before / after each `$1228` slot (`D` = the slot) | P2's shots (B3): P2's block swapped in around their update |
@@ -89,6 +89,58 @@ falls into that pit (`(3365,516)` act `$0C` at f72, like P1 at f222) and
 nothing moves it sideways (`target/qa/follow/after-f66.png`); P2 idle on
 `highway-start`: warped to P1's spot at f~185 (X 393) and f~365 (X 591).
 The ROM's own edge rules for P1 are untouched.
+
+## Walls
+
+Playtest: "Zero jumps up and down under the terrain after any wall
+contact". Repro (Rev 1; both walk right and jump the first gap at f568):
+
+```
+dump --load states/usa11-highway-start.state --x3 X3 --frames 700 --coop --hold 0100 --p2-hold 0100 \
+  --p1tap 8000@568:14 --p2tap 8000@568:14 --at 580-700/2
+          before                                   after
+f590 X (824,359) a08 | P2 (825,362) a08    P2 (824,362) a08
+f592 X (824,364) a12 | P2 (828,351) a08    P2 (824,364) a12 vy 0     wall slide, like X
+f602 X (824,368) a12 | P2 (871,360) a08    P2 (824,370) a12
+f606 X (824,376) a12 | P2 (888,351) a00    P2 (824,378) a12
+f620 X (824,404) a12 | P2 (888,353) a08    P2 (824,406) a12
+f646 X (856,474) a08 | P2 (888,356) a08    P2 (856,479) a12          next wall; both die in the pit at f672
+```
+
+Cause: the terrain phase `$84:91BE` (from `$81:9D67`) picks which side
+to probe from the move since last frame: `$84:92AC` does `+$05 - +$22`
+(zero: no wall probe; sign: probe right or left edge, `$84:9315` ->
+`$84:90B3` tile fetch -> `JSR ($935D,x)` by tile class -> `$84:9308`
+push-out), and `$84:91ED` compares `+$08` with `+$24` (down: floor probe,
+up: ceiling probe). `+$22/+$24` (`$0BCA/$0BCC`) are last frame's X/Y, and
+the player code never writes them: the object master's entry does
+(`$80:D1ED` Rev 1, `$80:D1C2` PAL: `LDX $1F19; BNE; LDA $0BAD; STA $0BCA;
+LDA $0BB0; STA $0BCC`), before its `JSL $81:812E`. Found with `trace --pcs`
+on the solo frame 590 (the only stores to `$0BCA`/`+$22`) after
+`cooptrace --frame 591 --phase 2` showed P2 taking the `SBC $0007,y`
+(left-edge) branch at `$84:92C9` while moving right. P2's copy was frozen
+at its anchor spot, so P2 probed the wrong side: past walls, and on the
+raised road (Y 351, above the anchor's 367) it probed the ceiling instead
+of the floor, fell, got pushed back up, forever. The tile fetch itself is
+level-absolute (`$84:916A`: screen map `$7E:E800` by X/Y high bytes ->
+`$7E:2000` -> `[$0B92]`), nothing camera-relative. Fix: `p2_update` does
+the same two copies on P2's block (unless `$1F19`) before the update.
+
+The level's left/right edges are not terrain: the camera's follow mode
+(`$80:DDDB`, `D` = `$1E48`, mode `+$01` = 2) ends at `$80:E0DE`, which
+clamps the camera to its limits `+$0E`/`+$10` and then X into
+`[left + 8, right + 248]` (P1 only). `coop::follow` applies the same
+clamp to P2 in mode 2 (`coop_stages::p2_level_clamp`). Before, P2 holding
+Left from highway-start walked to X -1 (65535) at f91 and fell to Y 431
+off the level; now it stops at X 8 at f91 like X solo.
+
+Pit wall from below (`--p1tap 0100@1:540 --p2-hold 0100`, P2 walks off
+the gap's edge): before P2 went through the far wall (826,390 at f570,
+844,448 at f582, dead at 862,517); now it wall-slides at X 824 from Y 390
+to 410 (the wall's bottom) and falls on. PNGs (`target/qa11/walls/`):
+`strip.png` (top before, bottom after: f592, 596, 602, 606, 620, 640),
+`pitwall.png` (f567..585), `leftwall-f121.png`. Parity verify OK on both
+dumps, QA idle "yes" on every milestone (PAL and Rev 1).
 
 ## Display slice and lag frames (B4)
 
