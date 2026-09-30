@@ -192,6 +192,8 @@ pub struct CoopState {
     /// Objects P2 stood on last frame (their `+$2C` for P2), bit n = slot
     /// `$0E68 + n * $40`. See `coop_objects`.
     pub p2_on_obj: u64,
+    /// Pickups P2 collected and is being filled from (same slot bits).
+    pub p2_items: u64,
     /// Slots of the shot table ([`X_SHOTS`]) holding P2's shots (bit n = slot n).
     pub p2_shots: u8,
     /// X3 Zero frame whose tiles are in the PPU's P2 page (`u16::MAX`: none
@@ -216,6 +218,7 @@ impl Default for CoopState {
             contact_hits: 0,
             in_contact: false,
             p2_on_obj: 0,
+            p2_items: 0,
             p2_shots: 0,
             zero_frame: u16::MAX,
             saber: crate::saber::Saber { slot: 0xFF, ..Default::default() },
