@@ -29,7 +29,17 @@ send back:
     MMX_ROM=path/to/dump cargo xtask dump --out target/v --frames 1500 --tap 200,400,600,800,1000 --at 1500 --save 1500=states/NEW-highway-start.state
     QA_STATES=states/NEW HIGHWAY_START=states/NEW-highway-start.state QA_OUT=target/qa-NEW MMX_ROM=path/to/dump scripts/coop-qa.sh all
 
-(QA states are per dump: a save state from one dump does not load on
+On v1.1 (`states/usa11/`, NTSC) `coop-qa.sh` gives P1 idle parity yes for
+M0-M2, M4-M6 and M8, but **no** for M3 (P1 gets one extra lag frame at f269,
+both players in knockback; parity comes back with `--untrap 849B03`, the
+contact pass) and M7 (camera 3 px off at f600). The same route replayed on
+v1.1 at PAL timing (`MMX_TIMING=pal`, `states/usa11pal/`) is idle-clean on
+all nine, and the contact routine `$84:9B03..$84:9E00` is byte-identical on
+both dumps, so this is P2's presence tipping NTSC's shorter frame budget,
+not a misplaced hook. Open.
+
+(QA states are per dump; at PAL timing the boot needs taps up to 1400 and
+~1700 frames. A save state from one dump does not load on
 another.) Tests: `MMX_ROM` pins the PAL signatures when it is the PAL dump;
 `MMX_ROM_V11` runs the v1.1 resolution test.
 

@@ -504,9 +504,14 @@ mod tests {
         };
         let mut g = Game::from_rom(std::fs::read(rom).unwrap()).unwrap();
         g.set_x3_rom(&std::fs::read(x3).unwrap()).unwrap();
-        // The intro-stage script (`--tap 200,400,600,800,1000`): Start for 4 frames.
-        for f in 1..=1500usize {
-            let start = [200, 400, 600, 800, 1000].iter().any(|&t| (t..t + 4).contains(&f));
+        // Start for 4 frames every 200 (the intro-stage script) until the
+        // intro stage is running (`$D2/$D3 = 4/4`; ~f1500 NTSC, ~f1600 PAL).
+        let playing = |g: &Game| g.wram()[ix(ram::MODE_D2)] == 4 && g.wram()[ix(ram::STAGE_PHASE)] == 4;
+        let mut f = 0usize;
+        while !playing(&g) {
+            f += 1;
+            assert!(f < 4000, "intro stage not reached");
+            let start = f % 200 < 4 && f >= 200;
             g.step(crate::Pads { p1: if start { crate::BTN_START } else { 0 }, p2: 0 });
         }
         g.set_p1_zero(true).unwrap();
