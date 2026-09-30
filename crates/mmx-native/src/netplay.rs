@@ -1,8 +1,8 @@
 //! Online co-op for the desktop app: open the WebRTC transport and wrap
-//! `mmx_core::netgame::NetPlay` (the per-tick rollback driver shared with the
-//! web build). The window loop calls [`Net::tick`] once per 60 Hz tick.
+//! `mmx_core::netgame::NetPlay` (the per-tick rollback or lockstep driver
+//! shared with the web build). The window loop calls [`Net::tick`] once per 60 Hz tick.
 
-use mmx_core::netgame::NetPlay;
+use mmx_core::netgame::{Mode, NetPlay};
 use mmx_core::Game;
 use mmx_net::ConnectStage;
 
@@ -24,17 +24,19 @@ pub struct Net {
     epoch: std::time::Instant,
 }
 
-/// `--coop-host/--coop-join ROOM [--signal] [--ice] [--delay]` -> a connecting session.
+/// `--coop-host/--coop-join ROOM [--signal] [--ice] [--mode] [--delay]` -> a connecting session.
+#[allow(clippy::too_many_arguments)]
 pub fn connect(
     rom: &[u8],
     host: bool,
     room: &str,
     signal: &str,
     ice: Option<&str>,
+    mode: Mode,
     delay: u8,
     x3: Option<&mmx_core::zero_data::ZeroSet>,
 ) -> Result<Net, String> {
-    let cfg = NetPlay::<NetTransport>::config(rom, host, mmx_core::netgame::Mode::Rollback, delay, x3)?;
+    let cfg = NetPlay::<NetTransport>::config(rom, host, mode, delay, x3)?;
     let url = mmx_net::room_url(signal, room).map_err(|e| e.to_string())?;
     let ice = ice
         .map(mmx_net::IceConfig::parse)
@@ -104,7 +106,7 @@ impl Net {
 }
 
 /// Desktop end to end: in-process mmx-signal, two `NetPlay<MatchboxTransport>`
-/// over 127.0.0.1 (ICE none), 300 settled frames without a desync.
+/// over 127.0.0.1 (ICE none), 300 settled frames without a desync, in each mode.
 #[cfg(all(test, feature = "netplay"))]
 mod tests {
     use super::*;
@@ -130,11 +132,15 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(10)).expect("signalling server did not start")
     }
 
-    fn run_pair(rom: &[u8], room: &str, frames: u32) {
+    fn run_pair(rom: &[u8], room: &str, frames: u32, mode: Mode) {
         let url = format!("ws://{}", start_signal());
-        // Delay 0: every remote press lands after its frame ran, so pad
-        // changes are corrected by real rollbacks.
-        let mk = |host| connect(rom, host, room, &url, Some("none"), 0, None).expect("connect");
+        // Rollback at delay 0: every remote press lands after its frame ran,
+        // so pad changes are corrected by real rollbacks. Lockstep: default 3.
+        let delay = match mode {
+            Mode::Rollback => 0,
+            Mode::Lockstep => mode.default_delay(),
+        };
+        let mk = |host| connect(rom, host, room, &url, Some("none"), mode, delay, None).expect("connect");
         let mut peers = [
             (mk(true), session_game(rom, 0).unwrap(), 0x1111u32),
             (mk(false), session_game(rom, 0).unwrap(), 0x7777u32),
@@ -176,7 +182,12 @@ mod tests {
 
     #[test]
     fn rollback_pair_over_localhost_matchbox_synthetic() {
-        run_pair(&synthetic_rom(), "native-e2e", 300);
+        run_pair(&synthetic_rom(), "native-e2e", 300, Mode::Rollback);
+    }
+
+    #[test]
+    fn lockstep_pair_over_localhost_matchbox_synthetic() {
+        run_pair(&synthetic_rom(), "native-e2e-ls", 300, Mode::Lockstep);
     }
 
     /// Same on the real ROM with co-op on; skipped unless `MMX_ROM` is set.
@@ -188,6 +199,7 @@ mod tests {
         };
         let rom = std::fs::read(path).expect("read MMX_ROM");
         let frames = if cfg!(debug_assertions) { 120 } else { 600 };
-        run_pair(&rom, "native-e2e-rom", frames);
+        run_pair(&rom, "native-e2e-rom", frames, Mode::Rollback);
+        run_pair(&rom, "native-e2e-rom-ls", frames, Mode::Lockstep);
     }
 }

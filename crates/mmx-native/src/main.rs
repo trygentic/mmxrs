@@ -39,7 +39,7 @@ fn main() {
         })
     });
     let net = args.net.as_ref().map(|(host, room)| {
-        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.delay, x3.as_ref())
+        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.mode, args.net_delay(), x3.as_ref())
             .unwrap_or_else(|e| {
                 eprintln!("netplay: {e}");
                 std::process::exit(2);

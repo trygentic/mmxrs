@@ -26,7 +26,8 @@
     <input id="netSignal" value="ws://127.0.0.1:3536" size="22" title="signal server (mmx-signal)">
     <input id="netRoom" placeholder="room" size="10" title="room: 1-32 of A-Z a-z 0-9 _ -">
     <input id="netIce" placeholder="ICE (default STUN; none on a LAN)" size="24">
-    <select id="netDelay" title="input delay (frames)"><option>0</option><option>1</option><option selected>2</option><option>3</option></select>
+    <select id="netMode" title="sync mode (both players must pick the same): rollback never waits but the other player can snap on a lossy link; lockstep is smooth but waits when a packet is late"><option value="rollback" selected>rollback</option><option value="lockstep">lockstep</option></select>
+    <select id="netDelay" title="input delay in frames (host's wins): rollback 0-3, default 2; lockstep 0-8, default 3"><option value="-1" selected>delay: auto</option><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option></select>
     <button id="netHost">Host</button> <button id="netJoin">Join</button> <button id="netLeave" disabled>Leave</button>
     <div id="netStatus">netplay: idle — enter a room, then Host (player 1) or Join (player 2)</div>
   </div>

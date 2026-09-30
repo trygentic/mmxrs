@@ -1,9 +1,9 @@
 //! Online co-op in the browser (feature `netplay`): the shared
-//! `mmx_core::netgame::NetPlay` driver over `MatchboxTransport` (its message
+//! `mmx_core::netgame::NetPlay` driver (rollback or lockstep) over `MatchboxTransport` (its message
 //! loop runs through `spawn_local`). The page calls `net_tick` once per
 //! 60 Hz tick from requestAnimationFrame and presents when it returns > 0.
 
-use mmx_core::netgame::NetPlay;
+use mmx_core::netgame::{Mode, NetPlay};
 use mmx_net::MatchboxTransport;
 use wasm_bindgen::prelude::*;
 
@@ -12,19 +12,29 @@ use crate::Emu;
 #[wasm_bindgen]
 impl Emu {
     /// Host (`host = true`, player 1) or join room `room` on signal server
-    /// `signal` (`ws://host:3536`). `ice`: the shared ICE text form
-    /// (`none`, `stun:..`, `turn:.. username=U credential=C`), empty = default.
-    /// Replaces any previous session. Never blocks.
+    /// `signal` (`ws://host:3536`). `mode`: `rollback` or `lockstep` (both
+    /// players must pick the same). `delay`: input delay in frames, rollback
+    /// 0-3, lockstep 0-8; negative = the mode's default (2 / 3). `ice`: the
+    /// shared ICE text form (`none`, `stun:..`, `turn:.. username=U
+    /// credential=C`), empty = default. Replaces any previous session. Never
+    /// blocks.
     pub fn net_connect(
         &mut self,
         signal: &str,
         room: &str,
         host: bool,
-        delay: u8,
+        mode: &str,
+        delay: i32,
         ice: &str,
     ) -> Result<(), JsValue> {
         let err = |e: String| JsValue::from_str(&e);
-        let cfg = NetPlay::<MatchboxTransport>::config(&self.rom, host, mmx_core::netgame::Mode::Rollback, delay, self.game.zero_set()).map_err(err)?;
+        let mode = Mode::parse(mode).ok_or_else(|| err(format!("mode {mode:?}: rollback or lockstep")))?;
+        let delay = match u8::try_from(delay) {
+            Ok(d) => d,
+            Err(_) if delay < 0 => mode.default_delay(),
+            Err(_) => return Err(err(format!("input delay {delay} out of range"))),
+        };
+        let cfg = NetPlay::<MatchboxTransport>::config(&self.rom, host, mode, delay, self.game.zero_set()).map_err(err)?;
         let url = mmx_net::room_url(signal, room).map_err(|e| err(e.to_string()))?;
         let ice = match ice.trim() {
             "" => None,
