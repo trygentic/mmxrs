@@ -121,7 +121,8 @@ const P2_MAX_SPRITES: u8 = 32;
 // ------------------------------------------------------------ state
 
 /// Off by default; never registered by any verification path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// netplay: Encode/Decode so rollback save states carry P2 (netgame.rs).
+#[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct CoopState {
     pub enabled: bool,
     /// P2's copy of `$0BA8..$0C38` (HP at [`OFF_HP`], input at [`OFF_INPUT`]).

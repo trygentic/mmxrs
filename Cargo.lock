@@ -2550,6 +2550,7 @@ dependencies = [
  "crc",
  "getrandom 0.4.3",
  "jgenesis-common",
+ "mmx-net",
  "sha2",
  "snes-config",
  "snes-core",

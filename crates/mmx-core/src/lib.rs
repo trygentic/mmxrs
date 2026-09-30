@@ -5,6 +5,7 @@
 
 pub mod coop;
 mod game;
+pub mod netgame;
 pub mod ram;
 pub mod traps;
 

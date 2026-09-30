@@ -11,6 +11,8 @@ wdc65816-emu = { path = "../../vendor/jgenesis/wdc65816-emu" }
 jgenesis-common = { path = "../../vendor/jgenesis/jgenesis-common" }
 snes-config = { path = "../../vendor/jgenesis/snes-config" }
 bincode = "2"
+# RollbackGame trait for netgame.rs; mmx-net has no dependencies by default.
+mmx-net = { path = "../mmx-net" }
 crc = "3" # already pulled in by snes-core
 sha2 = "0.10"
 
