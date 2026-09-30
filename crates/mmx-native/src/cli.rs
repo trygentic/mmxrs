@@ -1,16 +1,19 @@
 //! Hand-rolled argv parser (no clap). See `docs/native.md`.
 
 pub const USAGE: &str = "\
-usage: mmxrs [--rom PATH] [--scale N] [--fullscreen] [--coop-local]
+usage: mmxrs [--rom PATH] [--x3-rom PATH] [--scale N] [--fullscreen] [--coop-local]
        mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
              [--ice 'stun:.. turn:.. username=U credential=C' | none] [--delay 0-3]
        mmxrs --headless --frames N [--rom PATH] [--dump-at F=out.png,...]
              [--hold P1MASK] [--p2-hold MASK] [--coop-local]
-ROM defaults to $MMX_ROM. Masks are SNES pad words (hex 0x.. or decimal).";
+ROM defaults to $MMX_ROM, --x3-rom (Mega Man X3 USA: P2 is drawn as X3 Zero, X swings
+the saber) to $MMX_X3_ROM. Masks are SNES pad words (hex 0x.. or decimal).";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub rom: Option<String>,
+    /// Mega Man X3 image for P2's Zero art (docs/zero.md "Playing as Zero").
+    pub x3_rom: Option<String>,
     pub scale: u32,
     pub fullscreen: bool,
     pub coop_local: bool,
@@ -33,6 +36,7 @@ impl Default for Args {
     fn default() -> Self {
         Args {
             rom: None,
+            x3_rom: None,
             scale: 3,
             fullscreen: false,
             coop_local: false,
@@ -58,7 +62,8 @@ fn parse_u16(s: &str) -> Result<u16, String> {
     r.map_err(|_| format!("bad pad mask {s:?}"))
 }
 
-/// Parse argv without the program name. `env_rom` is `$MMX_ROM`.
+/// Parse argv without the program name. `env_rom` is `$MMX_ROM`; `$MMX_X3_ROM`
+/// is read by `main` (fallback for `--x3-rom`).
 pub fn parse<I: IntoIterator<Item = String>>(
     argv: I,
     env_rom: Option<String>,
@@ -69,6 +74,7 @@ pub fn parse<I: IntoIterator<Item = String>>(
         let mut val = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
         match flag.as_str() {
             "--rom" => a.rom = Some(val("--rom")?),
+            "--x3-rom" => a.x3_rom = Some(val("--x3-rom")?),
             "--scale" => {
                 let v = val("--scale")?;
                 a.scale = v.parse().map_err(|_| format!("bad --scale {v:?}"))?;
@@ -146,8 +152,9 @@ mod tests {
 
     #[test]
     fn full_windowed() {
-        let a = p("--rom x.sfc --scale 5 --fullscreen --coop-local").unwrap();
+        let a = p("--rom x.sfc --x3-rom x3.sfc --scale 5 --fullscreen --coop-local").unwrap();
         assert_eq!(a.rom.as_deref(), Some("x.sfc"));
+        assert_eq!(a.x3_rom.as_deref(), Some("x3.sfc"));
         assert_eq!(a.scale, 5);
         assert!(a.fullscreen && a.coop_local && !a.headless);
     }

@@ -26,8 +26,20 @@ fn main() {
         eprintln!("{rom_path}: {e}");
         std::process::exit(1);
     });
+    // `--x3-rom` / `$MMX_X3_ROM`: P2 drawn as X3 Zero, with the saber.
+    let x3 = args.x3_rom.clone().or_else(|| std::env::var("MMX_X3_ROM").ok().filter(|s| !s.is_empty())).map(|p| {
+        let bytes = std::fs::read(&p).unwrap_or_else(|e| {
+            eprintln!("{p}: {e}");
+            std::process::exit(1);
+        });
+        let bytes = if bytes.len() % 0x8000 == 512 { bytes[512..].to_vec() } else { bytes };
+        mmx_core::zero_data::extract_x3(&bytes).unwrap_or_else(|e| {
+            eprintln!("{p}: {e}");
+            std::process::exit(1);
+        })
+    });
     let net = args.net.as_ref().map(|(host, room)| {
-        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.delay)
+        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.delay, x3.as_ref())
             .unwrap_or_else(|e| {
                 eprintln!("netplay: {e}");
                 std::process::exit(2);
@@ -39,6 +51,7 @@ fn main() {
     });
     // Online sessions rebuild the game with co-op on at `Running`; the local
     // game played while connecting gets the same traps.
+    game.set_zero_set(x3);
     game.coop.enabled = args.coop_local || net.is_some();
     if game.coop.enabled {
         mmx_core::coop::register_coop_traps(&mut game);

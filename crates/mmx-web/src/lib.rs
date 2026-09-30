@@ -136,6 +136,13 @@ impl Emu {
         Ok(())
     }
 
+    /// Mega Man X3 (USA) image: P2 is drawn as X3 Zero and X swings the
+    /// saber (docs/zero.md "Playing as Zero"). Load it before a netplay
+    /// connect: both peers need it (the handshake refuses a mismatch).
+    pub fn set_x3_rom(&mut self, rom: &[u8]) -> Result<(), JsValue> {
+        self.game.set_x3_rom(rom).map_err(|e| JsValue::from_str(&e))
+    }
+
     pub fn set_coop(&mut self, on: bool) {
         self.game.coop.enabled = on;
         if on && !self.game.traps.is_trapped(mmx_core::coop::PLAYER_OAM) {

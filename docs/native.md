@@ -1,7 +1,9 @@
 # mmx-native (binary `mmxrs`)
 
-Run: `cargo run -p mmx-native --release -- --rom mmx.sfc [--scale 1-8] [--fullscreen] [--coop-local]`
-(`--rom` falls back to `$MMX_ROM`; default scale 3). Pacing follows the audio
+Run: `cargo run -p mmx-native --release -- --rom mmx.sfc [--x3-rom mmx3.sfc] [--scale 1-8] [--fullscreen] [--coop-local]`
+(`--rom` falls back to `$MMX_ROM`, `--x3-rom` to `$MMX_X3_ROM`; default scale 3).
+`--x3-rom` takes your Mega Man X3 (USA) image: P2 is drawn as X3 Zero and P2's
+X swings the saber (docs/zero.md "Playing as Zero"); online, both peers need it. Pacing follows the audio
 device (~50 ms buffered); without an output device a 60.0988 Hz timer drives it.
 
 | action | P1 keys | P2 keys (`--coop-local` only) | pad |

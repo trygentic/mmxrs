@@ -241,9 +241,11 @@ message loop on its own thread. On the web, call it from the
 Both frontends run **rollback** (no lockstep option yet) through one driver,
 `mmx_core::netgame::NetPlay` (`crates/mmx-core/src/netgame.rs`):
 
-- `NetPlay::config(rom, host, delay)` builds the Hello: ROM CRC32
+- `NetPlay::config(rom, host, delay, x3)` builds the Hello: ROM CRC32
   (`rom_info().crc32`), trap-set id (FNV over the sorted trap addresses of a
-  session game, co-op traps included, plus a revision constant), co-op flags
+  session game, co-op traps included, plus a revision constant and a byte
+  "X3 Zero set loaded": peers where only one loaded the X3 ROM refuse to
+  start; the session game takes the set from the frontend's game), co-op flags
   `COOP_TWO_PLAYERS`, input delay. No WRAM is sent (MMX has no SRAM; both
   peers start from power-on).
 - `tick(game, pad, now_ms)` once per 60 Hz frontend tick: pumps the network;

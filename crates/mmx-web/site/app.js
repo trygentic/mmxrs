@@ -31,6 +31,7 @@ async function loadRom(file) {
     net = false;
     const e = new Emu(rom);
     e.set_coop(coop);
+    if (x3) e.set_x3_rom(x3);
     emu = e;
     const info = JSON.parse(emu.rom_info_json());
     msg = `${info.title.trim()} v1.${info.version} sha256 ${info.sha256.slice(0, 16)}…`;
@@ -41,6 +42,22 @@ async function loadRom(file) {
   status();
 }
 $('rom').addEventListener('change', (e) => e.target.files[0] && loadRom(e.target.files[0]));
+// Optional X3 ROM: P2 drawn as X3 Zero, X (T for P2) swings the saber. Kept
+// for the next X ROM load too. Load it before Host/Join (both peers need it).
+let x3 = null;
+$('x3rom').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    emu?.set_x3_rom(bytes);
+    x3 = bytes;
+    msg = 'X3 loaded: P2 is Zero';
+  } catch (err) {
+    msg = `X3 ROM rejected: ${err}`;
+  }
+  status();
+});
 addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('drag'); });
 addEventListener('dragleave', () => document.body.classList.remove('drag'));
 addEventListener('drop', (e) => {

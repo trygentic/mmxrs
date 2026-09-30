@@ -2,7 +2,11 @@
 
 A wasm-bindgen `Emu` over `mmx_core::Game` plus a static page in
 `crates/mmx-web/site/` (plain ES modules, no bundler). The ROM is read
-locally from the file picker or a drop; nothing is uploaded.
+locally from the file picker or a drop; nothing is uploaded. A second picker,
+"Mega Man X3 ROM (optional, enables Zero's sprites and saber)", calls
+`Emu::set_x3_rom(bytes)` (kept for later X ROM loads): P2 is drawn as X3
+Zero and P2's X (key T) swings the saber, see docs/zero.md "Playing as Zero".
+Load it before Host/Join; both peers need it.
 
 ## Build and serve
 

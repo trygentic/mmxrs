@@ -32,8 +32,9 @@ pub fn connect(
     signal: &str,
     ice: Option<&str>,
     delay: u8,
+    x3: Option<&mmx_core::zero_data::ZeroSet>,
 ) -> Result<Net, String> {
-    let cfg = NetPlay::<NetTransport>::config(rom, host, delay)?;
+    let cfg = NetPlay::<NetTransport>::config(rom, host, delay, x3)?;
     let url = mmx_net::room_url(signal, room).map_err(|e| e.to_string())?;
     let ice = ice
         .map(mmx_net::IceConfig::parse)
@@ -132,7 +133,7 @@ mod tests {
         let url = format!("ws://{}", start_signal());
         // Delay 0: every remote press lands after its frame ran, so pad
         // changes are corrected by real rollbacks.
-        let mk = |host| connect(rom, host, room, &url, Some("none"), 0).expect("connect");
+        let mk = |host| connect(rom, host, room, &url, Some("none"), 0, None).expect("connect");
         let mut peers = [
             (mk(true), session_game(rom, 0).unwrap(), 0x1111u32),
             (mk(false), session_game(rom, 0).unwrap(), 0x7777u32),
