@@ -4,6 +4,7 @@ members = [
     "crates/mmx-core",
     "crates/mmx-verify",
     "tools/xtask",
+    "crates/mmx-native",
 ]
 # Vendored third-party sources (vendor/jgenesis, vendor/matchbox_socket) are
 # path dependencies, not workspace members: not linted or formatted as ours.
