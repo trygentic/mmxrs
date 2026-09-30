@@ -28,7 +28,7 @@ use crate::{Game, BTN_LEFT, BTN_RIGHT, BTN_X};
 
 /// The instruction after the object master's `JSR $80:D3B2` (the shot loop,
 /// at `$80:D1FC`); the enemy loops follow. Confirmed by `trace --calls`.
-pub const HOOK_SHOTS_DONE: u32 = 0x80D1FF;
+pub const HOOK_SHOTS_DONE: crate::hooks::HookId = crate::hooks::HookId::ShotsDone;
 const SHOTS: u32 = 0x7E1228;
 const SHOT_LEN: usize = 0x40;
 /// Shot id `+0A` whose damage the saber deals: 2 = X's fully charged buster
@@ -323,7 +323,7 @@ mod tests {
             g.set_p1_zero(true).unwrap();
         } else {
             g.coop.enabled = true;
-            crate::coop::register_coop_traps(&mut g);
+            crate::coop::register_coop_traps(&mut g).unwrap();
         }
         Some(g)
     }
@@ -399,7 +399,7 @@ mod tests {
             g.set_x3_rom(&std::fs::read(&x3).unwrap()).unwrap();
             g.load_state(&state).unwrap();
             g.coop.enabled = true;
-            crate::coop::register_coop_traps(&mut g);
+            crate::coop::register_coop_traps(&mut g).unwrap();
             g.set_p1_zero(true).unwrap(); // both Zeros: shadow pages 0 and 1
             g
         };

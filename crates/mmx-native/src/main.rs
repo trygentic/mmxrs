@@ -57,13 +57,25 @@ fn main() {
     });
     // Online sessions rebuild the game with co-op on at `Running`; the local
     // game played while connecting gets the same traps.
+    // Not the PAL dump's layout: say where each co-op hook went (or didn't).
+    if !game.hooks().all_as_pal() {
+        for l in game.hook_report() {
+            eprintln!("hooks: {l}");
+        }
+    }
     game.set_zero_set(x3);
     game.coop.enabled = args.coop_local || net.is_some();
     if game.coop.enabled {
-        mmx_core::coop::register_coop_traps(&mut game);
+        mmx_core::coop::register_coop_traps(&mut game).unwrap_or_else(|e| {
+            eprintln!("{rom_path}: {e}");
+            std::process::exit(2);
+        });
     }
     // `--zero`: P1 plays as Zero (single player, local co-op or online).
-    game.set_p1_zero(args.zero).expect("X3 set checked above");
+    game.set_p1_zero(args.zero).unwrap_or_else(|e| {
+        eprintln!("{rom_path}: {e}");
+        std::process::exit(2);
+    });
 
     if args.headless {
         match headless::run(&mut game, &args) {

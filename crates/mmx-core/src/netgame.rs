@@ -75,7 +75,7 @@ pub fn trapset_id(game: &Game) -> u64 {
 pub fn session_game(rom: &[u8], coop_flags: u32, timing: Timing) -> Result<Game, RomError> {
     let mut g = Game::from_rom_timing(rom.to_vec(), timing)?;
     g.coop.enabled = coop_flags & COOP_TWO_PLAYERS != 0;
-    coop::register_coop_traps(&mut g);
+    coop::register_coop_traps(&mut g).map_err(RomError::Hooks)?;
     crate::display::register(&mut g);
     Ok(g)
 }

@@ -6,6 +6,7 @@
 //! See docs/coop.md "Platforms and items".
 
 use crate::coop::{p2_is_down, with_p2_swapped, OFF_POS_X, OFF_POS_Y};
+use crate::hooks::HookId;
 use crate::ram::{self, wram_index as ix};
 use crate::traps::TrapReturn;
 use crate::Game;
@@ -18,17 +19,17 @@ use crate::Game;
 /// `$0BAD`/`$0BB0` absolute). Then `+$2C = 0`, the box test `$84:9C0E` vs
 /// `X=$0BA8`, and: X on top -> `+$2C = 1`, `$0BD4 |= 4` (the player's ground
 /// flag for objects); from the side -> `$0BAD` pushed out, `$0BD4 |= 1/2`.
-pub const HOOK_PLATFORM: u32 = 0x84AB81;
+pub const HOOK_PLATFORM: HookId = HookId::Platform;
 /// Companion (listing `$84:AB4C`): box test only, `$0BD4 |= $80` (+ `$40`
 /// by side). Called right after [`HOOK_PLATFORM`] by 9 of its callers.
-pub const HOOK_PLATFORM_TOUCH: u32 = 0x84AB56;
+pub const HOOK_PLATFORM_TOUCH: HookId = HookId::PlatformTouch;
 /// The road attacker's own copy of [`HOOK_PLATFORM`] (listing `$81:DE0C`),
 /// `JSR`ed by the car-body object (enemy id `$12`, update `$81:DCD0`) once
 /// its driver is dead (state `+$01 >= 4`, not `$0A`). Same `+$2C` carry and
 /// box test with absolute writes to `$0BAD`/`$0BB0`/`$0BD4`; it also keeps
 /// the previous `+$2C` in `+$3A` and sets `+$37 = 2` (the landing dip) when
 /// the rider lands. Ends in `RTS`.
-pub const HOOK_CAR: u32 = 0x81DE1C;
+pub const HOOK_CAR: HookId = HookId::Car;
 
 /// Object slots from the enemy table to the end of the `$1428` table
 /// (`$0E68 + 43 * $40 = $1928`), bit n of `CoopState::p2_on_obj`.
@@ -45,7 +46,7 @@ const OBJ_CARRY: u16 = 0x2C;
 /// weapon `$0BDB`'s energy) by absolute writes over the next frames with the
 /// world frozen (`$1F13..$1F19`) and X in action `$18`; the 1-up bumps the
 /// shared lives `$1F80` at once.
-pub const PICKUPS: [u32; 3] = [0x81DEB7, 0x82E342, 0x81E33A];
+pub const PICKUPS: [HookId; 3] = [HookId::PickupA, HookId::PickupB, HookId::PickupC];
 /// Byte offset of the pickup state that means "collected" (`+$02 == 6`).
 const PICKUP_STATE: usize = 0x02;
 const PICKUP_TAKEN: u8 = 0x06;
@@ -53,11 +54,11 @@ const PICKUP_TAKEN: u8 = 0x06;
 const PICKUP_NEAR: u16 = 48;
 
 pub fn register(game: &mut Game) {
-    game.traps.register(HOOK_PLATFORM, "coop_platform", TrapReturn::Observe, platform);
-    game.traps.register(HOOK_PLATFORM_TOUCH, "coop_platform_touch", TrapReturn::Observe, platform);
-    game.traps.register(HOOK_CAR, "coop_car", TrapReturn::Observe, platform);
+    game.traps.register(game.hook(HOOK_PLATFORM), "coop_platform", TrapReturn::Observe, platform);
+    game.traps.register(game.hook(HOOK_PLATFORM_TOUCH), "coop_platform_touch", TrapReturn::Observe, platform);
+    game.traps.register(game.hook(HOOK_CAR), "coop_car", TrapReturn::Observe, platform);
     for a in PICKUPS {
-        game.traps.register(a, "coop_pickup", TrapReturn::Observe, pickup);
+        game.traps.register(game.hook(a), "coop_pickup", TrapReturn::Observe, pickup);
     }
 }
 
@@ -87,14 +88,14 @@ fn platform(game: &mut Game) {
     let p1_carry = game.wram()[carry];
     game.wram_mut()[carry] = u8::from(game.coop.p2_on_obj & bit != 0);
     game.coop.in_contact = true;
-    let ret = if pc == HOOK_CAR { TrapReturn::Rts } else { TrapReturn::Rtl };
+    let ret = if pc == game.hook(HOOK_CAR) { TrapReturn::Rts } else { TrapReturn::Rtl };
     with_p2_swapped(game, |game| game.call_isolated_ret(pc, ret));
     game.coop.in_contact = false;
     let w = game.wram_mut();
     let p2_carry = w[carry] != 0;
     w[carry] = p1_carry;
     w[..0x20].copy_from_slice(&dp);
-    if pc != HOOK_PLATFORM_TOUCH {
+    if pc != game.hook(HOOK_PLATFORM_TOUCH) {
         game.coop.p2_on_obj = if p2_carry { game.coop.p2_on_obj | bit } else { game.coop.p2_on_obj & !bit };
     }
 }

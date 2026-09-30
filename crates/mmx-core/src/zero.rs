@@ -6,6 +6,7 @@
 //! CGRAM mirror at `$0300` and upload flag `$A1` (NMI copies all 512 bytes to
 //! CGRAM when `$A1 != 0`, then clears it).
 
+use crate::hooks::HookId;
 use crate::ram::{self, wram_index as ix};
 use crate::traps::TrapReturn;
 use crate::saber::Saber;
@@ -14,7 +15,7 @@ use crate::Game;
 
 /// OAM build entry (`JSR` from the object master); once per gameplay frame,
 /// before the coop display slice at `$80:9A86`.
-pub const HOOK_OAM_BUILD: u32 = 0x80D544;
+pub const HOOK_OAM_BUILD: HookId = HookId::OamBuild;
 /// CGRAM mirror in WRAM, uploaded by the NMI when [`CGRAM_DIRTY`] is set.
 pub const CGRAM_BUF: usize = 0x0300;
 pub const CGRAM_DIRTY: usize = 0x00A1;
@@ -313,11 +314,11 @@ pub const X3_Y_OFFSET: i16 = -8;
 const OAM_HI: u32 = 0x7E0900;
 
 pub fn register_zero_traps(game: &mut Game) {
-    game.traps.register(HOOK_OAM_BUILD, "zero_oam_build", TrapReturn::Observe, oam_build);
+    game.traps.register(game.hook(HOOK_OAM_BUILD), "zero_oam_build", TrapReturn::Observe, oam_build);
     // Observe: the bodies return early themselves when P1 is Zero.
-    game.traps.register(crate::coop::PLAYER_OAM, "zero_p1_emitter", TrapReturn::Observe, p1_emitter);
-    game.traps.register(crate::coop::FX_OAM, "zero_p1_skip_parts", TrapReturn::Observe, skip_p1_parts);
-    game.traps.register(crate::coop::INPUT_REMAP, "zero_p1_pad", TrapReturn::Observe, p1_pad);
+    game.traps.register(game.hook(crate::coop::PLAYER_OAM), "zero_p1_emitter", TrapReturn::Observe, p1_emitter);
+    game.traps.register(game.hook(crate::coop::FX_OAM), "zero_p1_skip_parts", TrapReturn::Observe, skip_p1_parts);
+    game.traps.register(game.hook(crate::coop::INPUT_REMAP), "zero_p1_pad", TrapReturn::Observe, p1_pad);
     crate::p2tiles::register(game);
 }
 
@@ -448,7 +449,7 @@ mod tests {
                 g.set_regs(r);
                 let w = g.wram_mut();
                 (w[0xE4], w[0xE5], w[0xE6]) = (0x40, 0x10, 0);
-                g.call_isolated_ret(crate::coop::PLAYER_OAM, TrapReturn::Rts);
+                g.call_isolated_ret(g.hook(crate::coop::PLAYER_OAM), TrapReturn::Rts);
                 g.set_regs(saved);
                 let w = g.wram();
                 let obj: Vec<u8> = w[b..b + 0x90].to_vec();

@@ -23,6 +23,7 @@
 //! main loop lag.
 
 use crate::coop_stages;
+use crate::hooks::HookId;
 use crate::ram::{self, wram_index as ix, X_BLOCK_LEN};
 use crate::traps::TrapReturn;
 use crate::{Game, BTN_SELECT, BTN_START};
@@ -34,10 +35,10 @@ use crate::{Game, BTN_SELECT, BTN_START};
 /// Unconditional. Address confirmed by `cargo xtask trace --calls` on the
 /// real ROM (the disassembly's bank-`$80` PCs drift from this ROM by up to
 /// `0x41`; bank `$81`/`$84` PCs matched).
-pub const HOOK_UPDATE: u32 = 0x80D1EF;
+pub const HOOK_UPDATE: HookId = HookId::P2Update;
 /// P2 physics slice hook: the instruction after `JSL $81:9D67` at `$80:D23D`
 /// (the object master, after the enemy loops). Confirmed by trace.
-pub const HOOK_PHYSICS: u32 = 0x80D241;
+pub const HOOK_PHYSICS: HookId = HookId::P2Physics;
 /// P2 display slice hook: `$80:9A86`, the instruction after `JSR $80:D544`
 /// (the OAM build) at `$80:9A83` in the per-frame stage code. The build ends
 /// with the hide loop over slots `$E4..$E3` and leaves `$E3` = slots used,
@@ -46,37 +47,37 @@ pub const HOOK_PHYSICS: u32 = 0x80D241;
 /// putting `$E3`/`$E4` back) keeps the ROM's hide loop, and so P1's lag
 /// frames, identical to a solo run (B4: emitting inside the build shortened
 /// the loop and dropped a lag frame). The camera is final for the frame here.
-pub const HOOK_DISPLAY: u32 = 0x809A86;
+pub const HOOK_DISPLAY: HookId = HookId::P2Display;
 /// Second instruction of the OAM build (`$80:D544 PHP`, `$D545 PHB`): P2's
 /// slots from the previous frame are hidden here, every build, including the
 /// weapon menu's (paused frames `JMP $D544` and never reach [`HOOK_DISPLAY`]).
 /// `$D544` itself is taken by `zero::HOOK_OAM_BUILD`.
-pub const HOOK_OAM_HIDE: u32 = 0x80D545;
+pub const HOOK_OAM_HIDE: HookId = HookId::OamHide;
 /// Enemy-vs-X contact routine: every enemy's AI `JSL`s it with `D` = the
 /// enemy (154 call sites; `$82:9C41` for the Highway bikes), `RTL`, A=1 on a
 /// hit. It checks X's i-frames (`$0C30`/`$0C32`, in the block), runs the box
 /// test `$84:9C0E` with `X=$0BA8`, then `JMP $84:9D07` applies the damage
 /// (`$0BAA`, `$0BCF`, `$0BD8`, `$0C11`, `$0C32`: all in the block). Found by
 /// `trace --find` on the frame P1's HP dropped. Observe hook on the entry.
-pub const HOOK_CONTACT: u32 = 0x849B03;
+pub const HOOK_CONTACT: HookId = HookId::Contact;
 /// Player update: `PHP/PHD`, sets `D=$0BA8` itself, ends `RTL` (JSL entry).
-pub const PLAYER_UPDATE: u32 = 0x81812E;
+pub const PLAYER_UPDATE: HookId = HookId::PlayerUpdate;
 /// Player terrain/physics phase (`JSL` from `$80:D23D`, ends `RTL`): collision
 /// against the layout, ground flag, camera requests. Confirmed by trace.
-pub const PLAYER_PHYSICS: u32 = 0x819D67;
+pub const PLAYER_PHYSICS: HookId = HookId::PlayerPhysics;
 /// Input remapper (`JSR` from `$80:9A52` in the per-frame stage code, ends
 /// `RTS`): pad 1 (`$A7`) + button config -> the block's `$0BDE..$0BE3`.
 /// Confirmed by trace.
-pub const INPUT_REMAP: u32 = 0x80E518;
+pub const INPUT_REMAP: HookId = HookId::InputRemap;
 /// Player OAM emitter (`JSR` from `$80:D55D`, ends `RTS`). Needs
 /// `M=1, X=0, D=0` (true at [`HOOK_DISPLAY`]). Confirmed by trace.
-pub const PLAYER_OAM: u32 = 0x80D671;
+pub const PLAYER_OAM: HookId = HookId::PlayerOam;
 /// Companion-object update loop over `$0C38..$0C98` (`JSR` from `$80:D26C`,
 /// `RTS`; listing `$80:D2D3`, drift `-$41`). Sets `D` itself.
-pub const FX_UPDATE: u32 = 0x80D292;
+pub const FX_UPDATE: HookId = HookId::FxUpdate;
 /// Companion-object OAM emitter (`JSR` from `$80:D55A`, just before
 /// [`PLAYER_OAM`]; listing `$80:D681`). Same register needs as the player's.
-pub const FX_OAM: u32 = 0x80D640;
+pub const FX_OAM: HookId = HookId::FxOam;
 
 /// Direct-page OAM cursor: next free OAM slot (`AND #$7F`, `*4` = byte
 /// offset into `$0700`). `$E5` = high-table byte index, `$E6` = accumulator.
@@ -308,18 +309,31 @@ pub fn p2_is_down(p2: &[u8; X_BLOCK_LEN]) -> bool {
 // ------------------------------------------------------------ Game glue
 
 /// Register the co-op trap group. Not part of any verification trap set.
-pub fn register_coop_traps(game: &mut Game) {
+/// Refused (nothing registered) when this ROM lacks one of the hooks
+/// (`hooks.rs`; `Game::hook_report` says which).
+pub fn register_coop_traps(game: &mut Game) -> Result<(), String> {
+    let missing = game.hooks().missing();
+    if !missing.is_empty() {
+        let names: Vec<&str> = missing.iter().map(|h| h.hook().name).collect();
+        return Err(format!(
+            "co-op refused: this ROM ({}, v1.{}) lacks the hooks {} (run `cargo xtask rominfo`; see docs/rom-variants.md)",
+            game.rom_info().region_name(),
+            game.rom_info().version,
+            names.join(", ")
+        ));
+    }
     crate::zero::register_zero_traps(game);
-    game.traps.register(HOOK_UPDATE, "coop_p2_update", TrapReturn::Observe, p2_update);
-    game.traps.register(HOOK_PHYSICS, "coop_p2_physics", TrapReturn::Observe, p2_physics);
-    game.traps.register(HOOK_OAM_HIDE, "coop_p2_oam_hide", TrapReturn::Observe, oam_hide);
-    game.traps.register(HOOK_DISPLAY, "coop_p2_display", TrapReturn::Observe, p2_display);
-    game.traps.register(HOOK_CONTACT, "coop_contact", TrapReturn::Observe, contact);
+    game.traps.register(game.hook(HOOK_UPDATE), "coop_p2_update", TrapReturn::Observe, p2_update);
+    game.traps.register(game.hook(HOOK_PHYSICS), "coop_p2_physics", TrapReturn::Observe, p2_physics);
+    game.traps.register(game.hook(HOOK_OAM_HIDE), "coop_p2_oam_hide", TrapReturn::Observe, oam_hide);
+    game.traps.register(game.hook(HOOK_DISPLAY), "coop_p2_display", TrapReturn::Observe, p2_display);
+    game.traps.register(game.hook(HOOK_CONTACT), "coop_contact", TrapReturn::Observe, contact);
     crate::coop_objects::register(game);
-    game.traps.register(HOOK_SHOT_SLOT, "coop_shot_slot", TrapReturn::Observe, shot_slot);
-    game.traps.register(HOOK_SHOT_SLOT_DONE, "coop_shot_slot_done", TrapReturn::Observe, shot_slot_done);
-    game.traps.register(crate::saber::HOOK_SHOTS_DONE, "coop_saber_shot", TrapReturn::Observe, crate::saber::shots_done);
+    game.traps.register(game.hook(HOOK_SHOT_SLOT), "coop_shot_slot", TrapReturn::Observe, shot_slot);
+    game.traps.register(game.hook(HOOK_SHOT_SLOT_DONE), "coop_shot_slot_done", TrapReturn::Observe, shot_slot_done);
+    game.traps.register(game.hook(crate::saber::HOOK_SHOTS_DONE), "coop_saber_shot", TrapReturn::Observe, crate::saber::shots_done);
     crate::coop_hud::register(game);
+    Ok(())
 }
 
 fn word(w: &[u8; 0x20000], addr: u32) -> u16 {
@@ -397,10 +411,10 @@ fn p2_update(game: &mut Game) {
         let i = ix(ram::PAD1_HELD);
         let saved_pad1 = [w[i], w[i + 1]];
         w[i..i + 2].copy_from_slice(&pad.to_le_bytes());
-        game.call_isolated_ret(INPUT_REMAP, crate::TrapReturn::Rts);
+        game.call_isolated_ret(game.hook(INPUT_REMAP), crate::TrapReturn::Rts);
         let w = game.wram_mut();
         w[i..i + 2].copy_from_slice(&saved_pad1);
-        game.call_isolated(PLAYER_UPDATE);
+        game.call_isolated(game.hook(PLAYER_UPDATE));
     });
     // B3: remember which slots P2 fired into (the count went up); see `shot_books`.
     if game.coop.p2[OFF_SHOTS] > fired {
@@ -431,8 +445,8 @@ fn shots_live(w: &[u8; 0x20000]) -> u8 {
 /// Shot loop `$80:D3B2` (listing `$80:D3F3`, drift `-$41`), per slot: `$D3B8`
 /// (`SEP #$30`, `D` = the slot, before `LDA $00; BEQ; JSR $D3F8`) and
 /// `$D3C1` (`REP #$21`, the loop step, reached active or not).
-pub const HOOK_SHOT_SLOT: u32 = 0x80D3B8;
-pub const HOOK_SHOT_SLOT_DONE: u32 = 0x80D3C1;
+pub const HOOK_SHOT_SLOT: HookId = HookId::ShotSlot;
+pub const HOOK_SHOT_SLOT_DONE: HookId = HookId::ShotSlotDone;
 
 /// P2's shot slot `D` is about to update: put P2's block in place. A shot
 /// reads its owner's block with absolute addresses: its first update
@@ -489,8 +503,8 @@ fn p2_physics(game: &mut Game) {
         return;
     }
     with_p2_swapped(game, |game| {
-        game.call_isolated(PLAYER_PHYSICS);
-        game.call_isolated_ret(FX_UPDATE, crate::TrapReturn::Rts);
+        game.call_isolated(game.hook(PLAYER_PHYSICS));
+        game.call_isolated_ret(game.hook(FX_UPDATE), crate::TrapReturn::Rts);
     });
     follow(game);
     if p2_is_down(&game.coop.p2) {
@@ -652,8 +666,8 @@ fn p2_display(game: &mut Game) {
     swap_scratch(game.wram_mut(), &mut scratch);
     // Both emitters are entered by JSR and end in RTS; armour parts first,
     // as in the ROM's OAM build.
-    game.call_isolated_ret(FX_OAM, crate::TrapReturn::Rts);
-    game.call_isolated_ret(PLAYER_OAM, crate::TrapReturn::Rts);
+    game.call_isolated_ret(game.hook(FX_OAM), crate::TrapReturn::Rts);
+    game.call_isolated_ret(game.hook(PLAYER_OAM), crate::TrapReturn::Rts);
     let w = game.wram_mut();
     swap_block(w, &mut p2);
     swap_scratch(w, &mut scratch);
@@ -711,7 +725,7 @@ fn contact(game: &mut Game) {
     let dp: [u8; 0x20] = game.wram()[..0x20].try_into().unwrap();
     let hp = p2[OFF_HP];
     game.coop.in_contact = true;
-    with_p2_swapped(game, |game| game.call_isolated(HOOK_CONTACT));
+    with_p2_swapped(game, |game| game.call_isolated(game.hook(HOOK_CONTACT)));
     game.coop.in_contact = false;
     game.wram_mut()[..0x20].copy_from_slice(&dp);
     if game.coop.p2[OFF_HP] != hp {
@@ -810,7 +824,7 @@ mod tests {
         let mut g = crate::Game::from_rom(std::fs::read(rom).unwrap()).unwrap();
         g.load_state(&state).unwrap();
         g.coop.enabled = true;
-        register_coop_traps(&mut g);
+        register_coop_traps(&mut g).unwrap();
         let shot = |g: &crate::Game, k: usize| {
             let o = ix(X_SHOTS) + k * 0x40;
             let w = g.wram();

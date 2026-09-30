@@ -129,6 +129,8 @@ pub enum RomError {
     NotMegaManX { title: String },
     Coprocessor(u8),
     Emulator(String),
+    /// A hook the co-op traps need is not in this ROM (`hooks.rs`).
+    Hooks(String),
 }
 
 impl std::fmt::Display for RomError {
@@ -138,6 +140,7 @@ impl std::fmt::Display for RomError {
             RomError::NotMegaManX { title } => write!(f, "not Mega Man X (USA): title {title:?}"),
             RomError::Coprocessor(t) => write!(f, "unexpected coprocessor byte ${t:02X}"),
             RomError::Emulator(e) => write!(f, "emulator: {e}"),
+            RomError::Hooks(e) => write!(f, "{e}"),
         }
     }
 }

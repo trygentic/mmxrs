@@ -194,7 +194,7 @@ fn verify(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--coop-off") {
         // Parity rule: the co-op trap group registered but disabled must be
         // byte-identical to the untrapped oracle.
-        mmx_core::coop::register_coop_traps(&mut dut);
+        mmx_core::coop::register_coop_traps(&mut dut).unwrap_or_else(|e| die(&e));
         dut.coop.enabled = false;
     }
     let opts = CompareOpts { compare_frame: !args.iter().any(|a| a == "--no-frame"), ..Default::default() };
@@ -230,7 +230,7 @@ fn dump(args: &[String]) -> i32 {
     let mut g = game_scripted(args);
     if args.iter().any(|a| a == "--coop") {
         g.coop.enabled = true;
-        mmx_core::coop::register_coop_traps(&mut g);
+        mmx_core::coop::register_coop_traps(&mut g).unwrap_or_else(|e| die(&e));
         // `--untrap HEX,..`: A/B one co-op hook at a time.
         for a in flag(args, "--untrap").map(|s| s.split(',').collect::<Vec<_>>()).unwrap_or_default() {
             g.traps.set_untrapped(u32::from_str_radix(a.trim_start_matches('$'), 16).unwrap_or_else(|_| die("--untrap")), true);
@@ -423,18 +423,19 @@ fn cooptrace(args: &[String]) -> i32 {
     let script = scripted(args);
     let mut g = game_scripted(args);
     g.coop.enabled = true;
-    mmx_core::coop::register_coop_traps(&mut g);
+    mmx_core::coop::register_coop_traps(&mut g).unwrap_or_else(|e| die(&e));
     for f in 1..frame {
         g.step(script(f, Pads::default()));
     }
     g.isolated_trace = Some(Vec::new());
     let pcs = g.trace_frame(script(frame, Pads::default()));
     let p2 = g.isolated_trace.take().unwrap();
-    let start = pcs.iter().position(|&p| p == mmx_core::coop::PLAYER_UPDATE).unwrap_or_else(|| die("P1 update not found in frame"));
-    let end = start + pcs[start..].iter().position(|&p| p == mmx_core::coop::HOOK_UPDATE).unwrap_or_else(|| die("P1 update return not found"));
+    let (update, update_ret) = (g.hook(mmx_core::coop::PLAYER_UPDATE), g.hook(mmx_core::coop::HOOK_UPDATE));
+    let start = pcs.iter().position(|&p| p == update).unwrap_or_else(|| die("P1 update not found in frame"));
+    let end = start + pcs[start..].iter().position(|&p| p == update_ret).unwrap_or_else(|| die("P1 update return not found"));
     let p1 = &pcs[start..end];
     // P2's trace holds the remap call then the update; skip to the update entry.
-    let p2s = p2.iter().position(|&p| p == mmx_core::coop::PLAYER_UPDATE).unwrap_or(0);
+    let p2s = p2.iter().position(|&p| p == update).unwrap_or(0);
     let p2 = &p2[p2s..];
     println!("frame {frame}: P1 update {} instrs, P2 update {} instrs", p1.len(), p2.len());
     // Walk both traces; at each split, report the last common PC (the branch)
@@ -713,13 +714,17 @@ fn rominfo() -> i32 {
     let hex: String = i.sha256.iter().map(|b| format!("{b:02x}")).collect();
     let ver = match i.version {
         0 => "v1.0 (matches disassembly)",
-        1 => "v1.1 (addresses unchecked)",
+        1 => "v1.1 (hooks found by signature)",
         _ => "unknown",
     };
     println!(
         "title   {}\nregion  {} (${:02X}; MMX_TIMING=ntsc|pal overrides)\nversion {} {ver}\nsha256  {hex}\ncrc32   {:08x}\ncopier header stripped: {}",
         i.title, i.region_name(), i.region, i.version, i.crc32, i.had_copier_header
     );
+    // Where this dump keeps each co-op hook (docs/rom-variants.md).
+    for l in g.hook_report() {
+        println!("hooks   {l}");
+    }
     0
 }
 
