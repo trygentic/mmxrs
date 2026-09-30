@@ -12,6 +12,8 @@ use mmx_verify::{movie_bk2, CompareOpts, Lockstep};
 const USAGE: &str = "usage: cargo xtask <command>
   verify [--movie F.bk2|F.lsmv] [--frames N] [--no-frame] [--coop-off] [--tap F,..] [--hold HEX] [--p2-hold HEX]
   trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..]   bank histogram of frame N's opcode fetches
+  lagdiff --frames N [script] [--refill] [--untrap HEX,..] [--dump A-B]   solo vs co-op (P2 idle): first real-time
+       opcode fetch where P1's PC or master clock differs; --dump writes both frames' traces (PC, mclk) to target/
   dump --frames N --out DIR [--at F,F,...] [--movie F] [--tap F,F,...] [--hold HEX] [--p2-hold HEX] [--coop]
        [--rom-any PATH] [--x3 PATH] [--poke ADDR=VAL@A[-B],..] [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..] [--wav PATH] [--apu] [--mute HEX]  start from / write a save state (P2 re-anchors after a load)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
@@ -34,6 +36,7 @@ fn main() {
         Some("dump") => dump(&args[1..]),
         Some("trace") => trace(&args[1..]),
         Some("cooptrace") => cooptrace(&args[1..]),
+        Some("lagdiff") => lagdiff(&args[1..]),
         Some("ledger") => ledger(),
         Some("rominfo") => rominfo(),
         Some("zerosheet") => zerosheet(&args[1..]),
@@ -413,6 +416,60 @@ fn trace(args: &[String]) -> i32 {
             println!("  ${t:06X} x{n:<5} first from ${from:06X}");
         }
     }
+    0
+}
+
+/// `lagdiff --frames N [script] [--refill] [--untrap HEX,..]`: solo and co-op
+/// (P2 idle) side by side; print the first real-time opcode fetch where P1's
+/// CPU (PC or master clock) differs. Isolated calls are not in the trace.
+fn lagdiff(args: &[String]) -> i32 {
+    let frames = num(args, "--frames").unwrap_or_else(|| die("lagdiff needs --frames N"));
+    let script = scripted(args);
+    let (mut a, mut b) = (game_scripted(args), game_scripted(args));
+    b.coop.enabled = true;
+    mmx_core::coop::register_coop_traps(&mut b).unwrap_or_else(|e| die(&e));
+    for u in flag(args, "--untrap").map(|s| s.split(',').collect::<Vec<_>>()).unwrap_or_default() {
+        b.traps.set_untrapped(u32::from_str_radix(u.trim_start_matches('$'), 16).unwrap_or_else(|_| die("--untrap")), true);
+    }
+    let refill = args.iter().any(|a| a == "--refill");
+    for f in 1..=frames {
+        for g in [&mut a, &mut b] {
+            if refill {
+                let w = g.wram_mut();
+                let (hp, max) = (ram::wram_index(ram::X_HP), w[ram::wram_index(ram::MAX_HP)] & 0x7F);
+                if (1..max).contains(&(w[hp] & 0x7F)) {
+                    w[hp] = max;
+                }
+            }
+        }
+        let pads = script(f, Pads::default());
+        let (wa, wb) = (Box::new(*a.wram()), Box::new(*b.wram()));
+        let (ta, tb) = (a.trace_frame_mclk(pads), b.trace_frame_mclk(pads));
+        if let Some(r) = flag(args, "--dump") {
+            let (x, y) = r.split_once('-').unwrap_or((r, r));
+            if (x.parse().unwrap()..=y.parse().unwrap()).contains(&f) {
+                for (n, t) in [("solo", &ta), ("coop", &tb)] {
+                    let txt: String = t.iter().map(|(pc, m)| format!("{pc:06X} {m}\n")).collect();
+                    let _ = std::fs::write(format!("target/trace_{n}_{f}.txt"), txt);
+                }
+            }
+            continue;
+        }
+        if let Some(i) = (0..ta.len().max(tb.len())).find(|&i| ta.get(i) != tb.get(i)) {
+            println!("frame {f}: first difference at fetch {i} of {}/{}", ta.len(), tb.len());
+            for k in i.saturating_sub(12)..(i + 12) {
+                let s = |t: &Vec<(u32, u64)>| t.get(k).map_or("-".into(), |(pc, m)| format!("${pc:06X} @{m}"));
+                println!("  {k:6} solo {:<22} coop {}", s(&ta), s(&tb));
+            }
+            let d: Vec<String> = (0..0x20000)
+                .filter(|&i| wa[i] != wb[i])
+                .map(|i| format!("${:05X}:{:02X}/{:02X}", 0x7E0000 + i, wa[i], wb[i]))
+                .collect();
+            println!("WRAM solo/coop differences at the start of frame {f} ({}): {}", d.len(), d.join(" "));
+            return 1;
+        }
+    }
+    println!("identical real-time CPU traces for {frames} frames");
     0
 }
 
