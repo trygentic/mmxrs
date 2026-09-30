@@ -77,7 +77,10 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     let pad_debug = args.pads || std::env::var_os("MMX_PAD_DEBUG").is_some_and(|v| v == "1");
     #[cfg(target_os = "macos")]
-    crate::gc_pad::monitor_background(pad_debug);
+    // Always: a game spawned by the launcher is often not macOS's active app,
+    // and GameController delivers nothing to inactive apps otherwise.
+    crate::gc_pad::monitor_background(true);
+    let _ = pad_debug;
     let gilrs = gilrs::Gilrs::new()
         .map_err(|e| eprintln!("gamepads: {e}"))
         .ok();
