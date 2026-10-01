@@ -24,9 +24,10 @@ build:
 launcher: build
 	./$(LAUNCHER)
 
-# Direct launch. X3 is passed only when the file exists.
+# Direct launch. X3 is passed only when the file exists (paths may contain spaces).
+HAVE_X3 := $(shell test -f "$(X3_ROM)" && echo yes)
 run: build
-	./$(BIN) --rom "$(ROM)" $(if $(wildcard $(X3_ROM)),--x3-rom "$(X3_ROM)") $(ARGS)
+	./$(BIN) --rom "$(ROM)" $(if $(HAVE_X3),--x3-rom "$(X3_ROM)") $(ARGS)
 
 coop: ARGS += --coop-local
 coop: run
