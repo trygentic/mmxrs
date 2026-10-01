@@ -1,8 +1,8 @@
 # mmxrs: build and launch. ROMs are never committed; point MMX_ROM (and
 # optionally MMX_X3_ROM) at your own dumps, or put them under roms/ (gitignored).
 #
-#   make            build release binaries and open the launcher
-#   make run        build and start the game directly (ARGS="--coop-local ...")
+#   make / make run   build release binaries and open the launcher
+#   make game         build and start the game directly (ARGS="--coop-local ...")
 #   make test       workspace tests (ROM-gated tests skip without MMX_ROM)
 #   make check      clippy + wasm checks + parity verify
 #
@@ -14,7 +14,7 @@ ARGS    ?=
 BIN      = target/release/mmxrs
 LAUNCHER = target/release/mmxrs-launcher
 
-.PHONY: all build launcher run coop zero test check help
+.PHONY: all build launcher run game coop zero test check help
 
 all: launcher
 
@@ -24,16 +24,18 @@ build:
 launcher: build
 	./$(LAUNCHER)
 
+run: launcher
+
 # Direct launch. X3 is passed only when the file exists (paths may contain spaces).
 HAVE_X3 := $(shell test -f "$(X3_ROM)" && echo yes)
-run: build
+game: build
 	./$(BIN) --rom "$(ROM)" $(if $(HAVE_X3),--x3-rom "$(X3_ROM)") $(ARGS)
 
 coop: ARGS += --coop-local
-coop: run
+coop: game
 
 zero: ARGS += --zero
-zero: run
+zero: game
 
 test:
 	cargo test --workspace

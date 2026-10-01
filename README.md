@@ -30,8 +30,8 @@ Bring your own ROM: nothing from the cartridge is in this repository. See
 ## Quickstart
 
 ```sh
-make            # build and open the launcher
-make run        # build and start the game (ROM from MMX_ROM or roms/)
+make run        # build and open the launcher
+make game       # build and start the game directly (ROM from MMX_ROM or roms/)
 make coop       # local two-player
 make zero       # play as Zero (needs the X3 dump)
 ```
