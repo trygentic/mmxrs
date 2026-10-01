@@ -13,12 +13,13 @@ pub const WIDE_SPAWN_PX: u16 = WIDE_GAMEPLAY_PX.next_multiple_of(32);
 
 /// Register (or remove) the wide gameplay traps.
 pub(crate) fn register(game: &mut Game, on: bool) {
-    let traps: [(HookId, &'static str, crate::TrapFn); 5] = [
+    let traps: [(HookId, &'static str, crate::TrapFn); 6] = [
         (HookId::QueueTest, "wide_queue_test", window_x),
         (HookId::QueueTestBig, "wide_queue_test_big", window_x),
         (HookId::DespawnTest, "wide_despawn_test", window_x),
         (HookId::SpawnColumn, "wide_spawn_column", spawn_column),
         (HookId::SpawnRow, "wide_spawn_row", spawn_row),
+        (HookId::KindCount, "wide_kind_count", kind_count),
     ];
     for (id, name, body) in traps {
         let a = game.hook(id);
@@ -130,6 +131,24 @@ pub fn sweep(g: &mut Game) {
     }
     g.wram_mut()[..8].copy_from_slice(&scratch);
     g.set_regs(saved);
+}
+
+/// `$84:A1E0` (`BEQ` past an empty slot in the same-kind count
+/// `$84:A1D5`, X = the slot): a live object outside the ROM's own despawn
+/// window (X `-64..320` from the camera) counts as an empty slot. Such
+/// objects only exist with wide gameplay; without this a capped kind (the
+/// Sky Claw allows 2, `$82:96AF`) refuses every new spawn while old ones
+/// linger in the wider window. Only the branch changes (Z), cycle-exact.
+fn kind_count(g: &mut Game) {
+    let mut r = g.regs();
+    if r.p & P_Z != 0 {
+        return;
+    }
+    let rel = word(g, usize::from(r.x) + 5).wrapping_sub(word(g, 0x1E4D)).wrapping_add(64);
+    if rel >= 384 {
+        r.p |= P_Z;
+        g.set_regs(r);
+    }
 }
 
 #[cfg(test)]
