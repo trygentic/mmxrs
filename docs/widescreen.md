@@ -50,8 +50,8 @@ per-line registers, which is how everything below was measured
   surface on Launch Octopus (main screen only, colour math add/half over the
   sub screen BG1+BG2+OBJ: translucent water). Not from the layout; VRAM is
   used as is (its 32 columns wrap, which suits a repeating texture).
-- **HUD = sprites** (OAM slots 0-4 at X 8), not a BG. It stays where the
-  game puts it: at the original picture's left edge (as in z2rs, see HUD).
+- **HUD = sprites** (OAM slots 0-6 at X 8, more for the weapon and boss
+  bars), not a BG. Widescreen moves it to the wide picture's edges (see HUD).
 - **HDMA**: none on the Highway (all 224 lines identical). Launch Octopus
   waves BG2's vertical scroll on lines 170-224 (591..594). Applies in the
   margins too, since the margins are drawn from each line's own registers.
@@ -123,6 +123,14 @@ story vertically. Hence the margin tiles come from the decoder, not VRAM.
   in `Wide`, drawn in the margins only, under every OAM sprite. The host's
   list goes live on the next OAMDATA write (the game's OAM upload), like the
   P2 pages, so it changes together with the OAM it completes.
+- HUD shift: `set_hud_shift(left, right)` (two slot masks, live from the
+  next OAMDATA write like the margin sprites). Those slots are drawn
+  `margin` px left / right of their OAM X, on both paths: `offset_sprite`
+  adds the shift in the 256-px path (so they leave the centre; clipped at
+  X -64 as before), and the margin path places them at their signed X +
+  shift, unclipped, so they land in the margins as ordinary OAM (over the
+  margin sprites and BGs, lower slot wins, 9-bit X and size bits as usual).
+  No effect without a margin or on a hi-res frame.
 - Windows and the colour window take the edge pixel's value (x 0 for the
   left margin, 255 for the right).
 - Not widened: mode 7 (margins show OBJ/backdrop only), mosaic, offset-per-tile
@@ -157,11 +165,27 @@ to. BG3 (the Octopus water surface) is VRAM, which repeats.
 
 ## HUD
 
-The HUD is OAM (slots 0-4 at X 8, the weapon bar next to it), so it stays
-where the game draws it: at the original picture's left edge, 8 px in. Same
-choice as z2rs. Moving it to the wide picture's edge would need a
-display-only X offset for those slots (`set_sprite_offset` clips at X -64,
-so it would need its own path); not done.
+The HUD is OAM, and with a margin it moves to the wide picture's edges,
+keeping its inset: X's bar (slots 0..6, X 8) and the weapon bar (7..15,
+X 24) end up 8 / 24 px from the new left edge, the boss bar (16..23, X 232)
+24 px from the new right edge. Vertical positions are the game's.
+
+`widescreen::update_margin_tiles` sets the PPU's HUD shift after every step
+(`hud_slots`): in a stage, left = slots 0..15 (the OAM build never writes
+them, its cursor starts at `$10`; hidden pieces are `Y $E0`, and the pause
+menu leaves them hidden, so the weapon menu is not shifted) plus P2's bar
+(co-op: the seven slots `coop_hud` put it in this step, `MarginState::p2_bar`;
+P2's down marker stays where P2 fell), right = 16..23 while `$1F0E` names a
+boss (the build then starts at `$18`). A Zero P1's Z icon is slot 0.
+Outside a stage, no shift. The step's OAM goes up at the next NMI, which is
+when the PPU takes the masks, so they always match the OAM they describe.
+
+Display only, but not invisible to a save state: the state holds the PPU's
+last picture and sprite evaluation (STAT77 overflow flags, which MMX never
+reads: no `$213E` load in the ROM), and those differ with the HUD moved.
+The display-only tests therefore compare save states after one frame with
+widescreen off (`same_state_unwidened`); WRAM/OAM/CGRAM/VRAM and the
+netplay checksum are compared every frame as before.
 
 ## Objects in the margins
 
@@ -265,13 +289,23 @@ peers, unlike the display-only margins. Not done.
 - `cargo test -p mmx-core --test widescreen` (ROM-gated): the decoder equals
   VRAM on every on-screen cell (highway-start, highway-mid, octopus-start);
   300 frames walking and jumping with 21:9 on vs off (highway-mid, hw-a):
-  WRAM, OAM, CGRAM, VRAM, save state and netplay checksum identical every
-  frame, the wide frame's centre equals the normal frame, the margin
-  survives a state load. `margin_sprites_are_display_only`: hw-a in a
+  WRAM, OAM, CGRAM, VRAM and netplay checksum identical every frame, the
+  save state after one unwidened frame (see HUD), the wide frame's centre
+  equals the normal frame outside the HUD, the margin survives a state load. `margin_sprites_are_display_only`: hw-a in a
   netplay session game, solo and co-op, 300 frames walking right, on vs
-  off: checksum every frame, WRAM, OAM and save state equal; margin sprites
+  off: checksum every frame, WRAM, OAM and (unwidened) save state equal; margin sprites
   in both margins (solo 1463 / 478 sprite-frames left / right, co-op 2154 /
   478), every one in a margin and none equal to an entry of the game's OAM.
+- HUD (`hud_shift_is_display_only`): with no margin the masks change
+  nothing (hw-spiky with the weapon bar, hw-bee2 with a boss bar: every
+  frame pixel-identical with vs without); at 21:9 X's icon is drawn at
+  X 8 of the wide frame and not at its old place. 4x crops,
+  `target/widescreen/hud/NAME-{16x9,21x9,off}/crop-{left,right}.png`:
+  `solo` (hw-spiky f30, weapon bar via `--poke 7E0BDB=02@1-30,7E1F12=00@1`),
+  `coop` (P2's bar under X's, both at the edge), `boss` (hw-bee2 f60 co-op,
+  `--poke 7E1F0E=68@1-60,7E1F0F=0E@1-60`: boss bar at the right edge),
+  `zero` / `coopzero` (the Z icons), `pause` (weapon menu unshifted, the
+  HUD back at the edge after it).
 - Margin sprites, 21:9, on vs off (`target/widescreen/margin-sprites/
   NAME-{on,off}.png`, dotted lines at the window edges): `hw-a-walk` (Sky
   Claws and their claws leaving left, one entering right), `highway-mid-walk`,
