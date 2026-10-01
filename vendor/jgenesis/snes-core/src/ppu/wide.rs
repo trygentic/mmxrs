@@ -75,6 +75,17 @@ pub struct Wide {
     /// (goes live with the next OAM upload, like the margin sprites).
     pub hud: (u128, u128),
     pub next_hud: Option<(u128, u128)>,
+    /// Scratch: the current line's margin BG pixels, `4 x 2 * margin`.
+    bg_line: Vec<Pixel>,
+}
+
+/// Window results at a margin's edge pixel (x 0 or 255), which every pixel
+/// of that margin uses: computed once per line and side.
+#[derive(Clone, Copy)]
+struct EdgeWindows {
+    math: bool,
+    obj: bool,
+    bg: [bool; 4],
 }
 
 impl Clone for Wide {
@@ -251,20 +262,55 @@ impl Ppu {
             return;
         }
         let objs = self.wide_obj_line(scanline, m);
+        // BG pixels of the line, fetched once per 8-px tile.
+        let n = 2 * m as usize;
+        let mut bgs = std::mem::take(&mut self.wide.bg_line);
+        bgs.clear();
+        bgs.resize(4 * n, Pixel::TRANSPARENT);
+        for (bg, line) in bgs.chunks_exact_mut(n).enumerate() {
+            if self.wide_bg_used(bg) {
+                let (left, right) = line.split_at_mut(m as usize);
+                if from_pixel == 0 {
+                    self.wide_bg_line(bg, scanline, -m, left);
+                }
+                self.wide_bg_line(bg, scanline, 256, right);
+            }
+        }
+        let r = &self.registers;
+        let win = |edge: u16| EdgeWindows {
+            math: r.in_math_window(edge),
+            obj: r.obj_in_window(edge),
+            bg: std::array::from_fn(|bg| r.bg_in_window(bg, edge)),
+        };
+        let wins = [win(0), win(255)];
         for sx in xs {
-            let i = if sx < 0 { sx + m } else { sx - 256 + m };
-            let c = self.wide_pixel(scanline, sx, objs[i as usize]);
+            let i = (if sx < 0 { sx + m } else { sx - 256 + m }) as usize;
+            let bg = std::array::from_fn(|b| bgs[b * n + i]);
+            let c = self.wide_pixel(objs[i], bg, &wins[usize::from(sx >= 0)]);
             self.wide.buf[row + (sx + m) as usize] = c;
         }
+        self.wide.bg_line = bgs;
     }
 
-    fn wide_pixel(&self, scanline: u16, sx: i32, obj: Pixel) -> Color {
+    /// Whether `wide_screen_pixel` can want BG `bg`'s pixels on this line.
+    fn wide_bg_used(&self, bg: usize) -> bool {
         let r = &self.registers;
-        let edge: u16 = if sx < 0 { 0 } else { 255 };
-        let mut cache = [None; 4];
-        let main = self.wide_screen_pixel(Screen::Main, scanline, sx, edge, obj, &mut cache);
+        let mode = r.bg_mode;
+        let in_mode = match bg {
+            0 => true,
+            1 => mode.bg2_enabled(r.extbg_enabled),
+            2 => mode.bg3_enabled(),
+            _ => mode.bg4_enabled(),
+        };
+        mode != BgMode::Seven && in_mode && (r.main_bg_enabled[bg] || r.sub_bg_enabled[bg])
+    }
+
+    /// `obj` / `bg`: this pixel's OBJ and BG pixels; `win`: its margin's windows.
+    fn wide_pixel(&self, obj: Pixel, bg: [Pixel; 4], win: &EdgeWindows) -> Color {
+        let r = &self.registers;
+        let main = self.wide_screen_pixel(Screen::Main, obj, bg, win);
         let sub_needed = r.sub_bg_obj_enabled && r.color_math_enabled_for_any_layer();
-        let in_color_window = r.in_math_window(edge);
+        let in_color_window = win.math;
         let mut main_px = main;
         let force_black = r.force_main_screen_black.enabled(in_color_window);
         if force_black {
@@ -280,7 +326,7 @@ impl Ppu {
         };
         let color = if r.color_math_enabled.enabled(in_color_window) && math_layer {
             let (sub_color, sub_transparent) = if sub_needed {
-                let p = self.wide_screen_pixel(Screen::Sub, scanline, sx, edge, obj, &mut cache);
+                let p = self.wide_screen_pixel(Screen::Sub, obj, bg, win);
                 (p.color, p.layer == Layer::Backdrop)
             } else {
                 (r.sub_backdrop_color, false)
@@ -293,16 +339,8 @@ impl Ppu {
         convert_snes_color(color, r.brightness)
     }
 
-    /// `cache`: this pixel's BG pixels, fetched once for both screens.
-    fn wide_screen_pixel(
-        &self,
-        screen: Screen,
-        scanline: u16,
-        sx: i32,
-        edge: u16,
-        obj: Pixel,
-        cache: &mut [Option<Pixel>; 4],
-    ) -> RenderedPixel {
+    /// `bg`: this pixel's BG pixels (both screens use them).
+    fn wide_screen_pixel(&self, screen: Screen, obj: Pixel, bg: [Pixel; 4], win: &EdgeWindows) -> RenderedPixel {
         let r = &self.registers;
         let (bg_enabled, bg_off_in_window, obj_enabled, obj_off_in_window, backdrop) = match screen {
             Screen::Main => (
@@ -323,31 +361,31 @@ impl Ppu {
         let mode = r.bg_mode;
         let m01 = matches!(mode, BgMode::Zero | BgMode::One);
         let mut pr = PriorityResolver::new();
-        if obj_enabled && !(obj_off_in_window && r.obj_in_window(edge)) && !obj.is_transparent() {
+        if obj_enabled && !(obj_off_in_window && win.obj) && !obj.is_transparent() {
             pr.add_obj(obj, m01);
         }
         if mode != BgMode::Seven {
-            let on = |bg: usize| bg_enabled[bg] && !(bg_off_in_window[bg] && r.bg_in_window(bg, edge));
+            let on = |b: usize| bg_enabled[b] && !(bg_off_in_window[b] && win.bg[b]);
             if on(0) {
-                let p = *cache[0].get_or_insert_with(|| self.wide_bg_pixel(0, scanline, sx));
+                let p = bg[0];
                 if !p.is_transparent() {
                     pr.add_bg1(p, m01);
                 }
             }
             if mode.bg2_enabled(r.extbg_enabled) && on(1) {
-                let p = *cache[1].get_or_insert_with(|| self.wide_bg_pixel(1, scanline, sx));
+                let p = bg[1];
                 if !p.is_transparent() {
                     pr.add_bg2(p, m01);
                 }
             }
             if mode.bg3_enabled() && on(2) {
-                let p = *cache[2].get_or_insert_with(|| self.wide_bg_pixel(2, scanline, sx));
+                let p = bg[2];
                 if !p.is_transparent() {
                     pr.add_bg3(p, mode == BgMode::One && r.mode_1_bg3_priority);
                 }
             }
             if mode.bg4_enabled() && on(3) {
-                let p = *cache[3].get_or_insert_with(|| self.wide_bg_pixel(3, scanline, sx));
+                let p = bg[3];
                 if !p.is_transparent() {
                     pr.add_bg4(p);
                 }
@@ -363,7 +401,10 @@ impl Ppu {
         )
     }
 
-    fn wide_bg_pixel(&self, bg: usize, scanline: u16, sx: i32) -> Pixel {
+    /// BG `bg`'s pixels at screen X `sx0..sx0 + out.len()` of `scanline`.
+    /// The map entry and tile depend on `x >> 3` only (8- and 16-px tiles,
+    /// fixed y), so they are fetched once per 8 px.
+    fn wide_bg_line(&self, bg: usize, scanline: u16, sx0: i32, out: &mut [Pixel]) {
         let r = &self.registers;
         let mode = r.bg_mode;
         let bpp = match bg {
@@ -372,26 +413,38 @@ impl Ppu {
             2 => BitsPerPixel::BG3,
             _ => BitsPerPixel::BG4,
         };
-        let x = (sx as u16).wrapping_add(r.bg_h_scroll[bg]);
         let y = scanline.wrapping_add(r.bg_v_scroll[bg]);
         let (tw, th) = get_bg_tile_size(mode, r.bg_tile_size[bg]);
-        let cell = usize::from((y & 1023) / th) * MARGIN_MAP_CELLS + usize::from((x & 1023) / tw);
-        let raw = match self.wide.tiles[bg].as_ref().map(|t| t[cell]) {
-            Some(e) if e != 0 => e as u16,
-            _ => get_bg_map_entry(&self.vram, r, bg, x, y),
-        };
-        let (x_flip, y_flip) = (raw.bit(14), raw.bit(15));
-        let tile = get_bg_tile(&self.vram, r, bg, x, y, bpp, raw & 0x3FF, x_flip, y_flip);
-        let row = if y_flip { 7 - (y % 8) } else { y % 8 };
-        let col = if x_flip { 7 - (x % 8) } else { x % 8 };
-        let bit = (7 - col) as u8;
-        let mut color = 0_u8;
-        for plane in (0..bpp.bitplanes()).step_by(2) {
-            let word = tile[row as usize + 4 * plane];
-            color |= u8::from(word.bit(bit)) << plane;
-            color |= u8::from(word.bit(bit + 8)) << (plane + 1);
+        let map_row = usize::from((y & 1023) / th) * MARGIN_MAP_CELLS;
+        let map = self.wide.tiles[bg].as_deref();
+        let mut memo: Option<(u16, u16, &[u16])> = None;
+        for (k, o) in out.iter_mut().enumerate() {
+            let x = ((sx0 + k as i32) as u16).wrapping_add(r.bg_h_scroll[bg]);
+            let (raw, tile) = match memo {
+                Some((key, raw, tile)) if key == x >> 3 => (raw, tile),
+                _ => {
+                    let cell = map_row + usize::from((x & 1023) / tw);
+                    let raw = match map.map(|t| t[cell]) {
+                        Some(e) if e != 0 => e as u16,
+                        _ => get_bg_map_entry(&self.vram, r, bg, x, y),
+                    };
+                    let tile = get_bg_tile(&self.vram, r, bg, x, y, bpp, raw & 0x3FF, raw.bit(14), raw.bit(15));
+                    memo = Some((x >> 3, raw, tile));
+                    (raw, tile)
+                }
+            };
+            let (x_flip, y_flip) = (raw.bit(14), raw.bit(15));
+            let row = if y_flip { 7 - (y % 8) } else { y % 8 };
+            let col = if x_flip { 7 - (x % 8) } else { x % 8 };
+            let bit = (7 - col) as u8;
+            let mut color = 0_u8;
+            for plane in (0..bpp.bitplanes()).step_by(2) {
+                let word = tile[row as usize + 4 * plane];
+                color |= u8::from(word.bit(bit)) << plane;
+                color |= u8::from(word.bit(bit + 8)) << (plane + 1);
+            }
+            *o = Pixel { palette: ((raw >> 10) & 7) as u8, color, priority: raw.bit(13).into() };
         }
-        Pixel { palette: ((raw >> 10) & 7) as u8, color, priority: raw.bit(13).into() }
     }
 
     /// OBJ pixels of `scanline` in the margins: `[left m.., right m..]`.

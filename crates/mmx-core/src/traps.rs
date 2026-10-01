@@ -34,17 +34,31 @@ pub struct TrapTable {
     traps: HashMap<u32, TrapInfo>,
     untrapped: HashSet<u32>,
     enabled: bool,
+    /// One bit per low 16 bits of a trapped address. `get` runs at every
+    /// instruction boundary, nearly always for an untrapped PC: answered
+    /// here without hashing. Empty until the first `register`.
+    filter: Vec<u64>,
 }
 
 impl TrapTable {
     pub fn new() -> Self {
-        Self { traps: HashMap::new(), untrapped: HashSet::new(), enabled: true }
+        Self { traps: HashMap::new(), untrapped: HashSet::new(), enabled: true, filter: Vec::new() }
     }
     pub fn register(&mut self, addr: u32, name: &'static str, ret: TrapReturn, body: TrapFn) {
         self.traps.insert(addr & 0xFF_FFFF, TrapInfo { name, ret, body });
+        self.filter.resize(1024, 0);
+        self.filter[(addr as usize & 0xFFFF) >> 6] |= 1 << (addr & 63);
     }
     pub fn unregister(&mut self, addr: u32) {
         self.traps.remove(&(addr & 0xFF_FFFF));
+        self.filter.iter_mut().for_each(|w| *w = 0);
+        for a in self.traps.keys() {
+            self.filter[(*a as usize & 0xFFFF) >> 6] |= 1 << (a & 63);
+        }
+    }
+    #[inline]
+    fn maybe(&self, addr: u32) -> bool {
+        self.filter.get((addr as usize & 0xFFFF) >> 6).is_some_and(|w| w >> (addr & 63) & 1 != 0)
     }
     /// Global kill switch: `false` makes this an oracle (pure emulation).
     pub fn set_enabled(&mut self, on: bool) {
@@ -62,10 +76,14 @@ impl TrapTable {
         }
     }
     pub fn is_trapped(&self, addr: u32) -> bool {
-        self.enabled && self.traps.contains_key(&addr) && !self.untrapped.contains(&addr)
+        self.enabled && self.maybe(addr) && self.traps.contains_key(&addr) && !self.untrapped.contains(&addr)
     }
+    #[inline]
     pub fn get(&self, addr: u32) -> Option<TrapInfo> {
-        if self.is_trapped(addr) { self.traps.get(&addr).copied() } else { None }
+        if !self.enabled || !self.maybe(addr) || self.untrapped.contains(&addr) {
+            return None;
+        }
+        self.traps.get(&addr).copied()
     }
     pub fn len(&self) -> usize {
         self.traps.len()
