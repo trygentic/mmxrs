@@ -345,6 +345,9 @@ pub fn netsim(rom: &[u8], o: &SimOpts, script: &dyn Fn(usize, Pads) -> Pads) -> 
                     live_at[i] = Some((ms, net.frame()));
                     if let Some(s) = load {
                         game.load_state(s)?;
+                        if game.wide_gameplay() {
+                            mmx_core::wide_gameplay::sweep(game);
+                        }
                         // the state carries the rate it was saved at
                         game.set_audio_rate(dev.hz as u32);
                     }
