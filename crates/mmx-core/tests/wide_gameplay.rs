@@ -10,7 +10,9 @@ use mmx_core::{Game, Pads, TrapReturn};
 fn game(state: &str) -> Option<Game> {
     let rom = std::fs::read(std::env::var_os("MMX_ROM")?).ok()?;
     let mut g = Game::from_rom(rom).expect("load ROM");
-    let p = format!("{}/../../states/{state}.state", env!("CARGO_MANIFEST_DIR"));
+    // `MMX_STATES`: another dump's states (states/usa11 for Rev 1).
+    let dir = std::env::var("MMX_STATES").unwrap_or_else(|_| format!("{}/../../states", env!("CARGO_MANIFEST_DIR")));
+    let p = format!("{dir}/{state}.state");
     g.load_state(&std::fs::read(p).ok()?).expect("load state");
     Some(g)
 }
