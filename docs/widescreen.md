@@ -7,6 +7,9 @@ different mechanism: the NES port composes a second buffer from a render
 record; here the vendored PPU itself renders each scanline wider, and
 mmx-core feeds it the stage's real tiles for the columns VRAM does not hold.
 
+Objects the game culls at the picture's edges are drawn in the margins too
+("Objects in the margins").
+
 It is display only: no WRAM, VRAM, OAM or CGRAM write, nothing in a save
 state, no effect on the netplay checksum, and it may be on for one netplay
 peer only. With it off the PPU takes exactly the old path (`xtask verify`
@@ -115,6 +118,11 @@ story vertically. Hence the margin tiles come from the decoder, not VRAM.
   32/34 limits, lower slot wins. X is 9-bit: >= 256 is negative as on
   hardware (the left margin); an X in `256..256+m` is also drawn at X (the
   right margin).
+- Margin sprites: `set_margin_sprites(Vec<MarginSprite>)` (signed X, Y,
+  tile, OAM attribute byte, size, optional P2 shadow page). Not OAM: a list
+  in `Wide`, drawn in the margins only, under every OAM sprite. The host's
+  list goes live on the next OAMDATA write (the game's OAM upload), like the
+  P2 pages, so it changes together with the OAM it completes.
 - Windows and the colour window take the edge pixel's value (x 0 for the
   left margin, 255 for the right).
 - Not widened: mode 7 (margins show OBJ/backdrop only), mosaic, offset-per-tile
@@ -157,22 +165,122 @@ so it would need its own path); not done.
 
 ## Objects in the margins
 
-Not yet. MMX culls its objects to screen X `-16..256` when it builds OAM
-(a 600-frame OAM scan on the Highway and Launch Octopus saw no visible
-entry with X in `256..496`), so enemies in the margins are not drawn until
-they reach the 256-px picture, and the game only spawns them by the
-original camera window. The next step is z2rs's "margin sprites" observer
-(shadow-run the OAM builder `$80:D544` without its cull and draw what lands
-in the margins) and then "wide gameplay" (spawn by the wide window, which
-changes gameplay and goes into the netplay identity).
+Code: `crates/mmx-core/src/margin_sprites.rs`; PNGs below.
+
+### Where the game culls (measured)
+
+- **Per piece, at OAM build time.** The object emitter (listing `$80:D67C`,
+  `X` = the object, `JSR` from every draw list) computes each piece's X as
+  its layout offset (mirrored by facing) plus `+$05 - $1E4D`, stores it,
+  and skips the piece when `x + 16 >= $10F` or `y + 15 >= $EF` (16-bit,
+  unsigned: X `-16..=254`, Y `-15..=223` kept). An object straddling the edge
+  loses only its outer pieces; the kept ones at X `-16..-1` and `240..254`
+  already spill into the margins (the PPU draws them there).
+- **Per object, when it queues itself to be drawn.** An object's update
+  `JSL`s `$82:80B4` (240 call sites): visible only with `x - cam` in
+  `-32..288` and `y - camY` in `-16..240`, then `+$0E = $81` and its address
+  goes on draw list `+$12 / 2 + 1` (negative: list 0) of the six at `$0920`
+  `$0960` `$09A0` `$09E0` `$0A20` `$0A60` (32 each, counts `$E7..$EC`);
+  otherwise `+$0E = 0` and it is not drawn. `$82:808F` (17 sites, the big
+  ones) is the same with `-96..352` x `-80..304`. The build draws lists 0-2
+  (`$80:D5B4`), the armour parts, the player, lists 3-5 (`$80:D5FA`).
+  Effects (`$1928`) clear `+$0E` bit 7 before each update, so bit 7 is
+  "queued this frame" for every table.
+- **Despawn is not there.** `$82:806E` (119 sites) is the "still in range"
+  test, `-64..320` x `-64..288`, carry set = out; enemies delete themselves
+  on it. Measured (hw-a walking right): the Sky Claw at X -65 is alive (not
+  queued since -32), gone 18 frames later at about -83.
+- **Spawning is by the original window.** The layout spawner `$80:DC0B`
+  runs when the camera crosses a 32-px column: scrolling right it spawns
+  the column at `cam + 256` (rounded down to 32; 288 px tall from
+  `camY - 32`), scrolling left the column at `cam`, vertically the rows at
+  `camY - 32` / `camY + 240` over 320 px from `cam - 32`. Enemies appear at
+  X 253..263 on the Highway walks.
+
+So what the margins can show, at 21:9 (136 px a side):
+
+| case | margin | what is drawn |
+|---|---|---|
+| enemy leaving on the left (walking, or scrolled out) | left | from -16 out to its despawn near -64 (about 80 px with its width); then it no longer exists |
+| enemy entering on the right | right | at most the ~32 px between its spawn and the edge; nothing further out exists yet |
+| big objects at the edge (Bee Blader, road attacker cars, the truck-carried claws) | both | their outer pieces (the Bee Blader's rear half at the right edge, cars driving in and out) |
+| shots leaving | right/left | until they despawn, a few px past the edge |
+| items dropped near the edge | either | while they live (same rules, `$1428` table) |
+| P2 left behind (co-op) | either | P2 as X-in-Zero-colours or X3 Zero until it warps back (`P2_AWAY_FRAMES`, 90 frames) |
+| effects (dust, sparks, the Sky Claw's cable links) | either | only while the game queues them (off the window some stop moving) |
+| objects the spawner has not spawned | - | nothing: they do not exist |
+
+### The margin sprite pass
+
+At the display hook `$80:9A86` (after the OAM build and P2's slice;
+`coop::display_slice`), with a margin on:
+
+1. Every live object of the `$0E68..$1928` tables (43 x `$40`: enemies,
+   shots, items, more) and of the effect pools `$1928` (31 x `$20`) and
+   `$1D08` (16 x `$20`) whose X is within `-margin-128 .. 256+margin+128`
+   and not mid-window (`64..192`). An effect counts only when queued this
+   frame; a `$0E68`-table object also when the game stopped queueing it
+   after having queued it (`MarginState`, per slot: `id + 1` last seen
+   queued), so an enemy past `-32` keeps being drawn and helper objects that
+   never draw stay invisible.
+2. For each, the ROM's own emitter runs isolated (`call_isolated_ret(..,
+   Rts)`, `M=1 X=0 D=0 DB=$8D`, `X` = the object, OAM cursor `$E4/$E5/$E6`
+   = 0) with the camera X `$1E4D` moved 256 px towards the object's side,
+   so its margin pieces land inside the emitter's window. The entries it
+   wrote at `$0700` (and their high-table bits at `$0900` / the partial
+   byte in `$E6`) are read back, moved 256 px back, and kept when some of
+   the sprite is in a margin and, for a queued object, the game did not
+   keep it itself (X outside `-16..=254`): no duplicates at the boundary.
+   Priority and palette bits are the emitter's.
+3. P2 (co-op, not hidden, away from mid-window): X's emitter on P2's block
+   in `$0BA8` with Zero's palette and the P2 shadow page for its window
+   tiles, or the X3 Zero emitter (`zero::margin_entries`, pages 0 and 2,
+   only frames whose page `emit_x3` already filled).
+4. WRAM `$0000..$1FFF` (direct page, stack, OAM buffer, high table, the
+   camera, `$0BA8`) is put back byte for byte, and so is the CPU
+   (`SnesEmulator::cpu_snapshot`: registers, the 65816's between-cycle
+   temporaries and the open bus, which a save state holds). The list goes to
+   the PPU (`set_margin_sprites`, at most 128).
+
+No OAM slot is used, so the 128-slot budget, P2's slots and `oam_hide` are
+untouched. The trap at `$80:9A86` is the co-op display hook (same address
+and body): a netplay session game has it anyway, so a peer turning
+widescreen on does not change the trap set; a solo game gets it from
+`Game::set_wide_margin`. Paused frames do not reach `$9A86`: the last list
+stays (the world is frozen too). Outside a stage the list is cleared.
+
+### What cannot be drawn, and wide gameplay
+
+Objects that do not exist: the spawner fills only the original window plus
+one 32-px column, and objects despawn about 64 px past either edge. Showing
+the whole margin would mean "wide gameplay": spawn by the wide window
+(`$80:DC0B`'s `+256` and row width), queue and despawn by it (`$82:80B4`,
+`$82:808F`, `$82:806E`). That changes what enemies do and when (they act and
+shoot from further away), so it is gameplay: an opt-in that would have to go
+into the netplay identity (`trapset_id` / `NET_REVISION`) and be on for both
+peers, unlike the display-only margins. Not done.
 
 ## Verification
 
 - `cargo test -p mmx-core --test widescreen` (ROM-gated): the decoder equals
   VRAM on every on-screen cell (highway-start, highway-mid, octopus-start);
-  300 frames walking and jumping with 21:9 on vs off: WRAM, OAM, CGRAM,
-  VRAM, save state and netplay checksum identical every frame, the wide
-  frame's centre equals the normal frame, the margin survives a state load.
+  300 frames walking and jumping with 21:9 on vs off (highway-mid, hw-a):
+  WRAM, OAM, CGRAM, VRAM, save state and netplay checksum identical every
+  frame, the wide frame's centre equals the normal frame, the margin
+  survives a state load. `margin_sprites_are_display_only`: hw-a in a
+  netplay session game, solo and co-op, 300 frames walking right, on vs
+  off: checksum every frame, WRAM, OAM and save state equal; margin sprites
+  in both margins (solo 1463 / 478 sprite-frames left / right, co-op 2154 /
+  478), every one in a margin and none equal to an entry of the game's OAM.
+- Margin sprites, 21:9, on vs off (`target/widescreen/margin-sprites/
+  NAME-{on,off}.png`, dotted lines at the window edges): `hw-a-walk` (Sky
+  Claws and their claws leaving left, one entering right), `highway-mid-walk`,
+  `highway-mid-shots` (lemons past the right edge), `hw-bee` / `hw-bee2`
+  (the Bee Blader's rear half), `hw-car` (road attackers both sides),
+  `hw-a-coop-p2` / `hw-a-coop-x3` (P2 left behind in the left margin),
+  `hw-c-walk` (camera stops at a wall: nothing spawned, nothing to draw).
+  In every run the 256-px centre is pixel-identical on vs off and the
+  per-frame status lines (X, camera, HP) are identical.
 - `cargo xtask verify --frames 2400 --coop-off --tap 200,400,600,800,1000
   --hold 0100`: OK (widescreen off; the PPU takes the old path).
 - `xtask bginfo` on the Rev 1 ROM (`usa11-highway-start`, 400 frames
