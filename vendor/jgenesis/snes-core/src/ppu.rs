@@ -1938,6 +1938,9 @@ impl Ppu {
         if let Some(m) = self.wide.next_sprites.take() {
             self.wide.sprites = m;
         }
+        if let Some(h) = self.wide.next_hud.take() {
+            self.wide.hud = h;
+        }
 
         if self.in_active_display(self.state.scanline) {
             self.handle_active_display_oam_write(value);

@@ -467,16 +467,20 @@ impl Ppu {
         }
     }
 
-    // mmxrs patch: a slot in `sprite_offset.slots` moves by (dx, dy); `None`
+    // mmxrs patch: a slot in `sprite_offset.slots` moves by (dx, dy), a
+    // widescreen HUD slot by its margin shift (ppu::wide `hud_dx`); `None`
     // when that puts it off screen (Y >= 224 or above -64, X outside
     // -64..256), so it is not scanned rather than wrapping to the far edge.
     pub(super) fn offset_sprite(&self, oam_idx: u8, x: u16, y: u8) -> Option<(u16, u8)> {
         let o = self.sprite_offset;
-        if (o.slots >> oam_idx) & 1 == 0 || (o.dx == 0 && o.dy == 0) {
+        let hud = self.hud_dx(oam_idx);
+        let (dx, dy) =
+            if (o.slots >> oam_idx) & 1 == 0 { (0, 0) } else { (o.dx, o.dy) };
+        if dx == 0 && dy == 0 && hud == 0 {
             return Some((x, y));
         }
-        let sx = if x >= 256 { x as i16 - 512 } else { x as i16 } + o.dx;
-        let sy = if y >= 224 { i16::from(y) - 256 } else { i16::from(y) } + o.dy;
+        let sx = if x >= 256 { x as i16 - 512 } else { x as i16 } + dx + hud;
+        let sy = if y >= 224 { i16::from(y) - 256 } else { i16::from(y) } + dy;
         ((-64..256).contains(&sx) && (-64..224).contains(&sy)).then_some((sx as u16 & 0x1FF, sy as u8))
     }
 

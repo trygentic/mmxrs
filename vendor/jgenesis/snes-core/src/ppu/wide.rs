@@ -10,6 +10,9 @@
 //! Windows and the colour window use the nearest edge pixel's (x 0 or 255).
 //! The host can add sprites that exist only here (`set_margin_sprites`:
 //! objects the game culled from OAM), drawn behind every OAM sprite.
+//! HUD slots (`set_hud_shift`) render `margin` px further left / right, so
+//! the game's HUD sits at the wide picture's edges (both paths, clipped at
+//! the wide frame's edges, never at their OAM position).
 //! Not drawn in the margins: mode 7, mosaic, offset-per-tile (plain scroll),
 //! hi-res and interlaced frames (those frames are output unwidened).
 //!
@@ -68,6 +71,10 @@ pub struct Wide {
     /// the game's next OAM upload like the P2 pages.
     pub sprites: Vec<MarginSprite>,
     pub next_sprites: Option<Vec<MarginSprite>>,
+    /// OAM slots drawn `margin` px left / right (the HUD), live and next
+    /// (goes live with the next OAM upload, like the margin sprites).
+    pub hud: (u128, u128),
+    pub next_hud: Option<(u128, u128)>,
 }
 
 impl Clone for Wide {
@@ -112,6 +119,34 @@ impl Ppu {
 
     pub fn set_margin_sprites(&mut self, sprites: Vec<MarginSprite>) {
         self.wide.next_sprites = Some(sprites);
+    }
+
+    /// OAM slots shown `margin` px left (`left`) / right (`right`) of their
+    /// position, from the next OAM upload on. No effect without a margin.
+    pub fn set_hud_shift(&mut self, left: u128, right: u128) {
+        self.wide.next_hud = Some((left, right));
+    }
+
+    /// The live HUD shift masks.
+    pub fn hud_shift(&self) -> (u128, u128) {
+        self.wide.hud
+    }
+
+    /// X shift of OAM slot `idx`: -margin / +margin for HUD slots while the
+    /// frame is widened, else 0.
+    pub(super) fn hud_dx(&self, idx: u8) -> i16 {
+        let m = self.wide.margin as i16;
+        if m == 0 || self.state.h_hi_res_frame || self.state.v_hi_res_frame {
+            return 0;
+        }
+        let (l, r) = self.wide.hud;
+        if (l >> idx) & 1 != 0 {
+            -m
+        } else if (r >> idx) & 1 != 0 {
+            m
+        } else {
+            0
+        }
     }
 
     pub fn set_line_record(&mut self, on: bool) {
@@ -364,7 +399,8 @@ impl Ppu {
     /// Position: OAM X as the hardware reads it (9-bit, >= 256 is negative),
     /// and an X in `256..256 + m` also counts as itself (the right margin).
     /// Lower OAM index wins; no 32-sprite / 34-tile limits. The host's margin
-    /// sprites go under all of OAM (earlier ones win among them).
+    /// sprites go under all of OAM (earlier ones win among them). A HUD slot
+    /// is at its signed X + its shift only.
     fn wide_obj_line(&self, scanline: u16, m: i32) -> Vec<Pixel> {
         let mut out = vec![Pixel::TRANSPARENT; 2 * m as usize];
         let r = &self.registers;
@@ -384,13 +420,22 @@ impl Ppu {
             let [tile_lsb, attr] = self.oam_low[(usize::from(idx) << 1) + 1].to_le_bytes();
             let hi = self.oam_high[usize::from(idx >> 2)] >> (2 * (idx & 3));
             let size = if hi.bit(1) { (lw, lh) } else { (sw, sh) };
-            let Some((x9, y)) = self.offset_sprite(idx, u16::from_le_bytes([x_lsb, u8::from(hi.bit(0))]), y)
-            else {
-                continue;
+            let raw = u16::from_le_bytes([x_lsb, u8::from(hi.bit(0))]);
+            let signed = |x: u16| if x >= 256 { i32::from(x) - 512 } else { i32::from(x) };
+            let hud = self.hud_dx(idx);
+            let (xs, y): (&[i32], u8) = if hud != 0 {
+                // HUD: at its own X + the shift only (unclipped: it is meant for the margins).
+                (&[signed(raw) + i32::from(hud)], y)
+            } else {
+                let Some((x9, y)) = self.offset_sprite(idx, raw, y) else {
+                    continue;
+                };
+                if x9 >= 256 && i32::from(x9) < 256 + m {
+                    (&[signed(x9), i32::from(x9)], y)
+                } else {
+                    (&[signed(x9)], y)
+                }
             };
-            let hw = if x9 >= 256 { i32::from(x9) - 512 } else { i32::from(x9) };
-            let xs: &[i32] =
-                if x9 >= 256 && i32::from(x9) < 256 + m { &[hw, i32::from(x9)] } else { &[hw] };
             let p2 = (self.p2_tiles.0.slots >> idx) & 1 != 0;
             let page = p2.then(|| {
                 (((self.p2_tiles.0.page1 >> idx) & 1) | ((self.p2_tiles.0.page2 >> idx) & 1) << 1) as usize

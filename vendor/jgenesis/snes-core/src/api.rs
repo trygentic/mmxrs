@@ -389,6 +389,17 @@ impl SnesEmulator {
         self.ppu.set_margin_sprites(sprites);
     }
 
+    /// Widescreen HUD: OAM slots drawn `margin` px left / right (live from
+    /// the next OAM upload; no effect without a margin).
+    pub fn set_hud_shift(&mut self, left: u128, right: u128) {
+        self.ppu.set_hud_shift(left, right);
+    }
+
+    #[must_use]
+    pub fn hud_shift(&self) -> (u128, u128) {
+        self.ppu.hud_shift()
+    }
+
     /// The CPU as a whole (registers and the between-cycle temporaries a
     /// save state holds), the 5A22 registers and the open bus, so a
     /// display-only isolated call leaves the save state as it found it.
