@@ -4,6 +4,7 @@ mod colortable;
 mod debug;
 mod registers;
 mod sprites;
+pub mod wide; // mmxrs patch: widescreen margins
 
 use crate::api::SnesEmulatorConfig;
 use crate::ppu::registers::{
@@ -353,6 +354,8 @@ pub struct Ppu {
     p2_tiles: P2TilesSlot,
     // mmxrs patch: display-only sprite offset (not in save states, see `SpriteOffset`)
     sprite_offset: SpriteOffset,
+    // mmxrs patch: display-only widescreen margins (not in save states, see `wide.rs`)
+    wide: wide::Wide,
 }
 
 // mmxrs patch begin: shadow sprite tile page for mmx-core's player 2.
@@ -508,6 +511,7 @@ impl Ppu {
             deinterlace: config.deinterlace,
             p2_tiles: P2TilesSlot(P2Tiles::new()), // mmxrs patch
             sprite_offset: SpriteOffset::default(), // mmxrs patch
+            wide: wide::Wide::default(),            // mmxrs patch
         }
     }
 
@@ -662,7 +666,13 @@ impl Ppu {
         }
     }
 
+    // mmxrs patch: the widescreen margins after each (partial) line render
     fn render_current_line(&mut self, from_pixel: u16) {
+        self.render_current_line_inner(from_pixel);
+        self.render_wide_margins(self.state.scanline, from_pixel);
+    }
+
+    fn render_current_line_inner(&mut self, from_pixel: u16) {
         let scanline = self.state.scanline;
         self.state.last_rendered_scanline = Some(scanline);
 

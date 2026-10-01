@@ -17,10 +17,12 @@ pub mod ram;
 pub mod saber;
 pub mod sfx;
 pub mod traps;
+pub mod widescreen;
 pub mod zero;
 pub mod zero_data;
 
 pub use game::{Game, StateInfo};
+pub use widescreen::Widescreen;
 pub use traps::{TrapFn, TrapLog, TrapReturn, TrapTable};
 
 /// SNES joypad state per player in auto-read layout:

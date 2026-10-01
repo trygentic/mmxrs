@@ -346,6 +346,9 @@ impl Game {
             crate::sfx::mix(&mut self.coop.sfx, &s.swing, fps, &mut self.audio.0[audio_from..]);
         }
         self.frame_count += 1;
+        if self.wide_margin() > 0 {
+            crate::widescreen::update_margin_tiles(self);
+        }
     }
 
     /// Debug aid: one frame like [`Game::step`], returning `PBR:PC` of every
@@ -522,6 +525,52 @@ impl Game {
     pub fn set_display_offset(&mut self, player: usize, dx: i16, dy: i16) {
         let mask = crate::display::visible(self.wram(), self.oam_slots[player & 1]);
         self.emu.set_sprite_offset(mask, dx, dy);
+    }
+
+    /// Widescreen (docs/widescreen.md): `margin` extra pixels each side of
+    /// the 256-px picture (0 = off). Display only: no WRAM/VRAM/OAM/CGRAM
+    /// write, not in save states, kept across `load_state`. [`Game::frame`]
+    /// reports the wide size from the next frame on.
+    pub fn set_wide_margin(&mut self, margin: u16) {
+        self.emu.set_wide_margin(margin);
+    }
+
+    pub fn wide_margin(&self) -> u16 {
+        self.emu.wide_margin()
+    }
+
+    /// [`Game::set_wide_margin`] by preset.
+    pub fn set_widescreen(&mut self, w: crate::Widescreen) {
+        self.set_wide_margin(w.margin_px());
+    }
+
+    pub fn widescreen(&self) -> crate::Widescreen {
+        crate::Widescreen((self.wide_margin() / 8) as u8)
+    }
+
+    /// The margin map for `bg` (0-3): `MARGIN_MAP_CELLS^2` cells, `0` = use
+    /// VRAM, else `0x1_0000 | tilemap entry`; `None` clears it.
+    pub fn set_margin_tiles(&mut self, bg: usize, cells: Option<&[u32]>) {
+        self.emu.set_margin_tiles(bg, cells);
+    }
+
+    /// Research: record each rendered line's BG registers ([`Game::line_regs`]).
+    pub fn set_line_record(&mut self, on: bool) {
+        self.emu.set_line_record(on);
+    }
+
+    pub fn line_regs(&self) -> &[snes_core::api::LineRegs] {
+        self.emu.line_regs()
+    }
+
+    /// The VRAM tilemap entry BG `bg` (0-3) shows at BG-space `(x, y)`.
+    pub fn bg_map_entry(&self, bg: usize, x: u16, y: u16) -> u16 {
+        self.emu.bg_map_entry(bg, x, y)
+    }
+
+    /// Research: the PPU registers (`{:#?}`).
+    pub fn ppu_registers_debug(&self) -> String {
+        self.emu.ppu_registers_debug()
     }
 
     /// Live shadow pages and slot mask (what the renderer uses now).

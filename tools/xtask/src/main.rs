@@ -20,6 +20,9 @@ const USAGE: &str = "usage: cargo xtask <command>
        from the state's co-op data; a state saved before it re-anchors P2 on P1)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
+       --wide off|16:10|16:9|21:9|N: widescreen PNGs (docs/widescreen.md)
+  bginfo --frames N [script] [--load STATE] [--lines]   PPU registers after frame N (BG mode, tilemaps, scroll), camera;
+       --lines: frame N's per-line BG registers (HDMA effects); docs/widescreen.md
   ledger
   rominfo
   stateinfo PATH   what a save state holds (frame count, tile pages, co-op data, P2); docs/savestates.md
@@ -40,6 +43,7 @@ fn main() {
         Some("trace") => trace(&args[1..]),
         Some("cooptrace") => cooptrace(&args[1..]),
         Some("lagdiff") => lagdiff(&args[1..]),
+        Some("bginfo") => bginfo(&args[1..]),
         Some("ledger") => ledger(),
         Some("rominfo") => rominfo(),
         Some("stateinfo") => stateinfo(&args[1..]),
@@ -109,6 +113,10 @@ fn game_scripted(args: &[String]) -> Game {
     if let Some(p) = flag(args, "--load") {
         let s = std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")));
         g.load_state(&s).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+    }
+    // `--wide off|16:10|16:9|21:9|N`: widescreen margins (docs/widescreen.md).
+    if let Some(w) = flag(args, "--wide") {
+        g.set_widescreen(mmx_core::Widescreen::parse(w).unwrap_or_else(|| die("--wide: off|16:10|16:9|21:9|N")));
     }
     // `--x3 PATH` (or MMX_X3_ROM): draw P2 as X3 Zero (docs/zero.md "Playing as Zero").
     if let Some(p) = flag(args, "--x3").map(PathBuf::from).or_else(|| std::env::var_os("MMX_X3_ROM").map(PathBuf::from)) {
@@ -374,6 +382,50 @@ fn dump(args: &[String]) -> i32 {
     if let Some(p) = flag(args, "--wav") {
         write_wav(Path::new(p), &wav, 32_000).unwrap_or_else(|e| die(&format!("{p}: {e}")));
         println!("wrote {p} ({} samples)", wav.len());
+    }
+    0
+}
+
+/// `bginfo --frames N [script] [--load S] [--lines]`: the PPU's BG setup
+/// after frame N and the camera; `--lines` adds frame N's per-line registers
+/// (runs of equal lines collapsed).
+fn bginfo(args: &[String]) -> i32 {
+    let frames = num(args, "--frames").unwrap_or(1);
+    let script = scripted(args);
+    let mut g = game_scripted(args);
+    g.set_line_record(true);
+    for f in 1..=frames {
+        g.step(script(f, Pads::default()));
+    }
+    let w = g.wram();
+    let b = |a: u32| w[ram::wram_index(a)];
+    let w16 = |a: u32| u16::from_le_bytes([b(a), b(a + 1)]);
+    println!("frame {frames}: level {:02X} X=({},{}) cam ({},{}) cam2 ({},{})", b(ram::LEVEL_ID), w16(ram::X_POS_X), w16(ram::X_POS_Y), w16(ram::CAMERA_X), w16(ram::CAMERA_Y), w16(0x7E1E8D), w16(0x7E1E90));
+    let ws = mmx_core::widescreen::agreement;
+    println!("layout decoder vs VRAM on screen: BG1 {}%, BG2 {}%", ws(&g, 0), ws(&g, 1));
+    // `{:#?}` with arrays folded onto one line.
+    let mut r = String::new();
+    let mut depth = 0;
+    for l in g.ppu_registers_debug().lines() {
+        let t = l.trim();
+        r.push_str(if depth > 0 { " " } else { "\n" });
+        r.push_str(t);
+        depth += t.matches('[').count() as i32 - t.matches(']').count() as i32;
+    }
+    for l in r.lines().filter(|l| ["bg_", "main_", "sub_", "mode", "color_math", "window", "obj_tile", "extbg", "direct", "force", "backdrop", "brightness", "interlaced", "pseudo"].iter().any(|k| l.trim_start().starts_with(k))) {
+        println!("{}", l.trim());
+    }
+    if args.iter().any(|a| a == "--lines") {
+        let lines = g.line_regs().to_vec();
+        let mut i = 0;
+        while i < lines.len() {
+            let mut j = i + 1;
+            while j < lines.len() && lines[j] == lines[i] {
+                j += 1;
+            }
+            println!("lines {:3}-{:3}: {:?}", i + 1, j, lines[i]);
+            i = j;
+        }
     }
     0
 }

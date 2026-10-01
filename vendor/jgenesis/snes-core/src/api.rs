@@ -8,6 +8,7 @@ use crate::memory::dma::{DmaStatus, DmaUnit};
 use crate::memory::{CpuInternalRegisters, Memory};
 use crate::ppu::{Ppu, PpuTickEffect};
 pub use crate::ppu::{P2_PAGE_TILES, P2_PAGE_WORDS, P2_PAGES, P2Tiles}; // mmxrs patch
+pub use crate::ppu::wide::{LineRegs, MARGIN_MAP_CELLS, MAX_WIDE_MARGIN}; // mmxrs patch
 use crate::{bus, ppu};
 use bincode::error::EncodeError;
 use bincode::{Decode, Encode};
@@ -362,6 +363,41 @@ impl SnesEmulator {
         self.ppu.set_sprite_offset(slots, dx, dy);
     }
 
+    // mmxrs patch: display-only widescreen (see `ppu::wide`)
+    pub fn set_wide_margin(&mut self, margin: u16) {
+        self.ppu.set_wide_margin(margin);
+    }
+
+    #[must_use]
+    pub fn wide_margin(&self) -> u16 {
+        self.ppu.wide_margin()
+    }
+
+    pub fn set_margin_tiles(&mut self, bg: usize, cells: Option<&[u32]>) {
+        self.ppu.set_margin_tiles(bg, cells);
+    }
+
+    pub fn set_line_record(&mut self, on: bool) {
+        self.ppu.set_line_record(on);
+    }
+
+    #[must_use]
+    pub fn line_regs(&self) -> &[ppu::wide::LineRegs] {
+        self.ppu.line_regs()
+    }
+
+    /// The VRAM tilemap entry BG `bg` shows at BG-space `(x, y)`.
+    #[must_use]
+    pub fn bg_map_entry(&self, bg: usize, x: u16, y: u16) -> u16 {
+        self.ppu.bg_map_entry(bg, x, y)
+    }
+
+    /// Research: the PPU registers, `{:#?}`.
+    #[must_use]
+    pub fn ppu_registers_debug(&self) -> String {
+        self.ppu.registers_debug()
+    }
+
     /// Tick only the main CPU until it sits at an instruction boundary with
     /// `PBR:PC == until_pbr_pc` (returns true) or `max_cycles` CPU ticks pass
     /// (returns false). PPU, APU, coprocessors, DMA and `total_master_cycles`
@@ -531,14 +567,13 @@ impl EmulatorTrait for SnesEmulator {
         let prev_scanline_mclk = self.ppu.scanline_master_cycles();
         let mut tick_effect = TickEffect::None;
         if self.ppu.tick(master_cycles_elapsed) == PpuTickEffect::FrameComplete {
-            renderer
-                .render_frame(
-                    self.ppu.frame_buffer(),
-                    self.ppu.frame_size(),
-                    self.target_fps(),
-                    self.render_options(),
-                )
-                .map_err(SnesError::Render)?;
+            // mmxrs patch: the widened frame when widescreen is on
+            let (fps, options) = (self.target_fps(), self.render_options());
+            match self.ppu.compose_wide() {
+                Some((buf, size)) => renderer.render_frame(buf, size, fps, options),
+                None => renderer.render_frame(self.ppu.frame_buffer(), self.ppu.frame_size(), fps, options),
+            }
+            .map_err(SnesError::Render)?;
 
             // Only persist SRAM if it's changed since the last write, and only check ~twice per
             // second because of the checksum calculation
@@ -630,7 +665,9 @@ impl EmulatorTrait for SnesEmulator {
     fn load_state(&mut self, mut state: Self::SaveState) {
         state.memory.take_rom_from(&mut self.memory);
         state.coprocessor_roms = mem::take(&mut self.coprocessor_roms);
+        let wide = self.ppu.take_wide(); // mmxrs patch: widescreen is a frontend setting
         *self = state;
+        self.ppu.put_wide(wide); // mmxrs patch
     }
 
     fn to_save_state(&self) -> Self::SaveState {

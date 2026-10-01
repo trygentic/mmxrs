@@ -470,7 +470,7 @@ impl Ppu {
     // mmxrs patch: a slot in `sprite_offset.slots` moves by (dx, dy); `None`
     // when that puts it off screen (Y >= 224 or above -64, X outside
     // -64..256), so it is not scanned rather than wrapping to the far edge.
-    fn offset_sprite(&self, oam_idx: u8, x: u16, y: u8) -> Option<(u16, u8)> {
+    pub(super) fn offset_sprite(&self, oam_idx: u8, x: u16, y: u8) -> Option<(u16, u8)> {
         let o = self.sprite_offset;
         if (o.slots >> oam_idx) & 1 == 0 || (o.dx == 0 && o.dy == 0) {
             return Some((x, y));

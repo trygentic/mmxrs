@@ -63,3 +63,13 @@ between `SnesEmulator::tick` calls (see `docs/traps.md`).
   `set_p2_tiles`. Encoded as nothing inside the emulator state
   (`P2TilesSlot`), so old save states still decode; mmx-core appends it to its
   save state (2026-09-30).
+
+- `snes-core/src/ppu/wide.rs` (new), `ppu.rs`, `ppu/sprites.rs`, `api.rs`:
+  display-only widescreen margins (`docs/widescreen.md`). `set_wide_margin`
+  makes every line render `margin` extra pixels each side into a separate
+  buffer (BG from VRAM or the host's margin map `set_margin_tiles`, OAM
+  sprites in the margins, the line's own colour math / brightness);
+  `SnesEmulator::tick` hands the widened frame to the renderer. `Wide`
+  encodes as nothing, clones empty, and survives `load_state`. Also
+  `bg_map_entry`, `line_regs` / `set_line_record`, `ppu_registers_debug`
+  (research), and `offset_sprite` made `pub(super)` (2026-10-01).
