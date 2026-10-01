@@ -65,6 +65,7 @@ pub enum HookId {
     SpawnColumn,
     SpawnRow,
     KindCount,
+    SpawnEntry,
     ObjGfxInit,
 }
 
@@ -77,7 +78,7 @@ use HookId::*;
 /// Indexed by `HookId as usize`. Signatures extracted from the PAL dump
 /// (unique in the whole ROM with their wildcards; `hooks::tests`).
 #[rustfmt::skip]
-pub const HOOKS: [Hook; 35] = [
+pub const HOOKS: [Hook; 36] = [
     hook(P2Update, "p2_update", 0x80D1EF, -4, "22 ?? ?? ?? 9C D4 0B AE 13 1F F0 05 20 ?? ?? 80"),
     hook(P2Physics, "p2_physics", 0x80D241, -4, "22 ?? ?? ?? 9C 1C 1F AE 19 1F D0 09 20 ?? ?? 20"),
     hook(P2Display, "p2_display", 0x809A86, -3, "20 ?? ?? AD 30 1F C9 80 D0 07 9C 30 1F A9 0F 85"),
@@ -117,6 +118,8 @@ pub const HOOKS: [Hook; 35] = [
     hook(SpawnRow, "spawn_row", 0x80DC9B, -3, "A9 0A 00 85 06 20 ?? ?? A5 00 18 69 20 00 85 00 C6 06 D0 F1"),
     // The `BEQ` (slot empty) of the same-kind count `$84:A1D5`.
     hook(KindCount, "kind_count", 0x84A1E0, -11, "C2 30 A0 00 00 A2 68 0E BD 00 00 F0 1A E2 20 BD 0A 00 C5 0A"),
+    // The column spawner's `BEQ` after a layout entry's section test (`CMP $1FFE`).
+    hook(SpawnEntry, "spawn_entry", 0x80DD18, -7, "B2 18 29 F8 CD FE 1F F0 02 B0 ?? C2 20 B2 18 29 0F 00 0A AA 22 ?? ?? ??"),
     // An enemy's graphics init (`+$18` VRAM slot, `+$11` palette from the
     // loaded-set tables `$7F:8200` / `$7F:8300`); not trapped, read only.
     hook(ObjGfxInit, "obj_gfx_init", 0x82827D, 0, "A9 02 85 01 A9 03 85 28 A5 0A 3A 0A AA BD ?? ?? 85 16 BD ?? ?? AA BF 00 82 7F 85 18"),

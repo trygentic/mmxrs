@@ -13,13 +13,14 @@ pub const WIDE_SPAWN_PX: u16 = WIDE_GAMEPLAY_PX.next_multiple_of(32);
 
 /// Register (or remove) the wide gameplay traps.
 pub(crate) fn register(game: &mut Game, on: bool) {
-    let traps: [(HookId, &'static str, crate::TrapFn); 6] = [
+    let traps: [(HookId, &'static str, crate::TrapFn); 7] = [
         (HookId::QueueTest, "wide_queue_test", window_x),
         (HookId::QueueTestBig, "wide_queue_test_big", window_x),
         (HookId::DespawnTest, "wide_despawn_test", window_x),
         (HookId::SpawnColumn, "wide_spawn_column", spawn_column),
         (HookId::SpawnRow, "wide_spawn_row", spawn_row),
         (HookId::KindCount, "wide_kind_count", kind_count),
+        (HookId::SpawnEntry, "wide_spawn_entry", spawn_entry),
     ];
     for (id, name, body) in traps {
         let a = game.hook(id);
@@ -83,20 +84,71 @@ fn window_x(g: &mut Game) {
 }
 
 /// `$80:DC56`: a horizontal column is about to be spawned at `$00` (`cam +
-/// 256` scrolling right, `cam` scrolling left). Move it out.
+/// 256` scrolling right, `cam` scrolling left). The ROM spawns its own
+/// column; the one [`WIDE_SPAWN_PX`] further out is spawned first, through
+/// the same spawner, isolated (so entries [`spawn_entry`] holds back there
+/// still come at the ROM's own column).
 fn spawn_column(g: &mut Game) {
     let (col, cam) = (word(g, 0), word(g, 0x1E4D));
-    let col = if col == cam { col.wrapping_sub(WIDE_SPAWN_PX) } else { col.wrapping_add(WIDE_SPAWN_PX) };
-    g.wram_mut()[..2].copy_from_slice(&col.to_le_bytes());
+    let wide = if col == cam { col.wrapping_sub(WIDE_SPAWN_PX) } else { col.wrapping_add(WIDE_SPAWN_PX) };
+    spawn_columns(g, &[wide]);
 }
 
-/// `$80:DC9B` (`STA $06`, A = 10 columns from `$00 = cam - 32`): the row
-/// sweep, widened both sides.
-fn spawn_row(g: &mut Game) {
-    let x0 = word(g, 0).wrapping_sub(WIDE_SPAWN_PX);
-    g.wram_mut()[..2].copy_from_slice(&x0.to_le_bytes());
+/// The ROM's column spawner (`$80:DCB0`, the `JSR` after the
+/// [`HookId::SpawnColumn`] hook) on each column X of `xs`, 288 px tall
+/// from `camY - 32`, isolated; DP `$00..$1F` and the registers put back.
+/// Entries already spawned are skipped by the ROM (their flag).
+fn spawn_columns(g: &mut Game, xs: &[u16]) {
+    let col_call = g.hook(HookId::SpawnColumn) + 0x0E;
+    if g.rom_read(col_call) != 0x20 {
+        return; // not the JSR $DCB0 the signature promises
+    }
+    let spawner = (col_call & 0xFF_0000) | u32::from(u16::from_le_bytes([g.rom_read(col_call + 1), g.rom_read(col_call + 2)]));
+    let cam_y = word(g, 0x1E50);
+    let saved = g.regs();
+    let scratch: [u8; 0x20] = g.wram()[..0x20].try_into().unwrap();
+    g.set_regs(Registers { d: 0, p: saved.p & !0x30, ..saved });
+    for &x in xs {
+        let w = g.wram_mut();
+        w[..2].copy_from_slice(&x.to_le_bytes());
+        w[2..4].copy_from_slice(&cam_y.wrapping_sub(32).to_le_bytes());
+        w[4..6].copy_from_slice(&0x120u16.to_le_bytes());
+        g.call_isolated_ret(spawner, TrapReturn::Rts);
+    }
+    g.wram_mut()[..0x20].copy_from_slice(&scratch);
+    g.set_regs(saved);
+}
+
+/// `$80:DD18` (Rev 1 `$80:DD43`): the column spawner's `BEQ` after a layout
+/// entry's section test (`LDA ($18); AND #$F8; CMP $1FFE; BEQ spawn; BCS
+/// next`; DB = `$85`, `($18)` the record, `$00` the column X). An enemy
+/// (record type 3, the `$0E68` table) in a column outside the ROM's own
+/// spawn window whose graphics set is not loaded yet is skipped the way the
+/// ROM skips a later section (Z clear, C set): its layout flag stays clear
+/// and the ROM spawns it at its own column, as without wide gameplay.
+///
+/// Why: an enemy's init (`$82:827D`) copies its VRAM slot (`+$18`) and
+/// palette (`+$11`) from the loaded-set tables `$7F:8200` / `$7F:8300`,
+/// indexed through the id table its `LDA $A5E4,X` reads (DB = `$86`), once.
+/// The sets load when the player crosses invisible trigger objects
+/// (`$83:FD7B`), which the ROM's spawn line never outruns; 160 px further
+/// out it does (Highway: the jumping mech and the Sky Claws by the trucks),
+/// and the enemy then lives with slot 0 and palette 0: X's streamed tiles in
+/// the wrong colours, for good.
+fn spawn_entry(g: &mut Game) {
     let mut r = g.regs();
-    r.a = r.a.wrapping_add(2 * WIDE_SPAWN_PX / 32);
+    if r.p & P_Z == 0 && r.p & P_C != 0 {
+        return; // the ROM skips it anyway
+    }
+    let rec = 0x85_0000 | u32::from(word(g, 0x18));
+    if g.rom_read(rec) & 0x0F != 3 {
+        return;
+    }
+    let rel = (word(g, 0) & !31).wrapping_sub(word(g, 0x1E4D)) as i16;
+    if (-63..=256).contains(&rel) || gfx_loaded(g, g.rom_read(rec + 3)) {
+        return;
+    }
+    r.p = (r.p & !P_Z) | P_C;
     g.set_regs(r);
 }
 
@@ -115,6 +167,16 @@ pub fn gfx_set(g: &Game, id: u8) -> u8 {
     g.rom_read(0x86_0000 | u32::from(table.wrapping_add(u16::from(x))))
 }
 
+/// `$80:DC9B` (`STA $06`, A = 10 columns from `$00 = cam - 32`): the row
+/// sweep, widened both sides.
+fn spawn_row(g: &mut Game) {
+    let x0 = word(g, 0).wrapping_sub(WIDE_SPAWN_PX);
+    g.wram_mut()[..2].copy_from_slice(&x0.to_le_bytes());
+    let mut r = g.regs();
+    r.a = r.a.wrapping_add(2 * WIDE_SPAWN_PX / 32);
+    g.set_regs(r);
+}
+
 /// Spawn the columns the moved spawn line skips when wide gameplay starts
 /// mid-stage (a save state made without it): the five 32-px columns each
 /// side between the ROM's window and the wide one, 288 px tall from `camY -
@@ -126,26 +188,9 @@ pub fn sweep(g: &mut Game) {
     if !(w[0xD2] == 4 && w[0xD3] != 0) {
         return;
     }
-    let col_call = g.hook(HookId::SpawnColumn) + 0x0E;
-    if g.rom_read(col_call) != 0x20 {
-        return; // not the JSR $DCB0 the signature promises
-    }
-    let spawner = (col_call & 0xFF_0000) | u32::from(u16::from_le_bytes([g.rom_read(col_call + 1), g.rom_read(col_call + 2)]));
-    let (cam, cam_y) = (word(g, 0x1E4D) & !31, word(g, 0x1E50));
-    let saved = g.regs();
-    let scratch: [u8; 8] = g.wram()[..8].try_into().unwrap();
-    g.set_regs(Registers { d: 0, p: saved.p & !0x30, ..saved });
-    for k in 1..=WIDE_SPAWN_PX / 32 {
-        for x in [cam.wrapping_add(256 + 32 * k), cam.wrapping_sub(32 * k)] {
-            let w = g.wram_mut();
-            w[..2].copy_from_slice(&x.to_le_bytes());
-            w[2..4].copy_from_slice(&cam_y.wrapping_sub(32).to_le_bytes());
-            w[4..6].copy_from_slice(&0x120u16.to_le_bytes());
-            g.call_isolated_ret(spawner, TrapReturn::Rts);
-        }
-    }
-    g.wram_mut()[..8].copy_from_slice(&scratch);
-    g.set_regs(saved);
+    let cam = word(g, 0x1E4D) & !31;
+    let xs: Vec<u16> = (1..=WIDE_SPAWN_PX / 32).flat_map(|k| [cam.wrapping_add(256 + 32 * k), cam.wrapping_sub(32 * k)]).collect();
+    spawn_columns(g, &xs);
 }
 
 /// `$84:A1E0` (`BEQ` past an empty slot in the same-kind count
