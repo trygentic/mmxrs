@@ -122,7 +122,7 @@ pub const HOOKS: [Hook; 36] = [
     hook(SpawnEntry, "spawn_entry", 0x80DD18, -7, "B2 18 29 F8 CD FE 1F F0 02 B0 ?? C2 20 B2 18 29 0F 00 0A AA 22 ?? ?? ??"),
     // An enemy's graphics init (`+$18` VRAM slot, `+$11` palette from the
     // loaded-set tables `$7F:8200` / `$7F:8300`); not trapped, read only.
-    hook(ObjGfxInit, "obj_gfx_init", 0x82827D, 0, "A9 02 85 01 A9 03 85 28 A5 0A 3A 0A AA BD ?? ?? 85 16 BD ?? ?? AA BF 00 82 7F 85 18"),
+    hook(ObjGfxInit, "obj_gfx_init", 0x82827D, 0, "A9 02 85 01 A9 03 85 28 A5 0A 3A 0A AA BD ?? ?? 85 16 BD ?? ?? AA BF 00"),
 ];
 
 impl HookId {
