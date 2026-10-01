@@ -194,6 +194,11 @@ impl Memory {
         self.cpu_open_bus
     }
 
+    // mmxrs patch: put back after a display-only isolated call (api.rs `CpuSnapshot`)
+    pub fn set_cpu_open_bus(&mut self, value: u8) {
+        self.cpu_open_bus = value;
+    }
+
     pub fn tick(&mut self, master_cycles_elapsed: u64) {
         self.cartridge.tick(master_cycles_elapsed);
     }

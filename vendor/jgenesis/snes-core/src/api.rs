@@ -8,7 +8,7 @@ use crate::memory::dma::{DmaStatus, DmaUnit};
 use crate::memory::{CpuInternalRegisters, Memory};
 use crate::ppu::{Ppu, PpuTickEffect};
 pub use crate::ppu::{P2_PAGE_TILES, P2_PAGE_WORDS, P2_PAGES, P2Tiles}; // mmxrs patch
-pub use crate::ppu::wide::{LineRegs, MARGIN_MAP_CELLS, MAX_WIDE_MARGIN}; // mmxrs patch
+pub use crate::ppu::wide::{LineRegs, MarginSprite, MARGIN_MAP_CELLS, MAX_WIDE_MARGIN}; // mmxrs patch
 use crate::{bus, ppu};
 use bincode::error::EncodeError;
 use bincode::{Decode, Encode};
@@ -147,6 +147,9 @@ pub(crate) struct LatchedInterrupts {
     pub nmi: bool,
     pub irq: bool,
 }
+
+/// mmxrs patch: see [`SnesEmulator::cpu_snapshot`].
+pub struct CpuSnapshot(Wdc65816, CpuInternalRegisters, u8);
 
 #[derive(Encode, Decode, PartialClone)]
 pub struct SnesEmulator {
@@ -379,6 +382,25 @@ impl SnesEmulator {
 
     pub fn set_line_record(&mut self, on: bool) {
         self.ppu.set_line_record(on);
+    }
+
+    /// Margin sprites for the next frames (live from the next OAM upload).
+    pub fn set_margin_sprites(&mut self, sprites: Vec<MarginSprite>) {
+        self.ppu.set_margin_sprites(sprites);
+    }
+
+    /// The CPU as a whole (registers and the between-cycle temporaries a
+    /// save state holds), the 5A22 registers and the open bus, so a
+    /// display-only isolated call leaves the save state as it found it.
+    #[must_use]
+    pub fn cpu_snapshot(&self) -> CpuSnapshot {
+        CpuSnapshot(self.main_cpu.clone(), self.cpu_registers.clone(), self.memory.cpu_open_bus())
+    }
+
+    pub fn restore_cpu_snapshot(&mut self, s: CpuSnapshot) {
+        self.main_cpu = s.0;
+        self.cpu_registers = s.1;
+        self.memory.set_cpu_open_bus(s.2);
     }
 
     #[must_use]

@@ -8,6 +8,8 @@
 //! scroll-space position mod 1024), from VRAM otherwise. Sprites anywhere in
 //! OAM whose pixels land in the margins are drawn there (no per-line limits).
 //! Windows and the colour window use the nearest edge pixel's (x 0 or 255).
+//! The host can add sprites that exist only here (`set_margin_sprites`:
+//! objects the game culled from OAM), drawn behind every OAM sprite.
 //! Not drawn in the margins: mode 7, mosaic, offset-per-tile (plain scroll),
 //! hi-res and interlaced frames (those frames are output unwidened).
 //!
@@ -38,6 +40,18 @@ pub struct LineRegs {
     pub backdrop: u16,
 }
 
+/// A sprite drawn in the margins only, at a signed X (no 9-bit wrap). OAM
+/// attribute byte as is (vhoopppN); `page` = a P2 shadow page instead of VRAM.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MarginSprite {
+    pub x: i16,
+    pub y: u8,
+    pub tile: u8,
+    pub attr: u8,
+    pub large: bool,
+    pub page: Option<u8>,
+}
+
 #[derive(Debug, Default)]
 pub struct Wide {
     pub margin: u16,
@@ -50,6 +64,10 @@ pub struct Wide {
     /// Record `LineRegs` per line (index `scanline - 1`).
     pub record: bool,
     pub lines: Vec<LineRegs>,
+    /// Margin sprites (live) and the host's next set, which goes live with
+    /// the game's next OAM upload like the P2 pages.
+    pub sprites: Vec<MarginSprite>,
+    pub next_sprites: Option<Vec<MarginSprite>>,
 }
 
 impl Clone for Wide {
@@ -90,6 +108,10 @@ impl Ppu {
                 t.copy_from_slice(&c[..MARGIN_MAP_CELLS * MARGIN_MAP_CELLS]);
             }
         }
+    }
+
+    pub fn set_margin_sprites(&mut self, sprites: Vec<MarginSprite>) {
+        self.wide.next_sprites = Some(sprites);
     }
 
     pub fn set_line_record(&mut self, on: bool) {
@@ -341,7 +363,8 @@ impl Ppu {
     /// Sprites are evaluated on the previous line, as the main path does.
     /// Position: OAM X as the hardware reads it (9-bit, >= 256 is negative),
     /// and an X in `256..256 + m` also counts as itself (the right margin).
-    /// Lower OAM index wins; no 32-sprite / 34-tile limits.
+    /// Lower OAM index wins; no 32-sprite / 34-tile limits. The host's margin
+    /// sprites go under all of OAM (earlier ones win among them).
     fn wide_obj_line(&self, scanline: u16, m: i32) -> Vec<Pixel> {
         let mut out = vec![Pixel::TRANSPARENT; 2 * m as usize];
         let r = &self.registers;
@@ -351,66 +374,93 @@ impl Ppu {
         let ev = scanline - 1;
         let (sw, sh) = r.obj_tile_size.small_size();
         let (lw, lh) = r.obj_tile_size.large_size();
-        let words = BitsPerPixel::OBJ.tile_size_words();
+        for s in self.wide.sprites.iter().rev() {
+            let (w, h) = if s.large { (lw, lh) } else { (sw, sh) };
+            let page = s.page.map(|p| usize::from(p & 3) * P2_PAGE_WORDS);
+            self.wide_obj(&mut out, m, ev, &[i32::from(s.x)], s.y, (w, h), s.tile, s.attr, page);
+        }
         for idx in (0..128u8).rev() {
             let [x_lsb, y] = self.oam_low[usize::from(idx) << 1].to_le_bytes();
             let [tile_lsb, attr] = self.oam_low[(usize::from(idx) << 1) + 1].to_le_bytes();
             let hi = self.oam_high[usize::from(idx >> 2)] >> (2 * (idx & 3));
-            let (w, h) = if hi.bit(1) { (lw, lh) } else { (sw, sh) };
+            let size = if hi.bit(1) { (lw, lh) } else { (sw, sh) };
             let Some((x9, y)) = self.offset_sprite(idx, u16::from_le_bytes([x_lsb, u8::from(hi.bit(0))]), y)
             else {
                 continue;
             };
-            if !line_overlaps_sprite(y, h, ev) {
-                continue;
-            }
-            let (x_flip, y_flip) = (attr.bit(6), attr.bit(7));
-            let line = (ev as u8).wrapping_sub(y) & ((h - 1) as u8);
-            let line = if y_flip { h as u8 - 1 - line } else { line };
             let hw = if x9 >= 256 { i32::from(x9) - 512 } else { i32::from(x9) };
-            let right = (x9 >= 256 && i32::from(x9) < 256 + m).then_some(i32::from(x9));
+            let xs: &[i32] =
+                if x9 >= 256 && i32::from(x9) < 256 + m { &[hw, i32::from(x9)] } else { &[hw] };
             let p2 = (self.p2_tiles.0.slots >> idx) & 1 != 0;
-            let p2_base = (((self.p2_tiles.0.page1 >> idx) & 1) | ((self.p2_tiles.0.page2 >> idx) & 1) << 1)
-                as usize
-                * P2_PAGE_WORDS;
-            let base_tile = u16::from_le_bytes([tile_lsb, u8::from(attr.bit(0))]);
-            for base in std::iter::once(hw).chain(right) {
-                for col in 0..i32::from(w) {
-                    let px = base + col;
-                    let slot = if (-m..0).contains(&px) {
-                        px + m
-                    } else if (256..256 + m).contains(&px) {
-                        px - 256 + m
-                    } else {
-                        continue;
-                    };
-                    let c = if x_flip { i32::from(w) - 1 - col } else { col } as u16;
-                    let mut t = base_tile;
-                    t = (t & !0xF) | (t.wrapping_add(c / 8) & 0xF);
-                    t = (t & !0xF0) | (t.wrapping_add(u16::from(line / 8) << 4) & 0xF0);
-                    let data = if p2 {
-                        let o = p2_base + usize::from((t & 0x3F) % P2_PAGE_TILES) * words as usize;
-                        &self.p2_tiles.0.page[o..o + words as usize]
-                    } else {
-                        let base = r.obj_tile_base_address
-                            .wrapping_add(u16::from(t.bit(8)) * (256 * words + r.obj_tile_gap_size));
-                        let a = (base.wrapping_add((t & 0xFF) * words) & VRAM_ADDRESS_MASK) as usize;
-                        &self.vram[a..a + words as usize]
-                    };
-                    let row = u16::from(line % 8);
-                    let bit = 7 - (c % 8) as u8;
-                    let mut color = 0_u8;
-                    for i in 0..2 {
-                        let word = data[(row + 8 * i) as usize];
-                        color |= u8::from(word.bit(bit)) << (2 * i);
-                        color |= u8::from(word.bit(bit + 8)) << (2 * i + 1);
-                    }
-                    if color != 0 {
-                        out[slot as usize] = Pixel { palette: (attr >> 1) & 7, color, priority: (attr >> 4) & 3 };
-                    }
+            let page = p2.then(|| {
+                (((self.p2_tiles.0.page1 >> idx) & 1) | ((self.p2_tiles.0.page2 >> idx) & 1) << 1) as usize
+                    * P2_PAGE_WORDS
+            });
+            self.wide_obj(&mut out, m, ev, xs, y, size, tile_lsb, attr, page);
+        }
+        out
+    }
+
+    /// One sprite's pixels on line `ev` at each X of `xs` into the margin
+    /// line `out`; `page` = offset of its P2 shadow page.
+    #[allow(clippy::too_many_arguments)]
+    fn wide_obj(
+        &self,
+        out: &mut [Pixel],
+        m: i32,
+        ev: u16,
+        xs: &[i32],
+        y: u8,
+        (w, h): (u16, u16),
+        tile_lsb: u8,
+        attr: u8,
+        page: Option<usize>,
+    ) {
+        if !line_overlaps_sprite(y, h, ev) {
+            return;
+        }
+        let r = &self.registers;
+        let words = BitsPerPixel::OBJ.tile_size_words();
+        let (x_flip, y_flip) = (attr.bit(6), attr.bit(7));
+        let line = (ev as u8).wrapping_sub(y) & ((h - 1) as u8);
+        let line = if y_flip { h as u8 - 1 - line } else { line };
+        let base_tile = u16::from_le_bytes([tile_lsb, u8::from(attr.bit(0))]);
+        for &base in xs {
+            for col in 0..i32::from(w) {
+                let px = base + col;
+                let slot = if (-m..0).contains(&px) {
+                    px + m
+                } else if (256..256 + m).contains(&px) {
+                    px - 256 + m
+                } else {
+                    continue;
+                };
+                let c = if x_flip { i32::from(w) - 1 - col } else { col } as u16;
+                let mut t = base_tile;
+                t = (t & !0xF) | (t.wrapping_add(c / 8) & 0xF);
+                t = (t & !0xF0) | (t.wrapping_add(u16::from(line / 8) << 4) & 0xF0);
+                let data = if let Some(p2_base) = page {
+                    let o = p2_base + usize::from((t & 0x3F) % P2_PAGE_TILES) * words as usize;
+                    &self.p2_tiles.0.page[o..o + words as usize]
+                } else {
+                    let base = r
+                        .obj_tile_base_address
+                        .wrapping_add(u16::from(t.bit(8)) * (256 * words + r.obj_tile_gap_size));
+                    let a = (base.wrapping_add((t & 0xFF) * words) & VRAM_ADDRESS_MASK) as usize;
+                    &self.vram[a..a + words as usize]
+                };
+                let row = u16::from(line % 8);
+                let bit = 7 - (c % 8) as u8;
+                let mut color = 0_u8;
+                for i in 0..2 {
+                    let word = data[(row + 8 * i) as usize];
+                    color |= u8::from(word.bit(bit)) << (2 * i);
+                    color |= u8::from(word.bit(bit + 8)) << (2 * i + 1);
+                }
+                if color != 0 {
+                    out[slot as usize] = Pixel { palette: (attr >> 1) & 7, color, priority: (attr >> 4) & 3 };
                 }
             }
         }
-        out
     }
 }

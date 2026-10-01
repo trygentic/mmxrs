@@ -1934,6 +1934,10 @@ impl Ppu {
         if self.p2_tiles.0.pending {
             self.p2_tiles.0.latch();
         }
+        // mmxrs patch: and the pending margin sprites (ppu::wide)
+        if let Some(m) = self.wide.next_sprites.take() {
+            self.wide.sprites = m;
+        }
 
         if self.in_active_display(self.state.scanline) {
             self.handle_active_display_oam_write(value);
