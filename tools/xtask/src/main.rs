@@ -118,6 +118,13 @@ fn game_scripted(args: &[String]) -> Game {
     if let Some(w) = flag(args, "--wide") {
         g.set_widescreen(mmx_core::Widescreen::parse(w).unwrap_or_else(|| die("--wide: off|16:10|16:9|21:9|N")));
     }
+    // `--wide-gameplay`: enemies spawn at the wide edges (docs/widescreen.md "Wide gameplay").
+    if args.iter().any(|a| a == "--wide-gameplay") {
+        g.set_wide_gameplay(true);
+        if flag(args, "--load").is_some() {
+            mmx_core::wide_gameplay::sweep(&mut g); // a state made without it
+        }
+    }
     // `--x3 PATH` (or MMX_X3_ROM): draw P2 as X3 Zero (docs/zero.md "Playing as Zero").
     if let Some(p) = flag(args, "--x3").map(PathBuf::from).or_else(|| std::env::var_os("MMX_X3_ROM").map(PathBuf::from)) {
         let rom = std::fs::read(&p).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
@@ -768,6 +775,9 @@ fn netsim(args: &[String]) -> i32 {
         .map_or(mmx_core::Timing::Auto, |t| mmx_core::Timing::parse(&t).unwrap_or_else(|| die("--timing: auto, ntsc or pal")));
     o.x3 = x3_set(args);
     o.zero = args.iter().any(|a| a == "--zero");
+    // `--wide-gameplay` on both peers, `--wide-gameplay-host` on the host only (refused).
+    let wide = args.iter().any(|a| a == "--wide-gameplay");
+    o.wide = [wide || args.iter().any(|a| a == "--wide-gameplay-host"), wide];
     o.smoothing = !args.iter().any(|a| a == "--no-smoothing");
     o.load = flag(args, "--load").map(|p| (p.to_string(), std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")))));
     let record = flag(args, "--record");

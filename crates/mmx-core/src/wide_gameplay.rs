@@ -99,6 +99,39 @@ fn spawn_row(g: &mut Game) {
     g.set_regs(r);
 }
 
+/// Spawn the columns the moved spawn line skips when wide gameplay starts
+/// mid-stage (a save state made without it): the five 32-px columns each
+/// side between the ROM's window and the wide one, 288 px tall from `camY -
+/// 32`, through the ROM's own column spawner (`$80:DCB0`, isolated). A stage
+/// entered with it on needs none (the entry's row sweep is widened). Only in
+/// a stage; entries already spawned are skipped by the ROM (their flag).
+pub fn sweep(g: &mut Game) {
+    let w = g.wram();
+    if !(w[0xD2] == 4 && w[0xD3] != 0) {
+        return;
+    }
+    let col_call = g.hook(HookId::SpawnColumn) + 0x0E;
+    if g.rom_read(col_call) != 0x20 {
+        return; // not the JSR $DCB0 the signature promises
+    }
+    let spawner = (col_call & 0xFF_0000) | u32::from(u16::from_le_bytes([g.rom_read(col_call + 1), g.rom_read(col_call + 2)]));
+    let (cam, cam_y) = (word(g, 0x1E4D) & !31, word(g, 0x1E50));
+    let saved = g.regs();
+    let scratch: [u8; 8] = g.wram()[..8].try_into().unwrap();
+    g.set_regs(Registers { d: 0, p: saved.p & !0x30, ..saved });
+    for k in 1..=WIDE_SPAWN_PX / 32 {
+        for x in [cam.wrapping_add(256 + 32 * k), cam.wrapping_sub(32 * k)] {
+            let w = g.wram_mut();
+            w[..2].copy_from_slice(&x.to_le_bytes());
+            w[2..4].copy_from_slice(&cam_y.wrapping_sub(32).to_le_bytes());
+            w[4..6].copy_from_slice(&0x120u16.to_le_bytes());
+            g.call_isolated_ret(spawner, TrapReturn::Rts);
+        }
+    }
+    g.wram_mut()[..8].copy_from_slice(&scratch);
+    g.set_regs(saved);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

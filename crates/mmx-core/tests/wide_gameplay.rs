@@ -173,20 +173,24 @@ pub fn spawn_xs(g: &mut Game) -> (Vec<i32>, i32) {
     (first, left)
 }
 
-/// With it on, walking right on hw-a: objects appear out past the 21:9
-/// picture on the right and live far out on the left; off, they appear near
-/// the 256-px edge.
+/// With it on (and the margins' columns swept after loading a state made
+/// without it), walking right on hw-a and highway-mid: objects appear out
+/// past the 21:9 picture on the right and live far out on the left; off,
+/// they appear near the 256-px edge.
 #[test]
 fn enemies_spawn_at_the_wide_edges() {
-    let (Some(mut off), Some(mut on)) = (game("hw-a"), game("hw-a")) else {
-        return eprintln!("MMX_ROM not set; skipping");
-    };
-    on.set_wide_gameplay(true);
-    let (f_off, l_off) = spawn_xs(&mut off);
-    let (f_on, l_on) = spawn_xs(&mut on);
-    eprintln!("off: first X {f_off:?}, leftmost {l_off}\non: first X {f_on:?}, leftmost {l_on}");
-    let far = |v: &[i32], lo: i32| v.iter().filter(|&&x| x >= lo).count();
-    assert!(far(&f_on, 256 + 136) > 0, "on: nothing spawned past the 21:9 edge");
-    assert_eq!(far(&f_off, 256 + 64), 0, "off: something spawned far out");
-    assert!(l_on < -64 - 64, "on: nothing lived far out on the left ({l_on})");
+    for st in ["hw-a", "highway-mid"] {
+        let (Some(mut off), Some(mut on)) = (game(st), game(st)) else {
+            return eprintln!("MMX_ROM not set; skipping");
+        };
+        on.set_wide_gameplay(true);
+        mmx_core::wide_gameplay::sweep(&mut on);
+        let (f_off, l_off) = spawn_xs(&mut off);
+        let (f_on, l_on) = spawn_xs(&mut on);
+        eprintln!("{st} off: first X {f_off:?}, leftmost {l_off}\n{st} on: first X {f_on:?}, leftmost {l_on}");
+        let far = |v: &[i32], lo: i32| v.iter().filter(|&&x| x >= lo).count();
+        assert!(far(&f_on, 256 + 136) > 0, "{st} on: nothing spawned past the 21:9 edge");
+        assert_eq!(far(&f_off, 256 + 64), 0, "{st} off: something spawned far out");
+        assert!(l_on < -64 - 64, "{st} on: nothing lived far out on the left ({l_on})");
+    }
 }
