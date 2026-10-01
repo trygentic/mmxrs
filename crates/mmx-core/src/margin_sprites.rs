@@ -44,6 +44,8 @@ pub struct MarginState {
     seen: Vec<u8>,
     /// What the last pass handed the PPU (tests, `xtask`).
     pub last: Vec<MarginSprite>,
+    /// P2's HP bar slots this step (coop_hud), for widescreen::update_margin_tiles.
+    pub(crate) p2_bar: u128,
 }
 
 /// Run from the display hook (`coop::p2_display`'s trap) every gameplay frame.

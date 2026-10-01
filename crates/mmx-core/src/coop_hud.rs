@@ -273,6 +273,9 @@ fn hud(game: &mut Game) {
     if put_icon(game) {
         game.add_p2_tile_slots(1 << start | u128::from(marker.is_some()) << (start + BAR_SLOTS), ICON_PAGE);
     }
+    // Widescreen: the bar goes to the wide picture's left edge with X's (the
+    // marker stays where P2 fell).
+    game.margin.p2_bar = crate::display::slots(start, start + BAR_SLOTS);
     let w = game.wram_mut();
     // All 8 large (bit 1), X bit 8 clear.
     w[ix(OAM_HI) + start / 4..][..2].fill(0xAA);

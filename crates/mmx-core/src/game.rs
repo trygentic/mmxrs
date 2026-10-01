@@ -557,6 +557,18 @@ impl Game {
         self.emu.set_margin_sprites(sprites);
     }
 
+    /// The PPU's widescreen HUD slots (left, right) from the next OAM upload
+    /// on (display only, docs/widescreen.md "HUD"); set after every step
+    /// with a margin (`widescreen::update_margin_tiles`), no effect without.
+    pub fn set_hud_shift(&mut self, left: u128, right: u128) {
+        self.emu.set_hud_shift(left, right);
+    }
+
+    /// The HUD slots the PPU shifts now (left, right).
+    pub fn hud_shift(&self) -> (u128, u128) {
+        self.emu.hud_shift()
+    }
+
     pub fn wide_margin(&self) -> u16 {
         self.emu.wide_margin()
     }

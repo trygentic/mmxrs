@@ -106,6 +106,22 @@ pub fn agreement(g: &Game, bg: usize) -> u32 {
     ok * 100 / n
 }
 
+/// `$1F0E`: the boss object (0 = none); with one the OAM build starts at
+/// slot `$18` and slots 16..23 are the boss bar.
+const BOSS: u32 = 0x7E1F0E;
+
+/// The HUD's OAM slots in a stage, shifted to the wide picture's edges by
+/// the margin (so each keeps its inset: X 8 / 24 from the left edge, the
+/// boss bar's 232 = 24 from the right). Slots 0..15 are X's bar (0..6, slot
+/// 0 the icon, a Zero P1's Z too) and the weapon bar (7..15): the OAM build
+/// never writes them (cursor from `$10`), the pause menu leaves them hidden
+/// (`Y $E0`). 16..23 are the boss bar while `$1F0E` names a boss. P2's bar:
+/// the slots coop_hud put it in this step. Pure.
+pub fn hud_slots(wram: &[u8; 0x20000], p2_bar: u128) -> (u128, u128) {
+    let boss = wram[ram::wram_index(BOSS)] | wram[ram::wram_index(BOSS + 1)] != 0;
+    (crate::display::slots(0, 16) | p2_bar, if boss { crate::display::slots(16, 24) } else { 0 })
+}
+
 /// After each step with widescreen on: give the PPU the stage layout's
 /// tiles around the camera for BG1 and BG2 (keyed by level position mod
 /// 1024, which is BG scroll space: MMX scrolls each BG by its camera), so
@@ -120,6 +136,10 @@ pub fn update_margin_tiles(g: &mut Game) {
     if !in_stage {
         g.set_margin_sprites(Vec::new()); // no stage, no margin objects
     }
+    // The HUD to the wide edges (the OAM this step built goes up next).
+    let p2_bar = std::mem::take(&mut g.margin.p2_bar);
+    let (l, r) = if in_stage { hud_slots(g.wram(), p2_bar) } else { (0, 0) };
+    g.set_hud_shift(l, r);
     for bg in 0..2 {
         if !in_stage || agreement(g, bg) < 90 {
             g.set_margin_tiles(bg, None);
