@@ -635,6 +635,49 @@ come at him from further and in larger numbers.
   `slot` only on hw-c (mech `$29`, Sky Claw `$0F`); `stale` on hw-c (two
   mechs sharing slot `$60`, the left-behind one in the left margin).
   `wide_spawns_get_their_graphics` (test, below) pins it.
+
+  Early loading (`gfx_trigger`), same 9 states, 900 frames each, wide
+  gameplay on, configs P1 X 16:9 / P1 Zero 16:9 / P1 X 21:9 x scripts
+  walk+jump+shoot (right, B 20 of 45 frames, Y 3 of 40) / the same with
+  P2 (X3 Zero) given P1's pad / idle, 81 runs, before (`4d548f5`) and
+  after: garbage 0 / 0. `late` only on hw-c (23-28 before, 30-34 after,
+  all the mech `$29`: one pass drawn the NMI before the ROM's own list-2
+  upload overwrites its tiles). A queued object whose tiles the current
+  list has given away (`obj_overwritten`) outside the ROM's window: one
+  frame per hw-c walk (the mech, the frame the ROM's own list 2 starts;
+  the window tests drop it the next frame). Netplay: `xtask netsim` (PAL
+  hw-a and Rev 1 hw-c holding right, 2400 frames, `--wide-gameplay`,
+  rtt 120, loss 2, prediction 12): no desync, 41 checks ok per peer,
+  identical to the plain run. Flag off: `xtask verify --frames 2400
+  --coop-off --tap 200,400,600,800,1000 --hold 0100` OK on both dumps.
+
+  First seen (camera-relative X of each enemy the first frame it is
+  queued; Rev 1, 1500 frames walking right with jumps, wide gameplay,
+  `before` = `4d548f5`). The ROM's own spawn column gives 253-284; the
+  wide one 412-432:
+
+  | state | enemy | before | after |
+  |---|---|---|---|
+  | hw-c (start) | mech `$29` | 270 | 421 |
+  | hw-c | id `$15` | 421 | 421 |
+  | hw-c | Sky Claws `$0F` | 413 422 281 261 253 253 252 | 413 422 281 261 269 253 422 269 |
+  | hw-a | mech | 421 421 | 421 421 |
+  | hw-a | Sky Claws | (55 5) 422 269 268 | same |
+  | hw-d (trucks) | Sky Claws | (219 199) 413 253 253 420 269 | same |
+  | hw-e | Sky Claws | (25 143) 422 269 268 | same |
+
+  (In brackets: alive at the state load.) Still at the ROM's line: the
+  first Sky Claws of hw-c (1096-1120: list 2 waits for the mech, which
+  holds slot `$60` on screen until X 896 unless killed; with it killed,
+  `target/widescreen/early-gfx/hw-c-skyclaw-*`, list 2 loads at 736) and
+  every later Sky Claw at 253-272: not graphics but the Sky Claw's own cap
+  (`$82:96AF` deletes a new one while 2 are alive in the ROM's window; its
+  entry is cleared, the ROM's column respawns it later).
+  PNG strips (`target/widescreen/early-gfx/`, 16:9, Rev 1, left column
+  before, right after, `NAME-before-after.png`): `hw-c-mech` (frames
+  200-300/20: the mech walks in from the right margin, before it is not
+  there yet), `hw-c-skyclaw` (600-800/25, mech killed at frame 400: the
+  Sky Claws by the trucks enter further right), `hw-d-skyclaw` (60-400/40).
 - Wide gameplay (`cargo test -p mmx-core --test wide_gameplay`, ROM-gated;
   `MMX_STATES=states/usa11` with the Rev 1 ROM): `window_test_m0_is_register_exact`
   (observe-only traps on the three X `BCS`s, ROM untouched, 600 frames of
@@ -649,7 +692,9 @@ come at him from further and in larger numbers.
   game that never had it); `enemies_spawn_at_the_wide_edges` (the table
   above); `wide_spawns_get_their_graphics` (PAL highway-start / Rev 1 hw-c,
   16:9, 900 frames: every queued enemy's `+$18` is its set's slot, the
-  residency check finds no garbage). Flag off against main (`8429c79`), 2400 frames, the final save
+  residency check finds no garbage); `sets_load_ahead_of_the_wide_spawns`
+  (PAL highway-start / Rev 1 hw-c, walking right with jumps: the mech
+  first appears at X > 400; 270 before `gfx_trigger`). Flag off against main (`8429c79`), 2400 frames, the final save
   state byte for byte and every status line: power-on with taps (PAL and Rev
   1), hw-a `--coop`, hw-a at 21:9: identical. `xtask verify --frames 2400
   --coop-off --tap 200,400,600,800,1000 --hold 0100`: OK on both dumps;
