@@ -301,3 +301,31 @@ fn rom_header_checks() {
         Err(RomError::TooSmall(100))
     ));
 }
+
+/// Loop iterations over 10 frames (after one to settle) at overclock `o`.
+fn loops_per_10(o: mmx_core::Overclock) -> u32 {
+    let mut g = game();
+    g.set_overclock(o);
+    step(&mut g, 1);
+    let a = word(&g, LOOP_CTR);
+    step(&mut g, 10);
+    u32::from(word(&g, LOOP_CTR).wrapping_sub(a))
+}
+
+#[test]
+fn overclock_runs_more_instructions_per_frame() {
+    use mmx_core::Overclock;
+    let off = loops_per_10(Overclock::Off);
+    let (x15, x2) = (loops_per_10(Overclock::X1_5), loops_per_10(Overclock::X2));
+    let r = |n: u32| f64::from(n) / f64::from(off);
+    eprintln!("loops per 10 frames: off {off}, 1.5x {x15}, 2x {x2}");
+    // The loop is ROM and WRAM accesses (8 -> 5 / 4 master cycles) and fast
+    // cycles (6 -> 4 / 3); the 40-cycle WRAM refresh per line stays.
+    assert!((1.45..1.7).contains(&r(x15)), "1.5x: {off} -> {x15}");
+    assert!((1.9..2.05).contains(&r(x2)), "2x: {off} -> {x2}");
+    // Same frame rate: one step is still one frame.
+    let mut g = game();
+    g.set_overclock(Overclock::X2);
+    step(&mut g, 3);
+    assert_eq!(g.frame_count(), 3);
+}

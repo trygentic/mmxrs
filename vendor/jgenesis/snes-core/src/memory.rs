@@ -902,7 +902,8 @@ impl CpuInternalRegisters {
 
     fn update_irq_line(&mut self, ppu: &Ppu) {
         let ppu_htime = ppu.htime_for_irq();
-        debug_assert_ne!(ppu_htime, self.irq.last_ppu_htime);
+        // mmxrs patch: an overclocked CPU cycle (3 master cycles) can stay
+        // within one dot; then no H edge is crossed, as the checks below do.
 
         let check_h = || {
             if ppu_htime < self.irq.last_ppu_htime {
