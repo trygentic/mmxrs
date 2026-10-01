@@ -41,6 +41,12 @@ URL: `Emu::set_widescreen(name)`, display only, so it can change during an
 online session and differ between the peers. The canvas takes the frame's
 size and aspect (square pixels, 3x, capped by the window). docs/widescreen.md.
 
+The *spawn enemies at the wide edges* checkbox (or `?widegame=1`):
+`Emu::set_wide_gameplay(on)`, docs/widescreen.md "Wide gameplay". It changes
+the game: set it before connecting (it is fixed while a session exists) and
+both peers need the same, or the handshake refuses. Ticked mid-stage, the
+margins' columns are spawned at once.
+
 ## Keys (`KeyboardEvent.code`, table in `src/lib.rs`)
 
 | | D-pad | B | Y | A | X | L | R | Start | Select |
