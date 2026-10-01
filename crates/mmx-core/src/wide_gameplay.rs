@@ -13,7 +13,7 @@ pub const WIDE_SPAWN_PX: u16 = WIDE_GAMEPLAY_PX.next_multiple_of(32);
 
 /// Register (or remove) the wide gameplay traps.
 pub(crate) fn register(game: &mut Game, on: bool) {
-    let traps: [(HookId, &'static str, crate::TrapFn); 7] = [
+    let traps: [(HookId, &'static str, crate::TrapFn); 8] = [
         (HookId::QueueTest, "wide_queue_test", window_x),
         (HookId::QueueTestBig, "wide_queue_test_big", window_x),
         (HookId::DespawnTest, "wide_despawn_test", window_x),
@@ -21,6 +21,7 @@ pub(crate) fn register(game: &mut Game, on: bool) {
         (HookId::SpawnRow, "wide_spawn_row", spawn_row),
         (HookId::KindCount, "wide_kind_count", kind_count),
         (HookId::SpawnEntry, "wide_spawn_entry", spawn_entry),
+        (HookId::GfxTrigger, "wide_gfx_trigger", gfx_trigger),
     ];
     for (id, name, body) in traps {
         let a = game.hook(id);
@@ -71,9 +72,14 @@ pub fn widen(r: Registers, add: u16, width: u16, m: u16) -> Option<Registers> {
 
 /// Observe trap on a window test's X `BCS`: the X compare redone with the
 /// window `m` wider per side; the ROM's branch then goes the widened way.
-/// Cycle-exact (no instruction skipped), a no-op at `m = 0`.
+/// Cycle-exact (no instruction skipped), a no-op at `m = 0`. An enemy whose
+/// tiles were given to another set keeps the ROM's window (C set: the ROM
+/// says outside), so it is culled and removed where the ROM would.
 fn window_x(g: &mut Game) {
     let r = g.regs();
+    if r.p & P_C != 0 && obj_overwritten(g, usize::from(r.d)) {
+        return;
+    }
     let entry = r.pbr_pc() - 0x0F;
     let m = if r.pbr_pc() == g.hook(HookId::DespawnTest) { WIDE_SPAWN_PX } else { WIDE_GAMEPLAY_PX };
     let add = u16::from_le_bytes([g.rom_read(entry + 0x0A), g.rom_read(entry + 0x0B)]);
@@ -154,9 +160,60 @@ fn spawn_entry(g: &mut Game) {
 
 /// Whether the graphics set of enemy `id` is loaded: `$7F:8300[set] != 0`
 /// (the loader stores the palette `| $20`; the fixed sets have theirs too),
-/// with `set` as `$82:827D` finds it (8-bit index: `(id - 1) * 2 + 1`).
+/// with `set` as `$82:827D` finds it (8-bit index: `(id - 1) * 2 + 1`), and
+/// not since replaced in VRAM by another set of the current list (the
+/// tables are never cleared: an evicted set still reads as loaded).
 pub fn gfx_loaded(g: &Game, id: u8) -> bool {
-    g.wram()[0x1_8300 + usize::from(gfx_set(g, id))] != 0
+    let set = gfx_set(g, id);
+    let (slot, attr) = (g.wram()[0x1_8200 + usize::from(set)], g.wram()[0x1_8300 + usize::from(set)]);
+    attr != 0 && !clashes(g, &gfx_list(g, g.wram()[0x1F08]), Some(set), slot, attr, true)
+}
+
+/// Whether the loader's list `list` puts another set's tiles where a user of
+/// `set` (unknown: `None`) at `slot` (`+$18`, page from `attr` bit 0) draws
+/// from, or (`pal`) another set's palette in its row (`attr` bits 1-3;
+/// unless its own set is in the list too: made to go together). Only sets
+/// the loader manages (`attr & $20`). An unknown set spans one tile.
+fn clashes(g: &Game, list: &[(u8, u16, u8)], set: Option<u8>, slot: u8, attr: u8, pal: bool) -> bool {
+    if attr & 0x20 == 0 {
+        return false; // fixed graphics, or none
+    }
+    let w = g.wram();
+    let tile = u16::from(slot) | u16::from(attr & 1) << 8;
+    let end = tile + set.map_or(1, |s| gfx_tiles(g, s));
+    let pal = pal && !list.iter().any(|&(s, ..)| set == Some(s));
+    list.iter().any(|&(s, vram, row)| {
+        let t = vram >> 4;
+        let at = |s: u8| u16::from(w[0x1_8200 + usize::from(s)]) | u16::from(w[0x1_8300 + usize::from(s)] & 1) << 8;
+        let same = t == tile && set.map_or(at(s) == tile, |x| x == s);
+        !same && (t < end && tile < t + gfx_tiles(g, s) || pal && row == attr >> 1 & 7)
+    })
+}
+
+/// What object `o` (`$0E68..$1D08`) draws from the loader's sets: (set,
+/// slot, attr). Enemies (`$0E68` table) know their set (from the id); not
+/// initialised yet (`$82:827D` runs on the first update), what they will copy.
+fn obj_gfx(g: &Game, o: usize) -> (Option<u8>, u8, u8) {
+    let w = g.wram();
+    if o >= 0x1228 {
+        return (None, w[o + 0x18], w[o + 0x11]);
+    }
+    let set = gfx_set(g, w[o + 0x0A]);
+    match w[o + 0x11] {
+        0 => (Some(set), w[0x1_8200 + usize::from(set)], w[0x1_8300 + usize::from(set)]),
+        a => (Some(set), w[o + 0x18], a),
+    }
+}
+
+/// The object at `o` draws from tiles (or a palette row) the loader has since
+/// given to another set. The ROM's layout has it gone by then (its window),
+/// so the window tests give it the ROM's window back.
+pub fn obj_overwritten(g: &Game, o: usize) -> bool {
+    if !(0x0E68..0x1D08).contains(&o) || g.wram()[o] == 0 {
+        return false;
+    }
+    let (set, slot, attr) = obj_gfx(g, o);
+    clashes(g, &gfx_list(g, g.wram()[0x1F08]), set, slot, attr, true)
 }
 
 /// The graphics set of enemy `id` (`$82:827D`'s `LDA $A5E5,X`, DB = `$86`).
@@ -165,6 +222,109 @@ pub fn gfx_set(g: &Game, id: u8) -> u8 {
     let table = u16::from_le_bytes([g.rom_read(init + 0x0E), g.rom_read(init + 0x0F)]);
     let x = id.wrapping_sub(1).wrapping_mul(2).wrapping_add(1);
     g.rom_read(0x86_0000 | u32::from(table.wrapping_add(u16::from(x))))
+}
+
+/// `$83:FDE3` (the `RTS` of the trigger objects' player test `$83:FDD3`:
+/// A = the player's X, P from `CMP` against the trigger's X, D = the
+/// trigger): a graphics-set trigger (id `$15`, X) fires as if the player
+/// were [`WIDE_SPAWN_PX`] further right, so a set is in by the time the wide
+/// spawn line reaches its enemies, as the ROM's is by its own line. Only N
+/// (the callers' `BPL` / `BMI`) changes.
+///
+/// - behind (`$02 = 2`, the `BMI` at `$FDC3` next): "ahead" once
+///   `x + 160 >= tx`, unless that is early (`x < tx`) and [`early_ok`]
+///   refuses; refused, it asks again next frame. An early fire sets `+$0F`
+///   (free in these objects; their removal clears it).
+/// - ahead (`$02 = 0`, the `BPL` at `$FDAE`): with `+$0F` set, "behind"
+///   once `x + 160 < tx` (backed out of the early band: the previous list
+///   is reloaded), and `+$0F` is cleared once `x >= tx` (the ROM's own
+///   state from then on). Without it, the ROM's test: walking back left
+///   reloads where the ROM does.
+/// - init (`BPL` at `$FD9C`): the ROM's test; `+$0F` cleared.
+fn gfx_trigger(g: &mut Game) {
+    let mut r = g.regs();
+    let d = usize::from(r.d);
+    if r.x & 0xFF != 5 || g.wram()[d + 0x0A] != 0x15 {
+        return; // a Y trigger, or not the graphics loader's
+    }
+    let ret = (r.pbr_pc() & 0xFF_0000) | u32::from(word(g, usize::from(r.s) + 1).wrapping_add(1));
+    let (px, tx) = (r.a, word(g, d + 5));
+    let ahead_rom = px.wrapping_sub(tx) & 0x8000 == 0;
+    let ahead_wide = px.wrapping_add(WIDE_SPAWN_PX).wrapping_sub(tx) & 0x8000 == 0;
+    let ahead = match (g.rom_read(ret), g.rom_read(ret + 1)) {
+        (0x30, _) if !ahead_rom && ahead_wide && early_ok(g, g.wram()[d + 0x0B] & 0x0F) => {
+            g.wram_mut()[d + 0x0F] = 1;
+            true
+        }
+        (0x10, 0x0F) if g.wram()[d + 0x0F] != 0 => {
+            if ahead_rom || !ahead_wide {
+                g.wram_mut()[d + 0x0F] = 0;
+            }
+            ahead_wide
+        }
+        (0x10, 0x04) => {
+            g.wram_mut()[d + 0x0F] = 0;
+            return;
+        }
+        _ => return,
+    };
+    r.p = (r.p & !P_N) | if ahead { 0 } else { P_N };
+    g.set_regs(r);
+}
+
+/// Graphics-set list `idx` of the current stage (`$1F7A`), as the loader
+/// thread reads it: (set, VRAM word address, OBJ palette) per entry.
+fn gfx_list(g: &Game, idx: u8) -> Vec<(u8, u16, u8)> {
+    let op = g.hook(HookId::GfxLoader) + 0x1E; // `LDA $ACEE,X`, DB = $86
+    let tbl = u16::from_le_bytes([g.rom_read(op), g.rom_read(op + 1)]);
+    let rd = |o: u16| g.rom_read(0x86_0000 | u32::from(tbl.wrapping_add(o)));
+    let r16 = |o: u16| u16::from_le_bytes([rd(o), rd(o.wrapping_add(1))]);
+    let base = r16(u16::from(g.wram()[0x1F7A]) * 2);
+    let mut e = r16(base.wrapping_add(u16::from(idx) * 2));
+    let mut out = Vec::new();
+    while rd(e) != 0xFF && out.len() < 16 {
+        out.push((rd(e), r16(e.wrapping_add(1)), rd(e.wrapping_add(5)) >> 4 & 7));
+        e = e.wrapping_add(6);
+    }
+    out
+}
+
+/// Size of graphics set `set` in 8x8 tiles (the decompressor's byte count / 32).
+fn gfx_tiles(g: &Game, set: u8) -> u16 {
+    let op = g.hook(HookId::GfxDecomp) + 0x1B; // `LDA $F6F7,Y`, Y = set * 5, DB = $86
+    let a = u16::from_le_bytes([g.rom_read(op), g.rom_read(op + 1)]).wrapping_add(u16::from(set) * 5);
+    let rd = |o: u16| g.rom_read(0x86_0000 | u32::from(a.wrapping_add(o)));
+    u16::from_le_bytes([rd(0), rd(1)]) / 32
+}
+
+/// Whether list `idx` may load now, ahead of the ROM: the loader thread
+/// (`$0040`) is idle, no set goes below VRAM `$1000` (OBJ page 0: the
+/// player's, shots' and items' tiles), and no object in use has tiles or a
+/// palette row that the list gives to another set.
+fn early_ok(g: &Game, idx: u8) -> bool {
+    let w = g.wram();
+    if w[0x40] != 0 {
+        return false;
+    }
+    let list = gfx_list(g, idx);
+    if list.iter().any(|&(_, vram, _)| vram < 0x1000) {
+        return false;
+    }
+    // (first, count, stride): enemies, items / enemy shots, `$1628` objects, effects.
+    let tables = [(0x0E68, 15, 0x40), (0x1228, 8, 0x40), (0x1628, 16, 0x30), (0x1928, 31, 0x20)];
+    let mut objs = tables.into_iter().flat_map(|(first, n, stride)| (0..n).map(move |k| first + k * stride));
+    // In use: inside the ROM's own object window (X -64..320, `$82:806E`),
+    // or an enemy about to copy its set's slot. One further out exists only
+    // with wide gameplay; overwritten, it gets the ROM's window back
+    // ([`window_x`]) and goes as it would have without wide gameplay.
+    let cam = word(g, 0x1E4D);
+    let in_use = |o: usize| w[o] != 0 && (word(g, o + 5).wrapping_sub(cam).wrapping_add(64) < 384 || o < 0x1228 && w[o + 0x11] == 0);
+    !objs.any(|o| {
+        in_use(o) && !obj_overwritten(g, o) && {
+            let (set, slot, attr) = obj_gfx(g, o);
+            clashes(g, &list, set, slot, attr, true)
+        }
+    })
 }
 
 /// `$80:DC9B` (`STA $06`, A = 10 columns from `$00 = cam - 32`): the row
