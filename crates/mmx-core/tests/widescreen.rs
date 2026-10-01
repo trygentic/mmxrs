@@ -1,7 +1,7 @@
 //! Widescreen (docs/widescreen.md). Skips unless `MMX_ROM` is set.
 
 use mmx_core::netgame::{net_checksum, session_game};
-use mmx_core::widescreen::{agreement, camera, layout_entry};
+use mmx_core::widescreen::{agreement, camera, hud_slots, layout_entry};
 use mmx_core::{Game, Pads, Timing, Widescreen};
 
 fn game(state: &str) -> Option<Game> {
@@ -53,14 +53,20 @@ fn widescreen_display_only(st: &str) {
     assert_eq!(a.oam(), b.oam());
     assert_eq!(a.cgram(), b.cgram());
     assert_eq!(a.vram()[..], b.vram()[..]);
-    assert_eq!(a.save_state(), b.save_state());
     let (pa, wa, ha) = a.frame();
     let (pb, wb, hb) = b.frame();
     assert_eq!((wa, ha, wb, hb), (256, 224, 528, 224));
-    // The centre of the wide frame is the normal frame.
+    // The centre of the wide frame is the normal frame, but for the HUD,
+    // which moved to the wide edges.
+    let hud = hud_boxes(&b);
+    assert!(hud.len() >= 4, "{st}: HUD slots {hud:?}");
     for y in 0..224 {
-        assert_eq!(pa[y * 256..(y + 1) * 256], pb[y * 528 + 136..y * 528 + 392], "line {y}");
+        for x in (0..256).filter(|&x| !hud.iter().any(|&(hx, hy)| (hx..hx + 16).contains(&x) && (hy..hy + 17).contains(&y))) {
+            assert_eq!(pa[y * 256 + x], pb[y * 528 + 136 + x], "{st}: pixel ({x},{y})");
+        }
     }
+    same_state_unwidened(&mut a, &mut b);
+    b.set_widescreen(Widescreen::W21_9);
     // Survives a state load; off again gives the 256-px frame.
     let s = a.save_state();
     b.load_state(&s).unwrap();
@@ -115,8 +121,74 @@ fn margin_sprites_are_display_only() {
         assert!(left > 0 && right > 0, "flags {flags}: margin sprites left {left} right {right}");
         assert_eq!(a.wram()[..], b.wram()[..]);
         assert_eq!(a.oam(), b.oam());
-        assert_eq!(a.save_state(), b.save_state());
+        same_state_unwidened(&mut a, &mut b);
         eprintln!("flags {flags}: {left} sprite-frames in the left margin, {right} in the right");
+    }
+}
+
+/// The save state holds the PPU's last picture and its sprite evaluation,
+/// which the HUD shift changes (the HUD is not in the centre; STAT77's
+/// overflow flags, which MMX never reads): one frame with `b`'s widescreen
+/// off and the states are equal again.
+fn same_state_unwidened(a: &mut Game, b: &mut Game) {
+    b.set_widescreen(Widescreen::OFF);
+    a.step(Pads::default());
+    b.step(Pads::default());
+    assert_eq!(a.save_state(), b.save_state());
+}
+
+/// Visible shifted HUD sprites (16x16) at their OAM position (`(x, y)`).
+fn hud_boxes(g: &Game) -> Vec<(usize, usize)> {
+    let (l, r) = g.hud_shift();
+    let oam = g.oam();
+    (0..128)
+        .filter(|&k| (l | r) >> k & 1 != 0 && oam[4 * k + 1] < 224 && oam[0x200 + k / 4] >> (2 * (k % 4)) & 1 == 0)
+        .map(|k| (usize::from(oam[4 * k]), usize::from(oam[4 * k + 1])))
+        .collect()
+}
+
+/// The HUD shift (docs/widescreen.md "HUD"): without a margin the PPU
+/// ignores it (hw-spiky with the weapon bar, hw-bee2 with a boss bar: every
+/// frame pixel-identical with the masks set vs not); at 21:9 X's icon is
+/// drawn at X 8 of the wide frame, 8 px in from its new left edge.
+#[test]
+fn hud_shift_is_display_only() {
+    for (st, pokes) in [("hw-spiky", &[(0x0BDB, 2), (0x1F12, 0)][..]), ("hw-bee2", &[(0x1F0E, 0x68), (0x1F0F, 0x0E)][..])] {
+        let (Some(mut a), Some(mut b), Some(mut c)) = (game(st), game(st), game(st)) else {
+            return eprintln!("MMX_ROM not set; skipping");
+        };
+        c.set_widescreen(Widescreen::W21_9);
+        let mut moved = false;
+        for f in 0..90 {
+            for g in [&mut a, &mut b, &mut c] {
+                if f < 30 {
+                    for &(addr, v) in pokes {
+                        g.wram_mut()[addr] = v;
+                    }
+                }
+            }
+            let (l, r) = hud_slots(b.wram(), 0);
+            b.set_hud_shift(l, r);
+            for g in [&mut a, &mut b, &mut c] {
+                g.step(Pads::default());
+            }
+            assert_eq!(a.frame(), b.frame(), "{st} frame {f}");
+            assert_eq!(net_checksum(&a), net_checksum(&c), "{st} frame {f}");
+            // X's icon (slot 0, 16x16 at OAM X 8, Y 80, shown a line lower).
+            let (pa, pc) = (a.frame().0, c.frame().0);
+            let icon = |p: &[u32], w: usize, x0: usize| -> Vec<u32> {
+                (81..97).flat_map(|y| (x0..x0 + 16).map(move |x| p[y * w + x])).collect()
+            };
+            if c.hud_shift().0 & 1 != 0 && c.oam()[1] == 80 {
+                let same = |p: &[u32], q: &[u32]| p.iter().zip(q).filter(|(x, y)| x == y).count();
+                let (at_edge, at_old) = (same(&icon(pa, 256, 8), &icon(pc, 528, 8)), same(&icon(pa, 256, 8), &icon(pc, 528, 136 + 8)));
+                assert!(at_edge >= 200 && at_old < 128, "{st} frame {f}: icon pixels at the wide edge {at_edge}, at its place {at_old}");
+                moved = true;
+            }
+        }
+        assert!(moved, "{st}: HUD never shifted");
+        let right = c.hud_shift().1;
+        assert_eq!(right != 0, st == "hw-bee2", "{st}: boss bar slots {right:x}");
     }
 }
 
