@@ -43,6 +43,8 @@ pub struct Header {
     pub x3: bool,
     /// P1 plays as Zero.
     pub zero: bool,
+    /// Wide gameplay (`Game::set_wide_gameplay`).
+    pub wide: bool,
     /// Save state loaded into the session game at frame 0 (netsim only).
     pub load: Option<String>,
 }
@@ -110,6 +112,9 @@ impl Recorder {
             "{MAGIC}\nrom_crc {:08x}\ntrapset {:016x}\nmode {}\nrole {}\ndelay {}\nprediction {}\ninterval {}\ntiming {}\nx3 {}\nzero {}\n",
             h.rom_crc, h.trapset, h.mode.name(), h.role(), h.delay, h.prediction, h.interval, h.timing.name(), b(h.x3), b(h.zero)
         );
+        if h.wide {
+            self.out.push_str("wide 1\n");
+        }
         if let Some(l) = h.load.as_ref().or(self.load.as_ref()) {
             let _ = writeln!(self.out, "load {l}");
         }
@@ -246,6 +251,7 @@ pub fn parse(text: &str) -> Result<Log, String> {
             "timing" => h.timing = Timing::parse(v).ok_or_else(bad)?,
             "x3" => h.x3 = v == "1",
             "zero" => h.zero = v == "1",
+            "wide" => h.wide = v == "1",
             "load" => h.load = Some(v.to_string()),
             _ => {}
         }
@@ -296,6 +302,7 @@ mod tests {
             timing: Timing::Ntsc,
             x3: true,
             zero: false,
+            wide: true,
             load: Some("states/hw-spiky.state".into()),
         };
         let mut r = Recorder::new();

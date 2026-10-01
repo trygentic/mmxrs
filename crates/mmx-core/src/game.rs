@@ -66,6 +66,8 @@ pub struct Game {
     pub(crate) oam_slots: [u128; 2],
     /// Margin sprites (margin_sprites.rs). Display only, not in save states.
     pub margin: crate::margin_sprites::MarginState,
+    /// Wide gameplay (wide_gameplay.rs): a setting, not in save states.
+    wide_gameplay: bool,
     emu: SnesEmulator,
     // ponytail: own copy of the ROM for rom_read (~1.5 MiB); jgenesis only
     // exposes cartridge reads through &mut (open-bus side effect).
@@ -245,7 +247,21 @@ impl Game {
             zero_set: None,
             oam_slots: [0; 2],
             margin: Default::default(),
+            wide_gameplay: false,
         })
+    }
+
+    /// Wide gameplay (docs/widescreen.md "Wide gameplay"): enemies spawn,
+    /// are queued and despawn by a window [`crate::wide_gameplay::WIDE_SPAWN_PX`]
+    /// / [`crate::wide_gameplay::WIDE_GAMEPLAY_PX`] wider per side, whatever
+    /// the display. Changes the game (netplay identity); off registers nothing.
+    pub fn set_wide_gameplay(&mut self, on: bool) {
+        self.wide_gameplay = on;
+        crate::wide_gameplay::register(self, on);
+    }
+
+    pub fn wide_gameplay(&self) -> bool {
+        self.wide_gameplay
     }
 
     /// Draw P2 as X3 Zero (`Some`, from [`crate::zero_data::extract_x3`]) or
