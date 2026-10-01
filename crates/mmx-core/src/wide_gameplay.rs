@@ -100,6 +100,21 @@ fn spawn_row(g: &mut Game) {
     g.set_regs(r);
 }
 
+/// Whether the graphics set of enemy `id` is loaded: `$7F:8300[set] != 0`
+/// (the loader stores the palette `| $20`; the fixed sets have theirs too),
+/// with `set` as `$82:827D` finds it (8-bit index: `(id - 1) * 2 + 1`).
+pub fn gfx_loaded(g: &Game, id: u8) -> bool {
+    g.wram()[0x1_8300 + usize::from(gfx_set(g, id))] != 0
+}
+
+/// The graphics set of enemy `id` (`$82:827D`'s `LDA $A5E5,X`, DB = `$86`).
+pub fn gfx_set(g: &Game, id: u8) -> u8 {
+    let init = g.hook(HookId::ObjGfxInit);
+    let table = u16::from_le_bytes([g.rom_read(init + 0x0E), g.rom_read(init + 0x0F)]);
+    let x = id.wrapping_sub(1).wrapping_mul(2).wrapping_add(1);
+    g.rom_read(0x86_0000 | u32::from(table.wrapping_add(u16::from(x))))
+}
+
 /// Spawn the columns the moved spawn line skips when wide gameplay starts
 /// mid-stage (a save state made without it): the five 32-px columns each
 /// side between the ROM's window and the wide one, 288 px tall from `camY -

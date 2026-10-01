@@ -386,6 +386,11 @@ fn dump(args: &[String]) -> i32 {
             }
         }
     }
+    if let Some(c) = &g.margin.check {
+        // MMX_MARGIN_CHECK=1: margin_sprites::Check's findings (each also on stderr).
+        let kinds = ["late", "stale", "page", "palette", "slot"].map(|k| (k, c.reports.iter().filter(|r| r.starts_with(k)).count()));
+        println!("margin-check: {} overlay sprites, garbage {} {kinds:?}, last frame_count {}", c.sprites, c.garbage(), g.frame_count());
+    }
     if let Some(p) = flag(args, "--wav") {
         write_wav(Path::new(p), &wav, 32_000).unwrap_or_else(|e| die(&format!("{p}: {e}")));
         println!("wrote {p} ({} samples)", wav.len());
@@ -468,6 +473,13 @@ fn trace(args: &[String]) -> i32 {
     let find: Vec<u32> = flag(args, "--find")
         .map(|s| s.split(',').map(|f| u32::from_str_radix(f.trim().trim_start_matches("0x"), 16).unwrap_or_else(|_| die("--find"))).collect())
         .unwrap_or_default();
+    if args.iter().any(|a| a == "--coop") {
+        g.coop.enabled = true;
+        mmx_core::coop::register_coop_traps(&mut g).unwrap_or_else(|e| die(&e));
+    }
+    if args.iter().any(|a| a == "--zero") {
+        g.set_p1_zero(true).unwrap_or_else(|e| die(&format!("--zero: {e}")));
+    }
     for f in 1..frames {
         g.step(script(f, Pads::default()));
     }

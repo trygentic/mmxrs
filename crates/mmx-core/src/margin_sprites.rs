@@ -46,6 +46,15 @@ pub struct MarginState {
     pub last: Vec<MarginSprite>,
     /// P2's HP bar slots this step (coop_hud), for widescreen::update_margin_tiles.
     pub(crate) p2_bar: u128,
+    /// Debug check (`MMX_MARGIN_CHECK`, or [`MarginState::enable_check`]).
+    pub check: Option<Box<Check>>,
+}
+
+impl MarginState {
+    /// Turn the residency check on (tests, `xtask`); `MMX_MARGIN_CHECK=1` does it too.
+    pub fn enable_check(&mut self) {
+        self.check.get_or_insert_with(Default::default);
+    }
 }
 
 /// Run from the display hook (`coop::p2_display`'s trap) every gameplay frame.
@@ -65,6 +74,7 @@ pub(crate) fn observe(game: &mut Game) {
     seen.resize(SLOTS, 0);
     let cam = word(&saved_wram, ram::CAMERA_X);
     let mut slot = 0;
+    let mut srcs = Vec::new();
     for (first, n, stride, unqueued) in TABLES {
         for k in 0..n {
             let base = first + k * stride;
@@ -83,17 +93,171 @@ pub(crate) fn observe(game: &mut Game) {
             if draw != 0 {
                 let x = u16::from_le_bytes([o[5], o[6]]).wrapping_sub(cam) as i16;
                 emit(game, emitter, base, x, m, o[0x0E] & 0x80 != 0, None, &mut out);
+                srcs.resize(out.len(), Src { base, id: o[0x0A], queued: o[0x0E] & 0x80 != 0, gfx: [o[0x16], o[0x17], o[0x18]] });
             }
         }
     }
     game.margin.seen = seen;
     p2(game, emitter, m, &saved_wram, &mut out);
     out.truncate(MAX_SPRITES);
+    if game.margin.check.is_none() && check_env() {
+        game.margin.enable_check();
+    }
+    if let Some(mut c) = game.margin.check.take() {
+        srcs.resize(out.len(), Src { base: ram::X_BASE as u16, id: 0xFF, queued: true, gfx: [0; 3] });
+        c.pass(game, &saved_wram, &out, &srcs);
+        game.margin.check = Some(c);
+    }
     game.wram_mut()[..0x2000].copy_from_slice(&saved_wram);
     game.restore_cpu_snapshot(saved_cpu);
     game.coop.in_contact = saved_contact;
     game.margin.last.clone_from(&out);
     game.set_margin_sprites(out);
+}
+
+fn check_env() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MMX_MARGIN_CHECK").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// Where an overlay sprite came from (the check).
+#[derive(Debug, Clone, Copy)]
+struct Src {
+    base: u16,
+    /// `+$0A`; `$FF` = P2.
+    id: u8,
+    queued: bool,
+    /// `+$16` set, `+$17` frame, `+$18` VRAM slot.
+    gfx: [u8; 3],
+}
+
+/// OBJ tiles at VRAM word `$6000` (OBSEL, every stage seen), 512 tiles.
+const OBJ_VRAM: usize = 0x6000;
+const OBJ_TILES: usize = 512;
+
+/// Residency check (debug, display only): for every overlay sprite, its
+/// object, tiles and page, and whether those tiles were what the game
+/// meant when the PPU drew them. The overlay of pass `p` is drawn with
+/// VRAM as it is at pass `p + 1` (it goes live with NMI `p`'s OAM upload,
+/// after that NMI's DMAs). Findings go to `reports` (and stderr):
+/// - `late`: a tile changed in NMI `p + 1`, right after the overlay drew it.
+///   Informational: a streamed object (`+$17` bit 7, X-style) changes its
+///   tiles whenever it animates, and for a queued object the overlay is
+///   what the ROM's own OAM would show in a wider window.
+/// - `stale`: an object drawn while unqueued whose tiles changed since the
+///   game last queued it (its slot got someone else's graphics);
+/// - `page`: a shadow page on a non-player sprite;
+/// - `palette`: an unqueued object with a palette it never had queued;
+/// - `slot`: an enemy whose VRAM slot `+$18` is not its graphics set's
+///   (`$82:827D` copied it before the set was loaded).
+///
+/// Everything but `late` is garbage ([`Check::garbage`]).
+#[derive(Debug, Clone, Default)]
+pub struct Check {
+    vram: Vec<u16>,
+    /// Per tile: the frame of the last change seen.
+    changed: Vec<u64>,
+    /// The last two passes' overlays (`(frame, sprite, src)`).
+    pending: [Vec<(u64, MarginSprite, Src)>; 2],
+    /// Per object base: `(id, frame last queued, palettes seen queued)`.
+    queued: std::collections::HashMap<u16, (u8, u64, u8)>,
+    pub reports: Vec<String>,
+    /// Overlay sprites checked.
+    pub sprites: u64,
+}
+
+fn tiles(s: &MarginSprite) -> Vec<usize> {
+    let t = usize::from(s.tile) | usize::from(s.attr & 1) << 8;
+    let at = |dx: usize, dy: usize| (t & 0x100) | (t & 0xF0).wrapping_add(dy << 4) & 0xF0 | (t + dx) & 0xF;
+    if s.large { vec![at(0, 0), at(1, 0), at(0, 1), at(1, 1)] } else { vec![t] }
+}
+
+impl Check {
+    fn pass(&mut self, game: &Game, saved: &[u8], out: &[MarginSprite], srcs: &[Src]) {
+        let f = game.frame_count();
+        let v = &game.vram()[OBJ_VRAM..OBJ_VRAM + OBJ_TILES * 16];
+        self.changed.resize(OBJ_TILES, 0);
+        let mut now = vec![false; OBJ_TILES];
+        if self.vram.len() == v.len() {
+            for (t, n) in now.iter_mut().enumerate() {
+                if v[t * 16..t * 16 + 16] != self.vram[t * 16..t * 16 + 16] {
+                    *n = true;
+                    self.changed[t] = f;
+                }
+            }
+        }
+        self.vram = v.to_vec();
+        // Pass p = f - 2 was drawn with the VRAM before this NMI's uploads.
+        for (pf, s, src) in std::mem::take(&mut self.pending[0]) {
+            let late: Vec<usize> = tiles(&s).into_iter().filter(|&t| now[t]).collect();
+            if !late.is_empty() && src.id != 0xFF {
+                self.report(format!("late f={pf} obj={:04X} id={:02X} queued={} gfx={:02X?} x={} tiles={late:03X?} attr={:02X}", src.base, src.id, src.queued, src.gfx, s.x, s.attr));
+            }
+        }
+        self.pending.swap(0, 1);
+        for (s, src) in out.iter().zip(srcs) {
+            self.sprites += 1;
+            if src.id != 0xFF && s.page.is_some() {
+                self.report(format!("page f={f} obj={:04X} id={:02X} page={:?}", src.base, src.id, s.page));
+            }
+            if src.id != 0xFF && !src.queued {
+                match self.queued.get(&src.base) {
+                    Some(&(id, qf, pals)) if id == src.id => {
+                        let stale: Vec<usize> = tiles(s).into_iter().filter(|&t| self.changed[t] > qf).collect();
+                        if !stale.is_empty() {
+                            self.report(format!("stale f={f} obj={:04X} id={:02X} queued_at={qf} x={} tiles={stale:03X?}", src.base, src.id, s.x));
+                        }
+                        if pals & 1 << (s.attr >> 1 & 7) == 0 {
+                            self.report(format!("palette f={f} obj={:04X} id={:02X} attr={:02X} seen={pals:08b}", src.base, src.id, s.attr));
+                        }
+                    }
+                    _ => self.report(format!("unseen f={f} obj={:04X} id={:02X} x={}", src.base, src.id, s.x)),
+                }
+            }
+            self.pending[1].push((f, *s, *src));
+        }
+        // Enemies whose VRAM slot is not their set's ($82:827D copied it
+        // before the set was loaded, wide gameplay before the fix).
+        for k in 0..15u16 {
+            let base = 0x0E68 + k * 0x40;
+            let o = &saved[usize::from(base)..];
+            if o[0] != 0 && o[0x0E] & 0x80 != 0 && srcs.iter().any(|s| s.base == base) {
+                let set = usize::from(crate::wide_gameplay::gfx_set(game, o[0x0A]));
+                let (slot, pal) = (game.wram()[0x1_8200 + set], game.wram()[0x1_8300 + set]);
+                if pal != 0 && slot != o[0x18] {
+                    self.report(format!("slot f={f} obj={base:04X} id={:02X} +18={:02X} set {set:02X} slot={slot:02X} pal={pal:02X} +11={:02X}", o[0x0A], o[0x18], o[0x11]));
+                }
+            }
+        }
+        // Remember what the game queues (with the palettes the emitter gives it).
+        for (first, n, stride, _) in TABLES {
+            for k in 0..n {
+                let base = first + k * stride;
+                let o = &saved[usize::from(base)..];
+                if o[0] != 0 && o[0x0E] & 0x80 != 0 {
+                    let e = self.queued.entry(base).or_insert((o[0x0A], f, 0));
+                    if e.0 != o[0x0A] {
+                        *e = (o[0x0A], f, 0);
+                    }
+                    e.1 = f;
+                    let pal = out.iter().zip(srcs).filter(|(_, s)| s.base == base).fold(0u8, |a, (s, _)| a | 1 << (s.attr >> 1 & 7));
+                    e.2 |= pal | 1 << (o[0x11] >> 1 & 7);
+                } else if o[0] == 0 {
+                    self.queued.remove(&base);
+                }
+            }
+        }
+    }
+
+    /// Findings that are garbage on screen (all but `late`).
+    pub fn garbage(&self) -> usize {
+        self.reports.iter().filter(|r| !r.starts_with("late") && !r.starts_with("unseen")).count()
+    }
+
+    fn report(&mut self, r: String) {
+        eprintln!("margin-check {r}");
+        self.reports.push(r);
+    }
 }
 
 fn word(w: &[u8], a: u32) -> u16 {
