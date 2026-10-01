@@ -8,7 +8,7 @@
   :root { color-scheme: dark; }
   body { margin: 0; background: #111; color: #ccc; font: 14px/1.4 system-ui, sans-serif;
          display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px; }
-  canvas { width: min(100vw - 24px, 768px); aspect-ratio: 8 / 7; background: #000;
+  canvas { width: min(100vw - 24px, 768px); aspect-ratio: 8 / 7; background: #000; /* app.js sets both per frame size */
            image-rendering: pixelated; image-rendering: crisp-edges; }
   body.drag canvas { outline: 2px dashed #4af; }
   #netBox { text-align: center; } #netStatus { font-family: ui-monospace, monospace; font-size: 12px; }
@@ -22,6 +22,7 @@
     <label><input type="checkbox" id="coop"> local co-op</label>
     <label>Mega Man X3 ROM (optional, enables Zero's sprites and saber) <input type="file" id="x3rom" accept=".sfc,.smc,.bin"></label>
     <label><input type="checkbox" id="zero"> Play as Zero (X3 ROM)</label>
+    <label title="extra scenery left and right of the 256-px picture (display only)">Screen <select id="widescreen"><option value="off">4:3</option><option>16:10</option><option>16:9</option><option>21:9</option></select></label>
   </div>
   <div id="netBox">
     <input id="netSignal" value="ws://127.0.0.1:3536" size="22" title="signal server (mmx-signal)">

@@ -44,6 +44,8 @@ pub enum Hotkey {
     Quit,
     Pause,
     FrameStep,
+    /// F10: next widescreen preset.
+    Widescreen,
 }
 
 pub const HOTKEYS: &[(KeyCode, Hotkey)] = &[
@@ -60,6 +62,7 @@ pub const HOTKEYS: &[(KeyCode, Hotkey)] = &[
     (KeyCode::Digit8, Hotkey::Slot(8)),
     (KeyCode::Digit9, Hotkey::Slot(9)),
     (KeyCode::F11, Hotkey::Fullscreen),
+    (KeyCode::F10, Hotkey::Widescreen),
     (KeyCode::Escape, Hotkey::Quit),
     (KeyCode::F6, Hotkey::Pause),
     (KeyCode::Period, Hotkey::FrameStep),

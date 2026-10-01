@@ -77,6 +77,7 @@ fn main() {
         std::process::exit(2);
     });
 
+    game.set_widescreen(args.widescreen);
     if args.headless {
         match headless::run(&mut game, &args) {
             Ok(sha) => println!("frames {} wram_sha256 {sha}", game.frame_count()),

@@ -841,6 +841,8 @@ fn start_game(
     // Static art, part of the handshake id (see `NetPlay::config`).
     g.zero_set = game.zero_set.clone();
     g.set_p1_zero(game.p1_zero())?;
+    // Display only (docs/widescreen.md): each peer keeps its own.
+    g.set_wide_margin(game.wide_margin());
     *game = g;
     Ok(())
 }

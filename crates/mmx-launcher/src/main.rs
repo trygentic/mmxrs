@@ -194,6 +194,17 @@ impl App {
         ui.heading("Options");
         ui.add(egui::Slider::new(&mut s.scale, 1..=8).text("window scale"));
         ui.checkbox(&mut s.fullscreen, "Fullscreen");
+        ui.horizontal(|ui| {
+            ui.label("Widescreen");
+            let shown = if s.widescreen.is_empty() { "off" } else { s.widescreen.as_str() }.to_string();
+            egui::ComboBox::from_id_salt("widescreen").selected_text(shown).show_ui(ui, |ui| {
+                for w in ["off", "16:10", "16:9", "21:9"] {
+                    ui.selectable_value(&mut s.widescreen, w.to_string(), w);
+                }
+            });
+        })
+        .response
+        .on_hover_text("extra scenery left and right of the picture; F10 in game cycles it");
         ui.checkbox(&mut s.zero, "Play as Zero (needs X3)");
         ui.add_enabled(!s.online, egui::Checkbox::new(&mut s.coop_local, "Local co-op (2 players)"));
         ui.separator();

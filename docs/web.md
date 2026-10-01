@@ -34,6 +34,13 @@ same-region playtest). Each peer plays with the P1 keys; F5/F7/Tab are off
 during a session; the full SNES pad travels.
 Details: `docs/netplay.md` "Frontend wiring".
 
+## Widescreen
+
+The *Screen* select (4:3, 16:10, 16:9, 21:9) or `?widescreen=16:9` in the
+URL: `Emu::set_widescreen(name)`, display only, so it can change during an
+online session and differ between the peers. The canvas takes the frame's
+size and aspect (square pixels, 3x, capped by the window). docs/widescreen.md.
+
 ## Keys (`KeyboardEvent.code`, table in `src/lib.rs`)
 
 | | D-pad | B | Y | A | X | L | R | Start | Select |

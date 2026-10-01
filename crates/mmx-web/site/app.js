@@ -20,6 +20,14 @@ let slot = null; // ponytail: one in-memory save slot, no IndexedDB
 let msg = '';
 let net = false; // an online session exists (connecting, live, or closed until Leave)
 let netAcc = 0;
+// Widescreen (docs/widescreen.md): the select, or ?widescreen=16:9.
+let widescreen = new URLSearchParams(location.search).get('widescreen') || 'off';
+$('widescreen').value = widescreen;
+$('widescreen').addEventListener('change', (e) => {
+  widescreen = e.target.value;
+  emu?.set_widescreen(widescreen);
+  e.target.blur(); // keep the keys for the game
+});
 
 // --- ROM loading -----------------------------------------------------------
 async function loadRom(file) {
@@ -35,6 +43,7 @@ async function loadRom(file) {
     try { e.set_coop(coop); } catch (err) { refused = ` (${err})`; }
     if (x3) e.set_x3_rom(x3);
     if (x3 && zero) e.set_p1_zero(true);
+    e.set_widescreen(widescreen);
     emu = e;
     const info = JSON.parse(emu.rom_info_json());
     msg = `${info.title.trim()} v1.${info.version} sha256 ${info.sha256.slice(0, 16)}…${refused}`;
@@ -150,7 +159,12 @@ function stepOne() {
 
 function blit() {
   const w = emu.width(), h = emu.height();
-  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+    // Square pixels at 3x, capped by the window (256x224 is the old 8:7).
+    canvas.style.aspectRatio = `${w} / ${h}`;
+    canvas.style.width = `min(100vw - 24px, ${3 * w}px)`;
+  }
   // Zero-copy view into wasm memory; rebuilt each time (memory can grow).
   const px = new Uint8ClampedArray(wasm.memory.buffer, emu.frame_ptr(), emu.frame_len());
   ctx.putImageData(new ImageData(px, w, h), 0, 0);

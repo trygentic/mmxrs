@@ -1,6 +1,6 @@
 # mmx-native (binary `mmxrs`)
 
-Run: `cargo run -p mmx-native --release -- --rom mmx.sfc [--x3-rom mmx3.sfc [--zero]] [--scale 1-8] [--fullscreen] [--coop-local] [--pads]`
+Run: `cargo run -p mmx-native --release -- --rom mmx.sfc [--x3-rom mmx3.sfc [--zero]] [--scale 1-8] [--fullscreen] [--coop-local] [--pads] [--widescreen off|16:10|16:9|21:9|N]` (docs/widescreen.md)
 (`--rom` falls back to `$MMX_ROM`, `--x3-rom` to `$MMX_X3_ROM`; default scale 3).
 `--x3-rom` takes your Mega Man X3 (USA) image: P2 is drawn as X3 Zero and P2's
 X swings the saber (docs/zero.md "Playing as Zero"); online, both peers need it.
@@ -43,7 +43,7 @@ sends a goodbye. The full SNES pad travels. Cargo feature `netplay` (default) ca
 WebRTC transport; `--no-default-features` builds without it.
 
 Hotkeys: Tab hold fast-forward (8 frames per present, muted), F5 save state,
-F7 load state, 1-9 pick slot, F11 fullscreen, P or F6 pause, `.` single-step
+F7 load state, 1-9 pick slot, F11 fullscreen, F10 next widescreen preset (also online: display only), P or F6 pause, `.` single-step
 while paused, Esc quit. States live in `$HOME/.mmxrs/slotN.state` (format and
 bug reports: [savestates.md](savestates.md)).
 Title bar: fps, `[coop]` or `[NET ...]`, `[SLOT n]`, `[PAUSED]`, `[FF]`.

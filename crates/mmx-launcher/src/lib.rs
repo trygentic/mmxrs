@@ -88,6 +88,9 @@ pub struct Settings {
     pub timing: String,
     /// Empty = the game's default ICE servers; `none` = no ICE servers.
     pub ice: String,
+    /// `--widescreen`: "" / "off", "16:10", "16:9" or "21:9" (docs/widescreen.md).
+    #[serde(default)]
+    pub widescreen: String,
 }
 
 impl Default for Settings {
@@ -108,6 +111,7 @@ impl Default for Settings {
             prediction: None,
             timing: String::new(),
             ice: String::new(),
+            widescreen: String::new(),
         }
     }
 }
@@ -156,6 +160,11 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
     }
     if s.zero {
         push(&["--zero"]);
+    }
+    match s.widescreen.as_str() {
+        "" | "off" => {}
+        w @ ("16:10" | "16:9" | "21:9") => push(&["--widescreen", w]),
+        other => return Err(format!("bad widescreen {other:?}")),
     }
     if s.online {
         let room = s.room.trim();
@@ -379,6 +388,9 @@ mod tests {
         let zero = Settings { zero: true, ..base() };
         assert!(build_args(&zero).unwrap_err().contains("X3"));
         assert!(build_args(&Settings { scale: 9, ..base() }).is_err());
+        let ws = Settings { widescreen: "16:9".into(), ..base() };
+        assert_eq!(build_args(&ws).unwrap()[4..], ["--widescreen", "16:9"]);
+        assert!(build_args(&Settings { widescreen: "4:3".into(), ..base() }).is_err());
         let net = Settings { online: true, room: "bad/room".into(), ..base() };
         assert!(build_args(&net).is_err());
         let net = Settings { online: true, room: "r".into(), delay: Some(4), ..base() };

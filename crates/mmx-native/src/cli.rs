@@ -4,6 +4,7 @@ use mmx_core::netgame::Mode;
 
 pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local] [--pads]
+             [--widescreen off|16:10|16:9|21:9|N]
        mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
              [--ice 'stun:.. turn:.. username=U credential=C' | none]
              [--mode rollback|lockstep] [--delay N] [--prediction N] [--net-record LOG]
@@ -11,7 +12,8 @@ usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [-
              [--hold P1MASK] [--p2-hold MASK] [--coop-local]
 ROM defaults to $MMX_ROM, --x3-rom (Mega Man X3 USA: P2 is drawn as X3 Zero, X swings
 the saber) to $MMX_X3_ROM. --zero: player 1 plays as Zero too (needs the X3 ROM). Masks are SNES pad words (hex 0x.. or decimal).
---pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
+--widescreen draws extra scenery left and right (N = 8-px tiles per side, 0-24; F10 cycles
+the presets; docs/widescreen.md). --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
 Online: both players pass the same --mode (default rollback). --delay is the input delay
 in frames, host's wins: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
 same-region link --mode lockstep --delay 3 plays smoothest; across continents use
@@ -54,6 +56,8 @@ pub struct Args {
     pub timing: mmx_core::Timing,
     /// `--net-record LOG`: session log (`mmx_core::netlog`) for `xtask netreplay`.
     pub net_record: Option<String>,
+    /// `--widescreen`: margins each side (docs/widescreen.md). Display only.
+    pub widescreen: mmx_core::Widescreen,
 }
 
 impl Args {
@@ -87,6 +91,7 @@ impl Default for Args {
             prediction: None,
             timing: mmx_core::Timing::Auto,
             net_record: None,
+            widescreen: mmx_core::Widescreen::OFF,
         }
     }
 }
@@ -164,6 +169,11 @@ pub fn parse<I: IntoIterator<Item = String>>(
                 a.timing = mmx_core::Timing::parse(&v).ok_or_else(|| format!("bad --timing {v:?}: auto, ntsc or pal"))?;
             }
             "--net-record" => a.net_record = Some(val("--net-record")?),
+            "--widescreen" => {
+                let v = val("--widescreen")?;
+                a.widescreen = mmx_core::Widescreen::parse(&v)
+                    .ok_or_else(|| format!("bad --widescreen {v:?}: off, 16:10, 16:9, 21:9 or 0-24"))?;
+            }
             "--prediction" => {
                 let v = val("--prediction")?;
                 let n: u8 = v.parse().map_err(|_| format!("bad --prediction {v:?}"))?;
@@ -204,6 +214,13 @@ mod tests {
         let a = p("").unwrap();
         assert_eq!(a, Args::default());
         assert_eq!(a.scale, 3);
+    }
+
+    #[test]
+    fn widescreen() {
+        assert_eq!(p("--widescreen 16:9").unwrap().widescreen, mmx_core::Widescreen::W16_9);
+        assert_eq!(p("--widescreen 3").unwrap().widescreen.width(), 304);
+        assert!(p("--widescreen 4:3").is_err());
     }
 
     #[test]

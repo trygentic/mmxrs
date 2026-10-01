@@ -96,7 +96,7 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         coop: args.coop_local,
         window: None,
         pixels: None,
-        tex: (256, 224),
+        tex: (args.widescreen.width(), 224),
         audio,
         gilrs,
         #[cfg(target_os = "macos")]
@@ -327,7 +327,7 @@ impl App {
 
     fn hotkey(&mut self, h: Hotkey, pressed: bool, event_loop: &ActiveEventLoop) {
         // Pause, fast-forward and save states would desync an online session.
-        if self.net.is_some() && !matches!(h, Hotkey::Quit | Hotkey::Fullscreen) {
+        if self.net.is_some() && !matches!(h, Hotkey::Quit | Hotkey::Fullscreen | Hotkey::Widescreen) {
             return;
         }
         if h == Hotkey::FastForward {
@@ -368,6 +368,17 @@ impl App {
                         .is_none()
                         .then_some(Fullscreen::Borderless(None));
                     w.set_fullscreen(fs);
+                }
+            }
+            Hotkey::Widescreen => {
+                // Display only, fine online. The window follows the aspect
+                // (the buffer resizes with the next frame, `draw`).
+                let ws = self.game.widescreen().next();
+                self.game.set_widescreen(ws);
+                eprintln!("widescreen: {}", ws.name());
+                if let Some(w) = self.window.as_ref().filter(|w| w.fullscreen().is_none()) {
+                    let h = w.inner_size().height.max(224);
+                    let _ = w.request_inner_size(winit::dpi::PhysicalSize::new(h * ws.width() as u32 / 224, h));
                 }
             }
             Hotkey::Quit => self.quit(event_loop),

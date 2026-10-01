@@ -169,6 +169,13 @@ impl Emu {
         self.game.set_p1_zero(on).map_err(|e| JsValue::from_str(&e))
     }
 
+    /// Widescreen preset: `off`, `16:10`, `16:9`, `21:9` or `N` tiles per
+    /// side (docs/widescreen.md). Display only, fine during netplay. The
+    /// frame is wide from the next `step`. Returns false on a bad name.
+    pub fn set_widescreen(&mut self, name: &str) -> bool {
+        mmx_core::Widescreen::parse(name).map(|w| self.game.set_widescreen(w)).is_some()
+    }
+
     /// Co-op on/off. Throws (and stays off) when this ROM lacks a hook
     /// (see [`Emu::hook_report`]).
     pub fn set_coop(&mut self, on: bool) -> Result<(), JsValue> {
