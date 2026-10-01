@@ -334,7 +334,7 @@ disagree refuse the handshake. Each peer still picks its own display preset.
 
 ### Implementation (`crates/mmx-core/src/wide_gameplay.rs`)
 
-Seven `Observe` traps, registered only with the flag on (`TrapTable::unregister`
+Eight `Observe` traps, registered only with the flag on (`TrapTable::unregister`
 takes them off again), every address from `hooks.rs` with signatures that
 resolve on the PAL and USA Rev 1 dumps (bank `$82`/`$84` ones in place,
 bank `$80` ones `+$2B`). None skips an instruction, so the CPU's timing is
@@ -349,9 +349,13 @@ the ROM's; they change a register or a scratch word and let the ROM go on.
 | `spawn_row` | `$80:DC9B` / `$80:DCC6` | row sweep start `$00`, count A |
 | `kind_count` | `$84:A1E0` / same | Z at the slot test of `$84:A1D5` |
 | `spawn_entry` | `$80:DD18` / `$80:DD43` | Z, C at a layout entry's section test |
+| `gfx_trigger` | `$83:FDE3` / same | N at the `RTS` of the trigger objects' player test |
 
 (`obj_gfx_init`, `$82:827D` on both, is resolved too but not trapped: its
-`LDA $A5E4,X` operand is the id -> graphics set table.)
+`LDA $A5E4,X` operand is the id -> graphics set table. Likewise
+`gfx_loader`, `$80:B066` / `$80:B091`, the loader thread: `LDA $ACEE,X`, the
+per-stage list table; and `gfx_decomp`, `$80:B230` / `$80:B25B`, its
+decompressor thread: `LDA $F6F7,Y`, the per-set size and source.)
 
 - **Queue / despawn tests**. All three are `REP #$20; SEC; LDA $05; SBC
   $1E4D; CLC; ADC #a; CMP #w; BCS out; SEC; LDA $08; SBC $1E50; CLC; ADC
@@ -404,6 +408,56 @@ the ROM's; they change a register or a scratch word and let the ROM go on.
   P1 and P2 as X3 Zero, 16:9, frames 610-760/25; top row before, bottom
   after) and `hw-c-f710-right-3x.png` (frame 710, the right part, before |
   after).
+- **Loading graphics sets early** (`gfx_trigger`; how the loader works:
+  "Graphics sets and their triggers" below). Holding back only moves the
+  pop-in from garbage to the ROM's 256-px line, which is what the user saw
+  ("enemies appear suddenly closer to X"). So a graphics-set trigger (type
+  2, id `$15`, an X trigger) fires as if the player were `WIDE_SPAWN_PX`
+  (160) further right: the set is then in by the time the wide spawn line
+  reaches its enemies, as the ROM's is by its own line (the layout keeps
+  every first enemy of a set >= 200 px past its trigger, so it is in by
+  then with 160 px to spare minus the load's frames). The trap sits on the
+  `RTS` of the trigger's player test `$83:FDD3` (`CMP $00,X` of the
+  player's X against the trigger's) and only sets N for the caller's
+  branch, which it tells from the return address:
+  - behind (`$02 = 2`, `BMI` next): "ahead" once `x + 160 >= tx`. When
+    that is early (`x < tx`) it must pass `early_ok`, else it is asked
+    again next frame (the ROM's own crossing, `x >= tx`, is never refused:
+    worst case the ROM's timing). An early fire sets the object's `+$0F`
+    (unused by these 16-byte objects; their removal clears it).
+  - ahead (`$02 = 0`, `BPL` next): with `+$0F`, "behind" once `x + 160 <
+    tx` (backed out of the early band: the previous list reloads), and the
+    mark is dropped once `x >= tx`. Without it the ROM's test, so walking
+    back left reloads exactly where the ROM does. (A single shifted
+    position is what keeps this from flip-flopping: early in both
+    directions would need the scroll direction, which WRAM does not keep.)
+  - init: the ROM's test (the mark cleared). Y triggers (ids `$18..`) and
+    the other loaders' triggers (`$16`, `$17`) are left alone.
+
+  `early_ok` refuses while the loader thread is busy (`$0040 != 0`; a
+  second start would restart it, abandoning the first list: so this
+  queues), when the list puts a set below VRAM `$1000` (OBJ page 0: X's
+  streamed tiles, shots, items; lists 4-6 of the Highway do), and when an
+  object in use draws from tiles or a palette row the list gives to another
+  set. In use = alive inside the ROM's own object window (X `-64..320`) in
+  the enemy, item, `$1628` or effect tables, or an enemy not initialised
+  yet (it is about to copy its set's slot). Tiles are ranges: `+$18` plus
+  page bit `+$11 & 1`, sized by the set's decompressed size / 32 (enemies
+  know their set from the id; other objects are taken as one tile).
+  Palette rows clash unless the object's own set is in the list too.
+  An object further out exists only with wide gameplay; if a load gives
+  its tiles away, it gets the ROM's window back (below) and goes as it
+  would have without wide gameplay.
+- **Overwritten objects get the ROM's window**. The loader never clears
+  `$7F:8200` / `$7F:8300`, so an evicted set still reads as loaded.
+  `obj_overwritten` compares an object's tiles and palette row with the
+  current list (`$1F08`, the one the loader last started): another set
+  there means its graphics are gone. Such an object gets the ROM's window
+  in all three window tests (the trap leaves C set when the ROM says
+  outside), so it is culled and removed where the ROM would (the mech the
+  ROM's own Sky Claw load overwrites while it lives in the left margin,
+  the intro cars). `spawn_entry`'s "loaded" test uses the same check, so a
+  wide spawn of an evicted set waits for its reload too.
 - **Same-kind counts** (`$84:A1D5`, 22 callers: an object counts the live
   objects with its id, e.g. the Sky Claw at `$82:96AF` deletes itself when 2
   are alive). A live object outside the ROM's own despawn window (X
@@ -428,6 +482,63 @@ copies of the window test for single enemies (`$83:8948` `-128..384`,
 `$83:963A` `-32..288`) and bank `$80`'s (`$80:DD89`, no caller found); any
 enemy AI that checks its own distance to the camera or to X with its own
 constants.
+
+### Graphics sets and their triggers (measured, Rev 1 Highway)
+
+- **Loader**. A trigger object (type 2 record, ids `$15..$1A`, code
+  `$83:FD7B`, the 16-byte table `$1D08`) compares the player's X (ids
+  `$15..$17`) or Y (`$18..$1A`) with its own (`$86:E4DC[id - $15]`, 5 or
+  8) every frame, two-way: crossing forward runs `$FDF9[id - $15]`,
+  backward `$FDED[..]`. For id `$15` that stores the list index (sub low
+  nibble forward, high nibble backward) in `$1F08` and starts the loader
+  thread `$80:B091` (`$80:B071`: thread slot `$10`, status `$0040`; `$16`
+  / `$17` start `$80:B416` / `$80:B4DD` with `$1F09` / `$1F0A`). The
+  trigger also uses the despawn test, so it lives only while near the
+  camera. The thread walks list `$86:ACEE[$ACEE[stage * 2] + idx * 2]`,
+  6-byte entries (set, VRAM word address relative to the OBJ base `$6000`,
+  palette pointer, palette column), `$FF`-terminated. Per set: a
+  decompressor thread (`$80:B25B`, slot `$60`; size and source at
+  `$86:F6F7 + set * 5`) unpacks it to WRAM, `$80:B15B` queues the VRAM
+  DMA through the `$0500` list, `$1F25`-budgeted (it yields while a frame's
+  budget is used up), then `$7F:8200[set] = vram >> 4` (the slot, low
+  byte), `$828000` loads the palette and `$7F:8300[set] = $4A | $20`
+  (palette bits, page bit 0). One set every 8-9 frames: list 1 (two sets)
+  is in 16 frames after the trigger. Nothing is shown or paused while it
+  loads; a list started again restarts the thread. The tables are cleared
+  only on a stage (re)start.
+- **Highway lists** (`stage 0`): 0 = 39 @`$14C0`, 3A @`$17C0`, 3B @`$1BC0`
+  (intro cars, effects id `$21`), 1F @`$1000` (id `$15`); 1 = 1F, 30
+  @`$1600` (the jumping mech, id `$29`); 2 = 1F, 1E @`$1600` (Sky Claw,
+  id `$0F`); 3 = 1E, 30 @`$1900`; 4 = 2D @`$1000`, 2F @`$1AE0`, 23
+  @`$0000`; 5 = 21, 22, 1F @`$1600`, 2F, 35 @`$0400`; 6 = 58 @`$1D00`, 35,
+  1D @`$1000`; 7 = 1D, 26 @`$1D00`. Slot `$60` (`$1600`) is shared by the
+  mech (list 1) and the Sky Claws (list 2); 30 overlaps the cars' 39-3B.
+- **Trigger vs enemies** (X; forward list; first enemy of a new set; last
+  enemy before it of a set the list evicts):
+
+  | trigger X | list | first new enemy | evicted set's last enemy |
+  |---|---|---|---|
+  | 448 | 1 | mech 720 (+272) | intro cars (moving) |
+  | 896 | 2 | Sky Claw 1096 (+200) | mech 720 (-176) |
+  | 1408 | 3 | mech 1904 (+496) | (1E stays; 30 moves to `$1900`) |
+  | 2432 | 4 | id `$22` 2804 (+372) | mech 2160 (-272), Sky Claw 2064 |
+  | 3568 | 5 | id `$15` 3936 (+368) | id `$22` 3444 (-124) |
+  | 5024 | 6 | id `$36` 5344 (+320) | id `$19` 4816 (-208) |
+  | 6656 | 7 | - | id `$36` 5632 (-1024) |
+
+  The ROM's spawn line is at about `x + 128`, so each list is in before its
+  first enemy spawns; the ROM despawns at `x - 192`, so an evicted set's
+  last enemy is usually gone (or dead) by the trigger. With wide gameplay
+  the spawn line is `x + 288` (the first enemies of lists 1 and 2 outrun
+  their triggers) and the despawn line `x - 352` (the previous section's
+  enemies live 160 px longer and hold their slot).
+- **Early loading, Rev 1 hw-c walking right with jumps** (`gfx_trigger`):
+  list 1 fires at X 377 instead of 448 (the intro cars hold their tiles
+  and palette until they leave the ROM's window; 288 at the earliest);
+  list 2 at the ROM's 896 unless the mech is dead by X 736 (it holds slot
+  `$60`: it is on screen there); list 3 at 1248. Lists 4-6 load into page
+  0 and stay at the ROM's timing; their first enemies are >= 320 px
+  ahead, so the wide spawn line does not outrun them anyway.
 
 ### What it does (measured, 21:9, walking right)
 
@@ -524,6 +635,49 @@ come at him from further and in larger numbers.
   `slot` only on hw-c (mech `$29`, Sky Claw `$0F`); `stale` on hw-c (two
   mechs sharing slot `$60`, the left-behind one in the left margin).
   `wide_spawns_get_their_graphics` (test, below) pins it.
+
+  Early loading (`gfx_trigger`), same 9 states, 900 frames each, wide
+  gameplay on, configs P1 X 16:9 / P1 Zero 16:9 / P1 X 21:9 x scripts
+  walk+jump+shoot (right, B 20 of 45 frames, Y 3 of 40) / the same with
+  P2 (X3 Zero) given P1's pad / idle, 81 runs, before (`4d548f5`) and
+  after: garbage 0 / 0. `late` only on hw-c (23-28 before, 30-34 after,
+  all the mech `$29`: one pass drawn the NMI before the ROM's own list-2
+  upload overwrites its tiles). A queued object whose tiles the current
+  list has given away (`obj_overwritten`) outside the ROM's window: one
+  frame per hw-c walk (the mech, the frame the ROM's own list 2 starts;
+  the window tests drop it the next frame). Netplay: `xtask netsim` (PAL
+  hw-a and Rev 1 hw-c holding right, 2400 frames, `--wide-gameplay`,
+  rtt 120, loss 2, prediction 12): no desync, 41 checks ok per peer,
+  identical to the plain run. Flag off: `xtask verify --frames 2400
+  --coop-off --tap 200,400,600,800,1000 --hold 0100` OK on both dumps.
+
+  First seen (camera-relative X of each enemy the first frame it is
+  queued; Rev 1, 1500 frames walking right with jumps, wide gameplay,
+  `before` = `4d548f5`). The ROM's own spawn column gives 253-284; the
+  wide one 412-432:
+
+  | state | enemy | before | after |
+  |---|---|---|---|
+  | hw-c (start) | mech `$29` | 270 | 421 |
+  | hw-c | id `$15` | 421 | 421 |
+  | hw-c | Sky Claws `$0F` | 413 422 281 261 253 253 252 | 413 422 281 261 269 253 422 269 |
+  | hw-a | mech | 421 421 | 421 421 |
+  | hw-a | Sky Claws | (55 5) 422 269 268 | same |
+  | hw-d (trucks) | Sky Claws | (219 199) 413 253 253 420 269 | same |
+  | hw-e | Sky Claws | (25 143) 422 269 268 | same |
+
+  (In brackets: alive at the state load.) Still at the ROM's line: the
+  first Sky Claws of hw-c (1096-1120: list 2 waits for the mech, which
+  holds slot `$60` on screen until X 896 unless killed; with it killed,
+  `target/widescreen/early-gfx/hw-c-skyclaw-*`, list 2 loads at 736) and
+  every later Sky Claw at 253-272: not graphics but the Sky Claw's own cap
+  (`$82:96AF` deletes a new one while 2 are alive in the ROM's window; its
+  entry is cleared, the ROM's column respawns it later).
+  PNG strips (`target/widescreen/early-gfx/`, 16:9, Rev 1, left column
+  before, right after, `NAME-before-after.png`): `hw-c-mech` (frames
+  200-300/20: the mech walks in from the right margin, before it is not
+  there yet), `hw-c-skyclaw` (600-800/25, mech killed at frame 400: the
+  Sky Claws by the trucks enter further right), `hw-d-skyclaw` (60-400/40).
 - Wide gameplay (`cargo test -p mmx-core --test wide_gameplay`, ROM-gated;
   `MMX_STATES=states/usa11` with the Rev 1 ROM): `window_test_m0_is_register_exact`
   (observe-only traps on the three X `BCS`s, ROM untouched, 600 frames of
@@ -538,7 +692,9 @@ come at him from further and in larger numbers.
   game that never had it); `enemies_spawn_at_the_wide_edges` (the table
   above); `wide_spawns_get_their_graphics` (PAL highway-start / Rev 1 hw-c,
   16:9, 900 frames: every queued enemy's `+$18` is its set's slot, the
-  residency check finds no garbage). Flag off against main (`8429c79`), 2400 frames, the final save
+  residency check finds no garbage); `sets_load_ahead_of_the_wide_spawns`
+  (PAL highway-start / Rev 1 hw-c, walking right with jumps: the mech
+  first appears at X > 400; 270 before `gfx_trigger`). Flag off against main (`8429c79`), 2400 frames, the final save
   state byte for byte and every status line: power-on with taps (PAL and Rev
   1), hw-a `--coop`, hw-a at 21:9: identical. `xtask verify --frames 2400
   --coop-off --tap 200,400,600,800,1000 --hold 0100`: OK on both dumps;

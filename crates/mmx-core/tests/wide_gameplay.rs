@@ -237,3 +237,25 @@ fn wide_spawns_get_their_graphics() {
     assert_eq!(c.garbage(), 0, "{bad:?}");
     assert!(checked > 500 && c.sprites > 1000, "{checked} enemy-frames, {} overlay sprites", c.sprites);
 }
+
+/// Graphics sets load early: on the Highway's start (PAL `highway-start`,
+/// Rev 1 `hw-c`), walking right with jumps, the jumping mech (id `$29`, set
+/// `$30`, loaded by the trigger at X 448) first appears at the wide edge
+/// (camera-relative X > 400) instead of being held back to the ROM's 256.
+#[test]
+fn sets_load_ahead_of_the_wide_spawns() {
+    let Some(mut g) = game("highway-start").or_else(|| game("hw-c")) else { return };
+    g.set_wide_gameplay(true);
+    mmx_core::wide_gameplay::sweep(&mut g);
+    let mut first = None;
+    for f in 0..600 {
+        let p1 = 0x0100 | if f % 45 < 20 { 0x8000 } else { 0 };
+        g.step(Pads { p1, p2: 0 });
+        let cam = i32::from(word(&g, 0x1E4D));
+        if let Some((_, _, x)) = objects(&g).into_iter().find(|&(_, id, _)| id == 0x29) {
+            first = Some(x - cam);
+            break;
+        }
+    }
+    assert!(first.is_some_and(|x| x > 400), "mech first at {first:?}");
+}
