@@ -256,9 +256,81 @@ one 32-px column, and objects despawn about 64 px past either edge. Showing
 the whole margin would mean "wide gameplay": spawn by the wide window
 (`$80:DC0B`'s `+256` and row width), queue and despawn by it (`$82:80B4`,
 `$82:808F`, `$82:806E`). That changes what enemies do and when (they act and
-shoot from further away), so it is gameplay: an opt-in that would have to go
-into the netplay identity (`trapset_id` / `NET_REVISION`) and be on for both
-peers, unlike the display-only margins. Not done.
+shoot from further away), so it is gameplay: an opt-in in the netplay
+identity, on for both peers, unlike the display-only margins. See "Wide
+gameplay".
+
+## Wide gameplay (opt-in, changes the game)
+
+`--wide-gameplay` (native), the launcher's "spawn enemies at the wide edges"
+box, the web's checkbox, `Game::set_wide_gameplay(true)`. Off by default; off
+registers nothing, so a game without it is byte-identical to one built before
+it existed (`xtask verify`, checksums, netplay identity).
+
+### Design
+
+The game's object window is moved out by a fixed margin, independent of the
+display preset, so every peer simulates the same world whatever it shows:
+
+- `WIDE_GAMEPLAY_PX` = **136** (the 21:9 margin, the widest preset): the
+  draw-queue tests `$82:80B4` and `$82:808F` accept X `-32-136 .. 288+136`
+  (`-96-136 .. 352+136`). A 16:10 or 16:9 player simply does not see the
+  outer part of it. Y is unchanged (the picture is not taller).
+- `WIDE_SPAWN_PX` = **160** (136 rounded up to the spawner's 32-px columns):
+  the spawner `$80:DC0B` spawns the column at `cam + 256 + 160` scrolling
+  right and `cam - 160` scrolling left, and its row sweep (camera moved
+  vertically, which is also how a stage entry or a camera jump fills the
+  screen: the camera is stepped into place a row at a time) covers
+  `cam - 32 - 160 .. cam + 288 + 160` (20 columns instead of 10). The despawn
+  test `$82:806E` accepts X `-64-160 .. 320+160`. Rounding up keeps the
+  spawned column wholly outside the 21:9 picture, as the ROM's own column is
+  just outside 256 px, and keeps the ROM's 32 px of slack between the spawn
+  column and the despawn line (with less, a few px of backing up would
+  delete an enemy without the camera re-crossing its column, so it would not
+  come back).
+- The emitter cull `$80:D67C` is left alone: OAM stays the original 256-px
+  window, and the margin sprite pass draws what it culls (now: everything
+  out to the margins, since those objects exist and are queued).
+
+Trade-off: enemies engage about 136-160 px earlier on both sides. They
+spawn, act, shoot and drop off ledges while X is still that far away, a
+walking enemy may reach you sooner, an enemy left behind keeps chasing for
+longer, and more objects are alive at once (slot pressure: the ROM refuses a
+spawn when its tables are full). That is a different game, so it is opt-in
+and part of the netplay identity: the flag and both margins are mixed into
+`trapset_id` (the traps' addresses are too), `NET_REVISION` 4. Peers that
+disagree refuse the handshake. Each peer still picks its own display preset.
+
+### Implementation (`crates/mmx-core/src/wide_gameplay.rs`)
+
+Traps, registered only with the flag on, every address from `hooks.rs`
+(signatures checked on the PAL and USA Rev 1 dumps):
+
+- **Queue / despawn tests** (`$82:806E`, `$82:808F`, `$82:80B4`, all three
+  `REP #$20; SEC; LDA $05; SBC $1E4D; CLC; ADC #a; CMP #w; BCS ..; SEC; LDA
+  $08; SBC $1E50; CLC; ADC #b; CMP #h; ..`): an `Observe` trap on the entry
+  does the two compares in Rust with `a + M` / `w + 2M` (the immediates are
+  read from the ROM), sets A and P exactly as the ROM would have them after
+  the compare that decides (A = the subtraction, V from the `ADC`, N Z C from
+  the `CMP`, M = 16-bit) and moves PC to where the ROM's branches would go:
+  the routine's own tail (`STZ $0E` / `LDA #$81; STA $0E` and the draw-list
+  push, or `SEP #$20; RTL` with the carry for `$806E`'s callers). With
+  decimal mode set the trap does nothing (never seen; the ROM's own test
+  runs).
+- **Spawner** (`$80:DC0B`): two `Observe` traps on the ROM's own code. At
+  `$80:DC56` (a horizontal column is about to be spawned, its X in `$00`):
+  `$00 += 160` when it is `cam + 256` (scrolling right), `$00 -= 160` when
+  it is `cam`. At `$80:DC9B` (the row sweep, `A = 10` columns from `$00 =
+  cam - 32`): `$00 -= 160`, `A = 20`. The column test itself (did the camera
+  cross a 32-px line?) stays the ROM's; since 160 is a multiple of 32 the
+  moved column is exactly the next one out, no gaps and no repeats at any
+  camera speed. Each layout entry has a "spawned" byte (`STA ($14)` = 1;
+  the object's `+$0C` points back at it and its despawn clears it), so a
+  column spawned twice never doubles an enemy.
+
+Bank `$83` has two private copies of the test for single enemies (`$83:8948`
+`-128..384`, `$83:963A` `-32..288`) and bank `$80` one more (`$80:DD89`, no
+caller found); they are left alone.
 
 ## Verification
 
