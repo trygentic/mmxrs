@@ -19,6 +19,7 @@ pub mod saber;
 pub mod sfx;
 pub mod traps;
 pub mod widescreen;
+pub mod wide_gameplay;
 pub mod zero;
 pub mod zero_data;
 

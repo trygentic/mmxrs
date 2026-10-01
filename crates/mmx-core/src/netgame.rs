@@ -23,7 +23,8 @@ use crate::{Timing, coop, Game, Pads, RomError};
 /// Bump when anything that changes simulation between two builds changes
 /// outside the trap addresses (mixed into [`trapset_id`]). 3: save states
 /// carry `CoopState` (a `--load` state now restores P2 on both peers).
-const NET_REVISION: u64 = 3;
+/// 4: wide gameplay (`Game::set_wide_gameplay`) in the id.
+const NET_REVISION: u64 = 4;
 
 /// Rollback save state: [`Game::save_state`] (co-op state included).
 pub fn net_save(game: &Game) -> Vec<u8> {
@@ -42,16 +43,24 @@ pub fn net_checksum(game: &Game) -> u64 {
 
 /// Handshake trap-set id: FNV over the sorted trap addresses,
 /// [`NET_REVISION`], whether the X3 Zero set is loaded (`Game::set_zero_set`:
-/// it changes P2's OAM, so both peers must agree) and whether P1 plays as
-/// Zero (`Game::set_p1_zero`). Peers with different ids refuse to start.
+/// it changes P2's OAM, so both peers must agree), whether P1 plays as
+/// Zero (`Game::set_p1_zero`) and wide gameplay with its margins
+/// (`Game::set_wide_gameplay`). Peers with different ids refuse to start.
 pub fn trapset_id(game: &Game) -> u64 {
+    use crate::wide_gameplay::{WIDE_GAMEPLAY_PX, WIDE_SPAWN_PX};
     let mut addrs: Vec<u32> = game.traps.addrs().collect();
     addrs.sort_unstable();
     let bytes: Vec<u8> = addrs.iter().flat_map(|a| a.to_le_bytes()).collect();
+    let wide: Vec<u8> = if game.wide_gameplay() {
+        [WIDE_GAMEPLAY_PX, WIDE_SPAWN_PX].iter().flat_map(|m| m.to_le_bytes()).collect()
+    } else {
+        Vec::new()
+    };
     hash_state(&[
         &NET_REVISION.to_le_bytes(),
         &bytes,
         &[u8::from(game.zero_set().is_some()), u8::from(game.p1_zero()), game.timing() as u8],
+        &wide,
     ])
 }
 
@@ -362,12 +371,29 @@ impl<T: Transport> NetPlay<T> {
         p1_zero: bool,
         timing: Timing,
     ) -> Result<NetConfig, String> {
+        Self::config_wide(rom, host, mode, delay, x3, p1_zero, timing, false)
+    }
+
+    /// [`NetPlay::config`] with wide gameplay on or off (part of the id;
+    /// the session game takes it from the frontend's game, like the X3 set).
+    #[allow(clippy::too_many_arguments)]
+    pub fn config_wide(
+        rom: &[u8],
+        host: bool,
+        mode: Mode,
+        delay: u8,
+        x3: Option<&ZeroSet>,
+        p1_zero: bool,
+        timing: Timing,
+        wide_gameplay: bool,
+    ) -> Result<NetConfig, String> {
         if delay > mode.max_delay() {
             return Err(format!("{} input delay must be 0-{}", mode.name(), mode.max_delay()));
         }
         let mut g = session_game(rom, COOP_TWO_PLAYERS, timing).map_err(|e| e.to_string())?;
         g.set_zero_set(x3.cloned());
         g.set_p1_zero(p1_zero)?;
+        g.set_wide_gameplay(wide_gameplay);
         let (crc, traps) = (g.rom_info().crc32, trapset_id(&g));
         Ok(match mode {
             Mode::Rollback => {
@@ -576,6 +602,7 @@ impl<T: Transport> NetPlay<T> {
             timing: game.timing(),
             x3: game.zero_set().is_some(),
             zero: game.p1_zero(),
+            wide: game.wide_gameplay(),
             load: None,
         };
         if let Some(r) = self.record.as_mut() {
@@ -841,6 +868,8 @@ fn start_game(
     // Static art, part of the handshake id (see `NetPlay::config`).
     g.zero_set = game.zero_set.clone();
     g.set_p1_zero(game.p1_zero())?;
+    // Gameplay, part of the handshake id.
+    g.set_wide_gameplay(game.wide_gameplay());
     // Display only (docs/widescreen.md): each peer keeps its own.
     g.set_wide_margin(game.wide_margin());
     *game = g;
@@ -1039,6 +1068,21 @@ mod tests {
         let plain = trapset_id(&g);
         g.set_zero_set(Some(ZeroSet::default()));
         assert_ne!(trapset_id(&g), plain);
+    }
+
+    #[test]
+    fn trapset_id_includes_wide_gameplay() {
+        let mut g = session_game(&synthetic_rom(), COOP_TWO_PLAYERS, Timing::Auto).unwrap();
+        let plain = trapset_id(&g);
+        g.set_wide_gameplay(true);
+        assert_ne!(trapset_id(&g), plain);
+        g.set_wide_gameplay(false);
+        assert_eq!(trapset_id(&g), plain);
+        let cfg = |w| match NetPlay::<mmx_net::LoopbackTransport>::config_wide(&synthetic_rom(), true, Mode::Lockstep, 2, None, false, Timing::Auto, w).unwrap() {
+            NetConfig::Lockstep(c) => c.trapset_id,
+            NetConfig::Rollback(c) => c.trapset_id,
+        };
+        assert_ne!(cfg(true), cfg(false));
     }
 
     #[test]

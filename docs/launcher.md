@@ -16,7 +16,9 @@ The window:
   the path, or drop the file on the window (an X3 header goes to the X3 slot).
   Each shows its header: title, version, SHA-256 of the image with any 512-byte
   copier header stripped (same hash as `cargo xtask rominfo`).
-* **Options**: window scale 1-8 (`--scale`), `--fullscreen`, Widescreen off/16:10/16:9/21:9 (`--widescreen`), Play as Zero
+* **Options**: window scale 1-8 (`--scale`), `--fullscreen`, Widescreen off/16:10/16:9/21:9 (`--widescreen`), "spawn enemies at the
+  wide edges (changes gameplay; both players)" (`--wide-gameplay`, docs/widescreen.md
+  "Wide gameplay"; online both players must tick it), Play as Zero
   (`--zero`, needs the X3 ROM; a game built before `--zero` landed
   rejects it as an unknown argument), Local co-op (`--coop-local`, ignored online).
 * **Play online**: Host/Join (`--coop-host`/`--coop-join ROOM`), room with a

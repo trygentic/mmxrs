@@ -176,6 +176,17 @@ impl Emu {
         mmx_core::Widescreen::parse(name).map(|w| self.game.set_widescreen(w)).is_some()
     }
 
+    /// Wide gameplay (docs/widescreen.md "Wide gameplay"): enemies spawn at
+    /// the wide edges. Changes the game: set it before a netplay connect,
+    /// both peers must agree (the handshake refuses a mismatch). Turned on
+    /// mid-stage, the margins' columns are spawned at once.
+    pub fn set_wide_gameplay(&mut self, on: bool) {
+        self.game.set_wide_gameplay(on);
+        if on {
+            mmx_core::wide_gameplay::sweep(&mut self.game);
+        }
+    }
+
     /// Co-op on/off. Throws (and stays off) when this ROM lacks a hook
     /// (see [`Emu::hook_report`]).
     pub fn set_coop(&mut self, on: bool) -> Result<(), JsValue> {

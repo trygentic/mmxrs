@@ -45,7 +45,7 @@ fn main() {
         std::process::exit(2);
     }
     let net = args.net.as_ref().map(|(host, room)| {
-        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.mode, args.net_delay(), args.prediction, x3.as_ref(), args.zero, args.timing, args.net_record.as_deref())
+        netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.mode, args.net_delay(), args.prediction, x3.as_ref(), args.zero, args.timing, args.wide_gameplay, args.net_record.as_deref())
             .unwrap_or_else(|e| {
                 eprintln!("netplay: {e}");
                 std::process::exit(2);
@@ -78,6 +78,7 @@ fn main() {
     });
 
     game.set_widescreen(args.widescreen);
+    game.set_wide_gameplay(args.wide_gameplay);
     if args.headless {
         match headless::run(&mut game, &args) {
             Ok(sha) => println!("frames {} wram_sha256 {sha}", game.frame_count()),

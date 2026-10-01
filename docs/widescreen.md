@@ -280,9 +280,139 @@ one 32-px column, and objects despawn about 64 px past either edge. Showing
 the whole margin would mean "wide gameplay": spawn by the wide window
 (`$80:DC0B`'s `+256` and row width), queue and despawn by it (`$82:80B4`,
 `$82:808F`, `$82:806E`). That changes what enemies do and when (they act and
-shoot from further away), so it is gameplay: an opt-in that would have to go
-into the netplay identity (`trapset_id` / `NET_REVISION`) and be on for both
-peers, unlike the display-only margins. Not done.
+shoot from further away), so it is gameplay: an opt-in in the netplay
+identity, on for both peers, unlike the display-only margins. See "Wide
+gameplay".
+
+## Wide gameplay (opt-in, changes the game)
+
+`--wide-gameplay` (native), the launcher's "spawn enemies at the wide edges"
+box, the web's checkbox, `Game::set_wide_gameplay(true)`. Off by default; off
+registers nothing, so a game without it is byte-identical to one built before
+it existed (`xtask verify`, checksums, netplay identity).
+
+### Design
+
+The game's object window is moved out by a fixed margin, independent of the
+display preset, so every peer simulates the same world whatever it shows:
+
+- `WIDE_GAMEPLAY_PX` = **136** (the 21:9 margin, the widest preset): the
+  draw-queue tests `$82:80B4` and `$82:808F` accept X `-32-136 .. 288+136`
+  (`-96-136 .. 352+136`). A 16:10 or 16:9 player simply does not see the
+  outer part of it. Y is unchanged (the picture is not taller).
+- `WIDE_SPAWN_PX` = **160** (136 rounded up to the spawner's 32-px columns):
+  the spawner `$80:DC0B` spawns the column at `cam + 256 + 160` scrolling
+  right and `cam - 160` scrolling left, and its row sweep (camera moved
+  vertically, which is also how a stage entry or a camera jump fills the
+  screen: the camera is stepped into place a row at a time) covers
+  `cam - 32 - 160 .. cam + 288 + 160` (20 columns instead of 10). The despawn
+  test `$82:806E` accepts X `-64-160 .. 320+160`. Rounding up keeps the
+  spawned column wholly outside the 21:9 picture, as the ROM's own column is
+  just outside 256 px, and keeps the ROM's 32 px of slack between the spawn
+  column and the despawn line (with less, a few px of backing up would
+  delete an enemy without the camera re-crossing its column, so it would not
+  come back).
+- The emitter cull `$80:D67C` is left alone: OAM stays the original 256-px
+  window, and the margin sprite pass draws what it culls (now: everything
+  out to the margins, since those objects exist and are queued).
+
+Trade-off: enemies engage about 136-160 px earlier on both sides. They
+spawn, act, shoot and drop off ledges while X is still that far away, a
+walking enemy may reach you sooner, an enemy left behind keeps chasing for
+longer, and more objects are alive at once (slot pressure: the ROM refuses a
+spawn when its tables are full). That is a different game, so it is opt-in
+and part of the netplay identity: the flag and both margins are mixed into
+`trapset_id` (the traps' addresses are too), `NET_REVISION` 4. Peers that
+disagree refuse the handshake. Each peer still picks its own display preset.
+
+### Implementation (`crates/mmx-core/src/wide_gameplay.rs`)
+
+Six `Observe` traps, registered only with the flag on (`TrapTable::unregister`
+takes them off again), every address from `hooks.rs` with signatures that
+resolve on the PAL and USA Rev 1 dumps (bank `$82`/`$84` ones in place,
+bank `$80` ones `+$2B`). None skips an instruction, so the CPU's timing is
+the ROM's; they change a register or a scratch word and let the ROM go on.
+
+| hook | PAL / Rev 1 | what changes |
+|---|---|---|
+| `queue_test` | `$82:80C3` / same | X `BCS` of `$82:80B4` |
+| `queue_test_big` | `$82:809E` / same | X `BCS` of `$82:808F` |
+| `despawn_test` | `$82:807D` / same | X `BCS` of `$82:806E` |
+| `spawn_column` | `$80:DC56` / `$80:DC81` | horizontal column X in `$00` |
+| `spawn_row` | `$80:DC9B` / `$80:DCC6` | row sweep start `$00`, count A |
+| `kind_count` | `$84:A1E0` / same | Z at the slot test of `$84:A1D5` |
+
+- **Queue / despawn tests**. All three are `REP #$20; SEC; LDA $05; SBC
+  $1E4D; CLC; ADC #a; CMP #w; BCS out; SEC; LDA $08; SBC $1E50; CLC; ADC
+  #b; CMP #h; ..`. The trap sits on the X `BCS`: A is `x - cam + a`, P is
+  the `CMP`'s. `wide_gameplay::widen` recomputes `ADC #a+M; CMP #w+2M` from
+  `A - a` (V from the `ADC`, N Z C from the `CMP`, the immediates read from
+  the ROM) and writes A and P back; the ROM's `BCS` then branches the wide
+  way and everything after (the Y test, `+$0E = $81`, the draw-list push,
+  `$806E`'s carry for its caller) is the ROM's. So the registers are exactly
+  those of a ROM whose immediates were widened, and at M = 0 the trap is the
+  identity (pinned, below). Decimal mode: no change.
+- **Spawner** (`$80:DC0B`). At `$80:DC56` (a horizontal column is about to
+  be spawned, its X in `$00`): `$00 += 160` when it is `cam + 256`
+  (scrolling right), `$00 -= 160` when it is `cam`. At `$80:DC9B` (`STA $06`
+  of the row sweep, `A = 10` columns from `$00 = cam - 32`): `$00 -= 160`,
+  `A = 20`. The column test itself (did the camera cross a 32-px line?)
+  stays the ROM's; 160 being a multiple of 32, the moved column is exactly
+  the next one out, no gaps and no repeats at any camera speed. Each layout
+  entry has a "spawned" byte (`STA ($14)` = 1; the object's `+$0C` points
+  back at it and its removal, `$82:8387`, clears it), so a column spawned
+  twice never doubles an enemy. Stage entries step the camera into place a
+  row at a time through the row sweep, so they fill the wide window too.
+- **Same-kind counts** (`$84:A1D5`, 22 callers: an object counts the live
+  objects with its id, e.g. the Sky Claw at `$82:96AF` deletes itself when 2
+  are alive). A live object outside the ROM's own despawn window (X
+  `-64..320`) counts as an empty slot (Z set at the `BEQ`). Such objects
+  only exist with wide gameplay; without this the Sky Claws left alive
+  behind the player (out to -224) refused every new one, and a refused
+  spawn clears its entry, so it stays away until the camera re-crosses its
+  column (measured: no Sky Claw at all over the hw-a and highway-mid walks).
+- **Turning it on mid-stage** (a save state made without it, the web's
+  checkbox): the columns between the ROM's spawn line and the wide one were
+  never spawned and the camera has already crossed them. `wide_gameplay::sweep`
+  spawns them once through the ROM's column spawner `$80:DCB0` (isolated,
+  5 columns a side, `$00..$07` and the registers put back). xtask
+  (`--load` with `--wide-gameplay`, netsim's frame-0 load, netreplay) and the
+  web's checkbox call it; a rollback `load_state` never does (the state
+  already has them).
+
+Not widened: Y (the picture is not taller); the emitter cull (OAM stays the
+256-px window, the margin sprite pass draws the rest); bank `$83`'s private
+copies of the window test for single enemies (`$83:8948` `-128..384`,
+`$83:963A` `-32..288`) and bank `$80`'s (`$80:DD89`, no caller found); any
+enemy AI that checks its own distance to the camera or to X with its own
+constants.
+
+### What it does (measured, 21:9, walking right)
+
+`cargo test -p mmx-core --test wide_gameplay enemies -- --nocapture` prints
+every object's X relative to the camera when it first appears and the
+leftmost X any object reached (600 frames, `pads()` walk with jumps and
+shots):
+
+| state | off: spawn X | on: spawn X | off: leftmost | on: leftmost |
+|---|---|---|---|---|
+| hw-a | 270..272 | 430..432 | -67 | -226 |
+| highway-mid | 255..272 | 414..432 | -67 | -226 |
+| hw-a, Rev 1 (`states/usa11`) | 270..272 | 430..432 | -66 | -227 |
+
+(X 153/155 are X's own shots.) So enemies appear 24-40 px past the 21:9
+picture's right edge (392) and are removed past -224, 88 px beyond its
+left edge (-136). PNG strips (`target/widescreen/wide-gameplay/`, dotted
+lines at the 256-px window): `hw-a-{on,off}.png` (frames 100-300: the Sky
+Claws and the jumping mech come in from the right margin, the road
+attacker car stays alive at the left), `highway-mid-{on,off}.png` (frames
+50-250: the car and the Sky Claws are in the right margin 50-100 frames
+earlier), `hw-bee2-{on,off}.png` (the Bee Blader fight: camera locked,
+identical status lines on vs off over 600 frames).
+
+Difficulty: with the same input X takes more hits (hw-a, holding right:
+dead between frames 450 and 500 with it on, alive at 600 with it off), since enemies
+come at him from further and in larger numbers.
 
 ## Verification
 
@@ -325,5 +455,27 @@ peers, unlike the display-only margins. Not done.
   two window boundaries is within the frame's own 90th percentile except
   where real edges sit (highway-start: the stage's first wall at x 0 and a
   pillar edge at x 256).
+- Wide gameplay (`cargo test -p mmx-core --test wide_gameplay`, ROM-gated;
+  `MMX_STATES=states/usa11` with the Rev 1 ROM): `window_test_m0_is_register_exact`
+  (observe-only traps on the three X `BCS`s, ROM untouched, 600 frames of
+  hw-a and highway-mid walking/jumping/shooting: 6754 and 4871 calls, Rev 1
+  hw-a 6949; at every one `widen(.., 0)` equals the ROM's A and P and
+  `widen(.., 136)`'s carry is the object's X against the widened window);
+  `window_test_m0_matches_rom_run` (the trap body at M = 0 against the
+  untrapped ROM, 600 frames of hw-a: `+$0E` of every object, the draw lists
+  `$0920..$0A9F`, the counts `$E7..$EC` and all of WRAM equal every frame,
+  save states equal at the end); `off_is_untouched` (on then off: trap set,
+  `trapset_id`, 2400 frames of checksums and the final save state equal to a
+  game that never had it); `enemies_spawn_at_the_wide_edges` (the table
+  above). Flag off against main (`8429c79`), 2400 frames, the final save
+  state byte for byte and every status line: power-on with taps (PAL and Rev
+  1), hw-a `--coop`, hw-a at 21:9: identical. `xtask verify --frames 2400
+  --coop-off --tap 200,400,600,800,1000 --hold 0100`: OK on both dumps;
+  `scripts/coop-qa.sh check`: output identical to main's. Netplay: `xtask
+  netsim --load states/hw-a.state --rtt 120 --jitter 20 --loss 2 --delay 2
+  --prediction 12 --frames 2400 --wide-gameplay ...`: no desync, 41 checks
+  ok per peer, identical to the plain run; `xtask netreplay` of its log
+  (`wide 1` in the header) matches all 40 checksums; `--wide-gameplay-host`
+  (host only): the handshake refuses (`mismatch: TrapSet`) in both modes.
 - Cost: Launch Octopus at 21:9 (two screens + colour math) 3.9 -> 5.8 ms per
   frame on an M-series Mac, about the main renderer's own cost per pixel.

@@ -43,6 +43,9 @@ impl TrapTable {
     pub fn register(&mut self, addr: u32, name: &'static str, ret: TrapReturn, body: TrapFn) {
         self.traps.insert(addr & 0xFF_FFFF, TrapInfo { name, ret, body });
     }
+    pub fn unregister(&mut self, addr: u32) {
+        self.traps.remove(&(addr & 0xFF_FFFF));
+    }
     /// Global kill switch: `false` makes this an oracle (pure emulation).
     pub fn set_enabled(&mut self, on: bool) {
         self.enabled = on;

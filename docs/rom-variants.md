@@ -1,6 +1,6 @@
 # ROM variants
 
-Every routine the co-op, Zero and display traps hook or call (28 of them) is
+Every routine the co-op, Zero, display and wide gameplay traps hook or call (34 of them) is
 listed in `crates/mmx-core/src/hooks.rs` with its address on our dump and a
 16-byte signature (`??` over operands that point into ROM: call/jump targets,
 long addresses into banks `$80+`, words `>= $8000`). At load
@@ -16,7 +16,7 @@ moved on v1.1.
 | dump | sha256 | hooks | checked |
 |---|---|---|---|
 | Europe (PAL) v1.0, `$FFD9 = 2` | `1c41bb11c9df5aa8…` | all where traced (the table's own addresses) | everything: tests, verify, `coop-qa.sh`, netplay |
-| USA (NTSC) v1.1 (Rev 1), `$FFD9 = 1` | `b8f70a6e7fb93819…` | 17 relocated: bank `$80` `+$20` (`$9A86`, `$9A94`), `+$2B` (from `$D1EF` on); banks `$81/$82/$84` as PAL | parity verify, `zero_p1_palette_stable`, `hooks::resolves_on_usa_v11`, `coop-qa.sh` on its own states |
+| USA (NTSC) v1.1 (Rev 1), `$FFD9 = 1` | `b8f70a6e7fb93819…` | 19 relocated: bank `$80` `+$20` (`$9A86`, `$9A94`), `+$2B` (from `$D1EF` on); banks `$81/$82/$84` as PAL | parity verify, `zero_p1_palette_stable`, `hooks::resolves_on_usa_v11`, `coop-qa.sh` on its own states |
 | USA (NTSC) v1.0 | - | not seen yet (the disassembly's PCs are up to `0x41` off ours in bank `$80`) | - |
 
 `cargo xtask rominfo` prints where each hook landed ("as PAL", "relocated by

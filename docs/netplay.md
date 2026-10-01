@@ -502,6 +502,7 @@ interval 60                 checksum interval in frames
 timing auto                 auto | ntsc | pal
 x3 0                        X3 Zero set loaded
 zero 0                      P1 plays as Zero
+wide 1                      (only when on) wide gameplay
 load states/hw-spiky.state  (netsim only) state loaded at frame 0
 ---
 ```
@@ -532,7 +533,8 @@ cargo xtask netreplay host.log guest.log        # both: also compared with each 
 ```
 
 It rebuilds the session game the way the peers did
-(`netgame::session_game`, co-op on, the X3 set and `--zero` per the header;
+(`netgame::session_game`, co-op on, the X3 set, `--zero` and wide gameplay
+per the header, the margins' sweep after a `--load`;
 it refuses when the ROM CRC or the trap-set id differ, i.e. another ROM,
 build or flags), steps the confirmed pad track and compares the checksum
 after every logged interval with the log's local and remote values. For the
@@ -623,6 +625,16 @@ change was needed for this.
   start; the session game takes the set from the frontend's game), co-op flags
   `COOP_TWO_PLAYERS`, input delay. No WRAM is sent (MMX has no SRAM; both
   peers start from power-on).
+- `NetPlay::config_wide(.., wide_gameplay)` is the same with wide gameplay
+  (docs/widescreen.md "Wide gameplay": enemies spawn at the wide edges).
+  It changes the simulation, so its traps' addresses and both margins
+  (`WIDE_GAMEPLAY_PX`, `WIDE_SPAWN_PX`) are in the trap-set id
+  (`NET_REVISION` 4): a peer with it and a peer without refuse to start
+  (`closed (mismatch: TrapSet)`, `xtask netsim --wide-gameplay-host`). The
+  session game takes it from the frontend's game, like the X3 set. Native
+  `--wide-gameplay`, the launcher's "spawn enemies at the wide edges" box,
+  the web's checkbox (fixed while a session exists). The widescreen preset
+  itself stays per peer (display only).
 - `tick_audio(game, pad, now_ms)`: what the frontends call, while their audio
   queue is below ~50 ms: `tick` plus exactly one frame of audio (the new
   frame's, or silence when nothing stepped), so the device clock paces the

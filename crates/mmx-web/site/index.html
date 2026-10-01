@@ -23,6 +23,7 @@
     <label>Mega Man X3 ROM (optional, enables Zero's sprites and saber) <input type="file" id="x3rom" accept=".sfc,.smc,.bin"></label>
     <label><input type="checkbox" id="zero"> Play as Zero (X3 ROM)</label>
     <label title="extra scenery left and right of the 256-px picture (display only)">Screen <select id="widescreen"><option value="off">4:3</option><option>16:10</option><option>16:9</option><option>21:9</option></select></label>
+    <label title="enemies spawn, act and leave 136-160 px further out on both sides, whatever the screen setting; online, both players must tick it before connecting"><input type="checkbox" id="wideGame"> spawn enemies at the wide edges (changes gameplay; both players)</label>
   </div>
   <div id="netBox">
     <input id="netSignal" value="ws://127.0.0.1:3536" size="22" title="signal server (mmx-signal)">
