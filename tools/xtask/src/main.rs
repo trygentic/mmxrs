@@ -20,8 +20,9 @@ const USAGE: &str = "usage: cargo xtask <command>
        from the state's co-op data; a state saved before it re-anchors P2 on P1)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
-       --wide off|16:10|16:9|21:9|N: widescreen PNGs (docs/widescreen.md)
-  bench --frames N [script] [--load STATE] [--x3 PATH] [--zero] [--coop] [--wide W] [--wide-gameplay] [--warmup N] [--csv PATH]
+       --wide off|16:10|16:9|21:9|N: widescreen PNGs (docs/widescreen.md); --overclock off|1.5|2: CPU overclock (default off;
+       also bench, verify (oracle and DUT), netsim, bginfo, trace)
+  bench --frames N [script] [--load STATE] [--x3 PATH] [--zero] [--coop] [--wide W] [--wide-gameplay] [--overclock off|1.5|2] [--warmup N] [--csv PATH]
        release wall time per step: mean / p99 / max, overall and on frames with 3+ live enemies;
        MMX_PROFILE=1 adds the per-phase breakdown (trap bodies by name, margin passes, take_audio). docs/widescreen.md \"Performance\"
   bginfo --frames N [script] [--load STATE] [--lines]   PPU registers after frame N (BG mode, tilemaps, scroll), camera;
@@ -31,7 +32,8 @@ const USAGE: &str = "usage: cargo xtask <command>
   stateinfo PATH   what a save state holds (frame count, tile pages, co-op data, P2); docs/savestates.md
   zerosheet [--x3 PATH [--wave|--slash|--sfx]] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data; --wave: the saber wave, --slash: the slash arc) -> DIR/NN_name.png + DIR/sheet.png; --sfx: his X3 sounds -> DIR/swing.wav
   netsim [--mode rollback|lockstep] [--rtt MS] [--jitter MS] [--loss PCT] [--delay N] [--prediction N] [--frames N]
-       [--load STATE] [--x3 PATH] [--zero] [--timing ntsc|pal] [--seed N] [--report F.json] [--record PREFIX] [--no-smoothing] [script]
+       [--load STATE] [--x3 PATH] [--zero] [--timing ntsc|pal] [--seed N] [--report F.json] [--record PREFIX] [--no-smoothing]
+       [--wide-gameplay|--wide-gameplay-host] [--overclock off|1.5|2] [--overclock-host F] [script]
        two session games over a simulated link (virtual clock); host plays pad 1 of the script, guest pad 2;
        exit 1 on desync or a mismatch with the plain run. --record writes PREFIX-host.log / PREFIX-guest.log
   netreplay LOG [LOG2] [--load STATE] [--x3 PATH] [--rom PATH]   a session log (mmxrs --net-record) against a
@@ -134,7 +136,13 @@ fn game_scripted(args: &[String]) -> Game {
         let rom = std::fs::read(&p).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
         g.set_x3_rom(&rom).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
     }
+    g.set_overclock(overclock(args));
     g
+}
+
+/// `--overclock off|1.5|2` (default off; no wide-gameplay default here, unlike mmxrs).
+fn overclock(args: &[String]) -> mmx_core::Overclock {
+    flag(args, "--overclock").map_or_else(Default::default, |v| v.parse().unwrap_or_else(|e: String| die(&e)))
 }
 
 /// `--save F=PATH,...`: write a save state after frame F.
@@ -236,9 +244,11 @@ fn verify(args: &[String]) -> i32 {
     let rom = rom();
     let mut oracle = game(rom.clone());
     oracle.traps.set_enabled(false);
+    oracle.set_overclock(overclock(args));
     // TODO: register the default trap set on the DUT once mmx-core has one
     // (mmx_core::register_default_traps(&mut dut)). Until then DUT == oracle.
     let mut dut = game(rom);
+    dut.set_overclock(overclock(args));
     if args.iter().any(|a| a == "--coop-off") {
         // Parity rule: the co-op trap group registered but disabled must be
         // byte-identical to the untrapped oracle.
@@ -283,7 +293,7 @@ fn bench(args: &[String]) -> i32 {
         let w = g.wram();
         (0..ram::ENEMY_COUNT).filter(|k| w[ram::wram_index(ram::ENEMIES_BASE) + k * ram::ENEMY_STRIDE] != 0).count()
     };
-    type Row = (u64, usize, Vec<(&'static str, u64)>);
+    type Row = (u64, usize, Vec<(&'static str, u64)>, bool);
     let mut rows: Vec<Row> = Vec::with_capacity(frames);
     // Emulated lag frames: the main loop counter `$0B9B` did not move (docs/PLAN.md).
     let main_loop = |g: &Game| g.wram()[ram::wram_index(0x7E_0B9B)];
@@ -302,11 +312,12 @@ fn bench(args: &[String]) -> i32 {
         }
         if f > warmup {
             let n = enemies(&g);
-            if main_loop(&g) == before {
+            let lagged = main_loop(&g) == before;
+            if lagged {
                 lag.0 += 1;
                 lag.1 += usize::from(n >= 3);
             }
-            rows.push((total, n, ph));
+            rows.push((total, n, ph, lagged));
         }
     }
     let ms = |ns: u64| ns as f64 / 1e6;
@@ -326,7 +337,7 @@ fn bench(args: &[String]) -> i32 {
     println!("3+ enemies: {nb} frames  mean {:.3} ms  p99 {:.3} ms  max {:.3} ms  emulated lag frames {}", b.0, b.1, b.2, lag.1);
     if profile {
         let mut names: Vec<&'static str> = Vec::new();
-        for (_, _, ph) in &rows {
+        for (_, _, ph, _) in &rows {
             for (n, _) in ph {
                 if !names.contains(n) {
                     names.push(n);
@@ -350,8 +361,8 @@ fn bench(args: &[String]) -> i32 {
         }
     }
     if let Some(p) = flag(args, "--csv") {
-        let s: String = rows.iter().enumerate().map(|(i, r)| format!("{},{},{}\n", i + 1, r.0, r.1)).collect();
-        std::fs::write(p, format!("frame,ns,enemies\n{s}")).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+        let s: String = rows.iter().enumerate().map(|(i, r)| format!("{},{},{},{}\n", i + 1, r.0, r.1, u8::from(r.3))).collect();
+        std::fs::write(p, format!("frame,ns,enemies,lag\n{s}")).unwrap_or_else(|e| die(&format!("{p}: {e}")));
     }
     0
 }
@@ -892,6 +903,8 @@ fn netsim(args: &[String]) -> i32 {
     // `--wide-gameplay` on both peers, `--wide-gameplay-host` on the host only (refused).
     let wide = args.iter().any(|a| a == "--wide-gameplay");
     o.wide = [wide || args.iter().any(|a| a == "--wide-gameplay-host"), wide];
+    // `--overclock F` on both peers, `--overclock-host F` on the host only (refused).
+    o.overclock = [flag(args, "--overclock-host").map_or_else(|| overclock(args), |v| v.parse().unwrap_or_else(|e: String| die(&e))), overclock(args)];
     o.smoothing = !args.iter().any(|a| a == "--no-smoothing");
     o.load = flag(args, "--load").map(|p| (p.to_string(), std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")))));
     let record = flag(args, "--record");

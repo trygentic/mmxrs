@@ -207,6 +207,18 @@ impl App {
         .on_hover_text("extra scenery left and right of the picture; F10 in game cycles it");
         ui.checkbox(&mut s.wide_gameplay, "spawn enemies at the wide edges (changes gameplay; both players)")
             .on_hover_text("enemies spawn, act and leave 136-160 px further out on both sides, whatever the widescreen setting; online, both players must tick it");
+        ui.horizontal(|ui| {
+            ui.label("CPU overclock (removes slowdown; both players)");
+            let auto = if s.wide_gameplay { "auto (2x)" } else { "auto (off)" };
+            let name = |o: &str| match o { "" | "auto" => auto.to_string(), "1.5" | "2" => format!("{o}x"), o => o.to_string() };
+            egui::ComboBox::from_id_salt("overclock").selected_text(name(&s.overclock)).show_ui(ui, |ui| {
+                for o in ["", "off", "1.5", "2"] {
+                    ui.selectable_value(&mut s.overclock, o.to_string(), name(o));
+                }
+            });
+        })
+        .response
+        .on_hover_text("runs the SNES CPU faster so scenes with many enemies stop slowing down; auto follows wide gameplay; online, both players must pick the same");
         ui.checkbox(&mut s.zero, "Play as Zero (needs X3)");
         ui.add_enabled(!s.online, egui::Checkbox::new(&mut s.coop_local, "Local co-op (2 players)"));
         ui.separator();

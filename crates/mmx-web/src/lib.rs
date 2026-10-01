@@ -187,6 +187,14 @@ impl Emu {
         }
     }
 
+    /// CPU overclock `off`, `1.5` or `2` (docs/widescreen.md "Slowdown and
+    /// overclock"): removes the game's slowdown. Changes the game like wide
+    /// gameplay (set before a netplay connect; both peers must agree).
+    /// Returns false on a bad name.
+    pub fn set_overclock(&mut self, name: &str) -> bool {
+        name.parse().map(|o| self.game.set_overclock(o)).is_ok()
+    }
+
     /// Co-op on/off. Throws (and stays off) when this ROM lacks a hook
     /// (see [`Emu::hook_report`]).
     pub fn set_coop(&mut self, on: bool) -> Result<(), JsValue> {

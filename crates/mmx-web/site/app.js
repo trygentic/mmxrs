@@ -39,6 +39,22 @@ $('wideGame').addEventListener('change', (e) => {
   } else {
     wideGame = e.target.checked;
     emu?.set_wide_gameplay(wideGame);
+    emu?.set_overclock(overclockNow());
+  }
+  e.target.blur();
+});
+// CPU overclock (changes the game; netplay id): the select, or ?overclock=off|1.5|2.
+// auto = 2x with wide gameplay (more enemies alive, more slowdown), else off.
+let overclock = new URLSearchParams(location.search).get('overclock') || 'auto';
+$('overclock').value = overclock;
+const overclockNow = () => (overclock === 'auto' ? (wideGame ? '2' : 'off') : overclock);
+$('overclock').addEventListener('change', (e) => {
+  if (net) {
+    e.target.value = overclock;
+    msg = 'CPU overclock: set it before going online';
+  } else {
+    overclock = e.target.value;
+    emu?.set_overclock(overclockNow());
   }
   e.target.blur();
 });
@@ -59,6 +75,7 @@ async function loadRom(file) {
     if (x3 && zero) e.set_p1_zero(true);
     e.set_widescreen(widescreen);
     e.set_wide_gameplay(wideGame);
+    e.set_overclock(overclockNow());
     emu = e;
     const info = JSON.parse(emu.rom_info_json());
     msg = `${info.title.trim()} v1.${info.version} sha256 ${info.sha256.slice(0, 16)}…${refused}`;

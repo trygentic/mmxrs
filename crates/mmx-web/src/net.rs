@@ -36,7 +36,7 @@ impl Emu {
             Err(_) => return Err(err(format!("input delay {delay} out of range"))),
         };
         let g = &self.game;
-        let cfg = NetPlay::<MatchboxTransport>::config_wide(&self.rom, host, mode, delay, g.zero_set(), g.p1_zero(), g.timing(), g.wide_gameplay()).map_err(err)?;
+        let cfg = NetPlay::<MatchboxTransport>::config_wide(&self.rom, host, mode, delay, g.zero_set(), g.p1_zero(), g.timing(), g.wide_gameplay(), g.overclock()).map_err(err)?;
         let url = mmx_net::room_url(signal, room).map_err(|e| err(e.to_string()))?;
         let ice = match ice.trim() {
             "" => None,
