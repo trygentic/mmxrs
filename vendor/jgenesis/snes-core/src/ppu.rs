@@ -669,7 +669,11 @@ impl Ppu {
     // mmxrs patch: the widescreen margins after each (partial) line render
     fn render_current_line(&mut self, from_pixel: u16) {
         self.render_current_line_inner(from_pixel);
+        let t = crate::prof::now();
         self.render_wide_margins(self.state.scanline, from_pixel);
+        if let (Some(a), Some(b)) = (t, crate::prof::now()) {
+            crate::prof::add_wide_ns(b - a);
+        }
     }
 
     fn render_current_line_inner(&mut self, from_pixel: u16) {

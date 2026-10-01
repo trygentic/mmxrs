@@ -14,6 +14,7 @@ pub mod margin_sprites;
 pub mod netgame;
 pub mod netlog;
 pub mod p2tiles;
+pub mod profile;
 pub mod ram;
 pub mod saber;
 pub mod sfx;

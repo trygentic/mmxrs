@@ -70,6 +70,7 @@ pub(crate) fn observe(game: &mut Game) {
     if m == 0 || game.isolated_depth > 0 || game.hooks().get(crate::coop::PLAYER_OAM).is_none() {
         return;
     }
+    let _t = crate::profile::scope("margin sprites");
     let saved_wram: Box<[u8]> = game.wram()[..0x2000].into();
     let saved_cpu = game.cpu_snapshot();
     let saved_contact = game.coop.in_contact;

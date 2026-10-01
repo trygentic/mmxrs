@@ -6,3 +6,4 @@ pub(crate) mod constants;
 pub mod input;
 mod memory;
 mod ppu;
+pub mod prof;

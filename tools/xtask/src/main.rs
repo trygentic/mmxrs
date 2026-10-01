@@ -21,6 +21,9 @@ const USAGE: &str = "usage: cargo xtask <command>
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
        --wide off|16:10|16:9|21:9|N: widescreen PNGs (docs/widescreen.md)
+  bench --frames N [script] [--load STATE] [--x3 PATH] [--zero] [--coop] [--wide W] [--wide-gameplay] [--warmup N] [--csv PATH]
+       release wall time per step: mean / p99 / max, overall and on frames with 3+ live enemies;
+       MMX_PROFILE=1 adds the per-phase breakdown (trap bodies by name, margin passes, take_audio). docs/widescreen.md \"Performance\"
   bginfo --frames N [script] [--load STATE] [--lines]   PPU registers after frame N (BG mode, tilemaps, scroll), camera;
        --lines: frame N's per-line BG registers (HDMA effects); docs/widescreen.md
   ledger
@@ -40,6 +43,7 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("verify") => verify(&args[1..]),
         Some("dump") => dump(&args[1..]),
+        Some("bench") => bench(&args[1..]),
         Some("trace") => trace(&args[1..]),
         Some("cooptrace") => cooptrace(&args[1..]),
         Some("lagdiff") => lagdiff(&args[1..]),
@@ -252,6 +256,104 @@ fn verify(args: &[String]) -> i32 {
             0
         }
     }
+}
+
+/// `bench`: step a game (same setup flags as `dump`) and time every step.
+fn bench(args: &[String]) -> i32 {
+    use std::time::Instant;
+    let frames = num(args, "--frames").unwrap_or(600);
+    let warmup = num(args, "--warmup").unwrap_or(30);
+    let profile = std::env::var_os("MMX_PROFILE").is_some_and(|v| v != "0");
+    if profile {
+        static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        T0.get_or_init(Instant::now);
+        mmx_core::profile::set_clock(|| T0.get().map_or(0, |t| t.elapsed().as_nanos() as u64));
+    }
+    let script = scripted(args);
+    let mut g = game_scripted(args);
+    if args.iter().any(|a| a == "--coop") {
+        g.coop.enabled = true;
+        mmx_core::coop::register_coop_traps(&mut g).unwrap_or_else(|e| die(&e));
+    }
+    if args.iter().any(|a| a == "--zero") {
+        g.set_p1_zero(true).unwrap_or_else(|e| die(&format!("--zero: {e}")));
+    }
+    g.set_audio_rate(48_000);
+    let enemies = |g: &Game| {
+        let w = g.wram();
+        (0..ram::ENEMY_COUNT).filter(|k| w[ram::wram_index(ram::ENEMIES_BASE) + k * ram::ENEMY_STRIDE] != 0).count()
+    };
+    type Row = (u64, usize, Vec<(&'static str, u64)>);
+    let mut rows: Vec<Row> = Vec::with_capacity(frames);
+    // Emulated lag frames: the main loop counter `$0B9B` did not move (docs/PLAN.md).
+    let main_loop = |g: &Game| g.wram()[ram::wram_index(0x7E_0B9B)];
+    let mut lag = (0, 0); // (all, 3+ enemies)
+    for f in 1..=warmup + frames {
+        let before = main_loop(&g);
+        let t = Instant::now();
+        g.step(script(f, Pads::default()));
+        let mut ph = mmx_core::profile::take();
+        let ta = Instant::now();
+        std::hint::black_box(g.take_audio());
+        let audio = ta.elapsed().as_nanos() as u64;
+        let total = t.elapsed().as_nanos() as u64;
+        if profile {
+            ph.push(("take_audio", audio));
+        }
+        if f > warmup {
+            let n = enemies(&g);
+            if main_loop(&g) == before {
+                lag.0 += 1;
+                lag.1 += usize::from(n >= 3);
+            }
+            rows.push((total, n, ph));
+        }
+    }
+    let ms = |ns: u64| ns as f64 / 1e6;
+    let stats = |mut v: Vec<u64>| -> (f64, f64, f64) {
+        if v.is_empty() {
+            return (0.0, 0.0, 0.0);
+        }
+        v.sort_unstable();
+        let mean = v.iter().sum::<u64>() as f64 / v.len() as f64;
+        (mean / 1e6, ms(v[(v.len() * 99 / 100).min(v.len() - 1)]), ms(v[v.len() - 1]))
+    };
+    let all = stats(rows.iter().map(|r| r.0).collect());
+    let busy: Vec<u64> = rows.iter().filter(|r| r.1 >= 3).map(|r| r.0).collect();
+    let nb = busy.len();
+    let b = stats(busy);
+    println!("frames {}  mean {:.3} ms  p99 {:.3} ms  max {:.3} ms  emulated lag frames {}", rows.len(), all.0, all.1, all.2, lag.0);
+    println!("3+ enemies: {nb} frames  mean {:.3} ms  p99 {:.3} ms  max {:.3} ms  emulated lag frames {}", b.0, b.1, b.2, lag.1);
+    if profile {
+        let mut names: Vec<&'static str> = Vec::new();
+        for (_, _, ph) in &rows {
+            for (n, _) in ph {
+                if !names.contains(n) {
+                    names.push(n);
+                }
+            }
+        }
+        let worst = rows.iter().enumerate().max_by_key(|(_, r)| r.0).map_or(0, |(i, _)| i);
+        let get = |r: &Row, n: &str| r.2.iter().find(|(m, _)| *m == n).map_or(0, |p| p.1);
+        let mut table: Vec<(&str, f64, f64, f64, f64)> = names
+            .iter()
+            .map(|&n| {
+                let s = stats(rows.iter().map(|r| get(r, n)).collect());
+                let busy = stats(rows.iter().filter(|r| r.1 >= 3).map(|r| get(r, n)).collect());
+                (n, s.0, s.2, busy.0, ms(get(&rows[worst], n)))
+            })
+            .collect();
+        table.sort_by(|a, b| b.1.total_cmp(&a.1));
+        println!("{:<24} {:>9} {:>9} {:>11} {:>11}", "phase (exclusive)", "mean ms", "max ms", "mean 3+ en", "worst frame");
+        for (n, mean, max, busy, w) in table {
+            println!("{n:<24} {mean:>9.3} {max:>9.3} {busy:>11.3} {w:>11.3}");
+        }
+    }
+    if let Some(p) = flag(args, "--csv") {
+        let s: String = rows.iter().enumerate().map(|(i, r)| format!("{},{},{}\n", i + 1, r.0, r.1)).collect();
+        std::fs::write(p, format!("frame,ns,enemies\n{s}")).unwrap_or_else(|e| die(&format!("{p}: {e}")));
+    }
+    0
 }
 
 fn dump(args: &[String]) -> i32 {

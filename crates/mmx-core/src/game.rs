@@ -342,6 +342,7 @@ impl Game {
             p1: joypad(pads.p1),
             p2: joypad(pads.p2),
         };
+        let _t = crate::profile::scope(crate::profile::EMULATOR);
         let mut rendered = false;
         let audio_from = self.audio.0.len();
         // Run past the frame to the next instruction boundary, so a step
@@ -361,11 +362,13 @@ impl Game {
             rendered |= effect == TickEffect::FrameRendered;
         }
         if let Some(s) = self.zero_set.as_ref().and_then(|z| z.sounds.as_ref()) {
+            let _t = crate::profile::scope("sfx mix");
             let fps = self.emu.target_fps();
             crate::sfx::mix(&mut self.coop.sfx, &s.swing, fps, &mut self.audio.0[audio_from..]);
         }
         self.frame_count += 1;
         if self.wide_margin() > 0 {
+            let _t = crate::profile::scope("wide tiles");
             crate::widescreen::update_margin_tiles(self);
         }
     }
@@ -422,7 +425,10 @@ impl Game {
                 name: info.name,
                 frame: self.frame_count,
             });
-            (info.body)(self);
+            {
+                let _t = crate::profile::scope(info.name);
+                (info.body)(self);
+            }
             match info.ret {
                 TrapReturn::Observe => return,
                 TrapReturn::Rts => self.emulate_return(false),
