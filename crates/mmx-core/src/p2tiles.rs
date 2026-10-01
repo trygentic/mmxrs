@@ -27,7 +27,7 @@ const DMA_QUEUE: usize = 0x0500;
 const DMA_INDEX: usize = 0x00A3;
 const DMA_BUDGET: usize = 0x1F25;
 /// Block offset of the tile window base (in tiles).
-const OFF_TILE_BASE: usize = 0x18;
+pub(crate) const OFF_TILE_BASE: usize = 0x18;
 
 /// X's window: 32 tiles (two rows), the part of the page the X1 streamer path fills.
 pub const PAGE_TILES: u16 = 32;

@@ -64,6 +64,8 @@ pub struct Game {
     /// OAM slots of each player's character in the last OAM build (`[P1,
     /// P2]`, bit n = slot n; display.rs). Display only, not in save states.
     pub(crate) oam_slots: [u128; 2],
+    /// Margin sprites (margin_sprites.rs). Display only, not in save states.
+    pub margin: crate::margin_sprites::MarginState,
     emu: SnesEmulator,
     // ponytail: own copy of the ROM for rom_read (~1.5 MiB); jgenesis only
     // exposes cartridge reads through &mut (open-bus side effect).
@@ -242,6 +244,7 @@ impl Game {
             p2_stream: None,
             zero_set: None,
             oam_slots: [0; 2],
+            margin: Default::default(),
         })
     }
 
@@ -530,9 +533,28 @@ impl Game {
     /// Widescreen (docs/widescreen.md): `margin` extra pixels each side of
     /// the 256-px picture (0 = off). Display only: no WRAM/VRAM/OAM/CGRAM
     /// write, not in save states, kept across `load_state`. [`Game::frame`]
-    /// reports the wide size from the next frame on.
+    /// reports the wide size from the next frame on. With a margin, objects
+    /// past the picture's edges are drawn in it (margin_sprites.rs), from
+    /// the display hook, which this registers when co-op has not.
     pub fn set_wide_margin(&mut self, margin: u16) {
         self.emu.set_wide_margin(margin);
+        if margin > 0 {
+            crate::coop::register_display_trap(self);
+        }
+    }
+
+    /// The whole CPU (and open bus) around a display-only isolated pass.
+    pub(crate) fn cpu_snapshot(&self) -> snes_core::api::CpuSnapshot {
+        self.emu.cpu_snapshot()
+    }
+
+    pub(crate) fn restore_cpu_snapshot(&mut self, s: snes_core::api::CpuSnapshot) {
+        self.emu.restore_cpu_snapshot(s);
+    }
+
+    /// The PPU's margin sprites from the next OAM upload on (display only).
+    pub(crate) fn set_margin_sprites(&mut self, sprites: Vec<snes_core::api::MarginSprite>) {
+        self.emu.set_margin_sprites(sprites);
     }
 
     pub fn wide_margin(&self) -> u16 {

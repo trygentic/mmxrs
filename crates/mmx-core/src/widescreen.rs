@@ -117,6 +117,9 @@ pub fn update_margin_tiles(g: &mut Game) {
     let w = g.wram();
     let in_stage = w[ram::wram_index(ram::MODE_D2)] == 4 && w[ram::wram_index(ram::STAGE_PHASE)] != 0;
     let m = i32::from(g.wide_margin());
+    if !in_stage {
+        g.set_margin_sprites(Vec::new()); // no stage, no margin objects
+    }
     for bg in 0..2 {
         if !in_stage || agreement(g, bg) < 90 {
             g.set_margin_tiles(bg, None);

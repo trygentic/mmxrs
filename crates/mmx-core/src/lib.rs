@@ -10,6 +10,7 @@ pub mod coop_stages;
 pub mod display;
 mod game;
 pub mod hooks;
+pub mod margin_sprites;
 pub mod netgame;
 pub mod netlog;
 pub mod p2tiles;

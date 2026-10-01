@@ -174,6 +174,24 @@ fn slash_entries(game: &mut Game, set: &ZeroSet, obj: &[u8], saber: &Saber, whic
         .collect()
 }
 
+/// P2's X3 Zero entries at the current camera (the margin pass moves it,
+/// margin_sprites.rs): `(entry, high bits, shadow page)`, the slash arc
+/// (page 2) first. Only parts whose page this frame's [`emit_x3`] already
+/// filled, so the pass changes no page and no `CoopState`.
+pub(crate) fn margin_entries(game: &mut Game, set: &ZeroSet) -> Vec<([u8; 4], u8, u8)> {
+    let (p2, saber) = (game.coop.p2, game.coop.saber);
+    let Some(f) = x3_frame(&p2, &saber) else { return Vec::new() };
+    let attr = p2[0x11] & 0x30 | (game.coop.zero_palette & 7) << 1;
+    let mut e = Vec::new();
+    if crate::saber::slash_frame(&saber).is_none_or(|s| game.coop.wave_frames[0] == s as u16) {
+        e.extend(slash_entries(game, set, &p2, &saber, 0, attr).into_iter().map(|(e, h)| (e, h, 2)));
+    }
+    if game.coop.zero_frame == f as u16 {
+        e.extend(frame_entries(game, set, &p2, f, attr).into_iter().map(|(e, h)| (e, h, 0)));
+    }
+    e
+}
+
 /// Entries into OAM from slot `first`. Returns the slot past the last one.
 fn write_entries(game: &mut Game, first: u8, entries: &[([u8; 4], u8)]) -> u8 {
     let first = usize::from(first);

@@ -340,7 +340,7 @@ pub fn register_coop_traps(game: &mut Game) -> Result<(), String> {
     game.traps.register(game.hook(HOOK_UPDATE), "coop_p2_update", TrapReturn::Observe, p2_update);
     game.traps.register(game.hook(HOOK_PHYSICS), "coop_p2_physics", TrapReturn::Observe, p2_physics);
     game.traps.register(game.hook(HOOK_OAM_HIDE), "coop_p2_oam_hide", TrapReturn::Observe, oam_hide);
-    game.traps.register(game.hook(HOOK_DISPLAY), "coop_p2_display", TrapReturn::Observe, p2_display);
+    register_display_trap(game);
     game.traps.register(game.hook(HOOK_CONTACT), "coop_contact", TrapReturn::Observe, contact);
     crate::coop_objects::register(game);
     game.traps.register(game.hook(HOOK_SHOT_SLOT), "coop_shot_slot", TrapReturn::Observe, shot_slot);
@@ -664,6 +664,20 @@ fn oam_hide(game: &mut Game) {
         w[ix(ram::OAM_BUF) + slot * 4 + 1] = OAM_HIDDEN_Y;
     }
     game.coop.p2_oam_count = 0;
+}
+
+/// The display hook: P2's slice (co-op), then the margin sprites
+/// (widescreen). Registered by co-op and by a margin (`Game::set_wide_margin`;
+/// same address and body, so a co-op session's trap set does not change).
+pub(crate) fn register_display_trap(game: &mut Game) {
+    if let Some(a) = game.hooks().get(HOOK_DISPLAY) {
+        game.traps.register(a, "coop_p2_display", TrapReturn::Observe, display_slice);
+    }
+}
+
+fn display_slice(game: &mut Game) {
+    p2_display(game);
+    crate::margin_sprites::observe(game);
 }
 
 /// [`HOOK_DISPLAY`]: P2 display slice, after the ROM's OAM build is done.

@@ -1,8 +1,8 @@
 //! Widescreen (docs/widescreen.md). Skips unless `MMX_ROM` is set.
 
-use mmx_core::netgame::net_checksum;
+use mmx_core::netgame::{net_checksum, session_game};
 use mmx_core::widescreen::{agreement, camera, layout_entry};
-use mmx_core::{Game, Pads, Widescreen};
+use mmx_core::{Game, Pads, Timing, Widescreen};
 
 fn game(state: &str) -> Option<Game> {
     let rom = std::fs::read(std::env::var_os("MMX_ROM")?).ok()?;
@@ -29,10 +29,17 @@ fn decoder_matches_vram_on_screen() {
 }
 
 /// Widescreen changes the picture size only: WRAM, OAM, CGRAM, VRAM and the
-/// netplay checksum are the same as without it over 300 frames walking right.
+/// netplay checksum are the same as without it over 300 frames walking right
+/// (hw-a: enemies pass both edges, so the margin sprite pass runs).
 #[test]
 fn widescreen_is_display_only() {
-    let (Some(mut a), Some(mut b)) = (game("highway-mid"), game("highway-mid")) else {
+    for st in ["highway-mid", "hw-a"] {
+        widescreen_display_only(st);
+    }
+}
+
+fn widescreen_display_only(st: &str) {
+    let (Some(mut a), Some(mut b)) = (game(st), game(st)) else {
         return eprintln!("MMX_ROM not set; skipping");
     };
     b.set_widescreen(Widescreen::W21_9);
@@ -40,7 +47,7 @@ fn widescreen_is_display_only() {
         let pads = Pads { p1: if f % 60 < 50 { 0x0100 } else { 0x8100 }, p2: 0 };
         a.step(pads);
         b.step(pads);
-        assert_eq!(net_checksum(&a), net_checksum(&b), "frame {f}");
+        assert_eq!(net_checksum(&a), net_checksum(&b), "{st} frame {f}");
     }
     assert_eq!(a.wram()[..], b.wram()[..]);
     assert_eq!(a.oam(), b.oam());
@@ -62,6 +69,55 @@ fn widescreen_is_display_only() {
     b.set_widescreen(Widescreen::OFF);
     b.step(Pads::default());
     assert_eq!(b.frame().1, 256);
+}
+
+/// Margin sprites (docs/widescreen.md "Objects in the margins") in a netplay
+/// session game, solo and co-op (P2 idle, left behind in the left margin):
+/// hw-a walking right with 21:9 on vs off for 300 frames keeps WRAM, OAM,
+/// the checksum and the save state identical; the pass draws in both
+/// margins, only there, and never a piece the game put in OAM itself.
+#[test]
+fn margin_sprites_are_display_only() {
+    let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else {
+        return eprintln!("MMX_ROM not set; skipping");
+    };
+    let p = format!("{}/../../states/hw-a.state", env!("CARGO_MANIFEST_DIR"));
+    let Ok(state) = std::fs::read(&p) else { return eprintln!("{p} missing; skipping") };
+    for flags in [0, mmx_net::COOP_TWO_PLAYERS] {
+        let mk = || {
+            let mut g = session_game(&rom, flags, Timing::Auto).unwrap();
+            g.load_state(&state).unwrap();
+            g
+        };
+        let (mut a, mut b) = (mk(), mk());
+        b.set_widescreen(Widescreen::W21_9);
+        let (mut left, mut right) = (0, 0);
+        for f in 0..300 {
+            let pads = Pads { p1: 0x0100, p2: 0 };
+            a.step(pads);
+            b.step(pads);
+            assert_eq!(net_checksum(&a), net_checksum(&b), "flags {flags} frame {f}");
+            let oam = &b.wram()[0x700..0x920];
+            let game_oam: Vec<(i16, u8, u8, u8)> = (0..128)
+                .map(|k| {
+                    let x9 = u16::from(oam[4 * k]) | u16::from(oam[0x200 + k / 4] >> (2 * (k % 4)) & 1) << 8;
+                    (if x9 >= 256 { x9 as i16 - 512 } else { x9 as i16 }, oam[4 * k + 1], oam[4 * k + 2], oam[4 * k + 3])
+                })
+                .collect();
+            for s in &b.margin.last {
+                let w = if s.large { 16 } else { 8 };
+                assert!((s.x < 0 && s.x + w > -136) || (s.x + w > 256 && s.x < 392), "frame {f}: {s:?} not in a margin");
+                assert!(!game_oam.contains(&(s.x, s.y, s.tile, s.attr)), "frame {f}: {s:?} is in OAM too");
+                left += usize::from(s.x < 0);
+                right += usize::from(s.x >= 0);
+            }
+        }
+        assert!(left > 0 && right > 0, "flags {flags}: margin sprites left {left} right {right}");
+        assert_eq!(a.wram()[..], b.wram()[..]);
+        assert_eq!(a.oam(), b.oam());
+        assert_eq!(a.save_state(), b.save_state());
+        eprintln!("flags {flags}: {left} sprite-frames in the left margin, {right} in the right");
+    }
 }
 
 #[test]

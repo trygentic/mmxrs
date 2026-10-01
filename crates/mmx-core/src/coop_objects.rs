@@ -209,7 +209,7 @@ fn effect_slot(game: &mut Game) {
 /// The object sprite emitter (listing `$80:D67C`, `X` = the object; `JSR`
 /// from the OAM build's draw lists), found through the player's own call
 /// `LDX #$0BA8; LDA $0E,X; BEQ; JSR emitter` ([`crate::coop::PLAYER_OAM`]).
-fn emitter(game: &Game) -> u32 {
+pub(crate) fn emitter(game: &Game) -> u32 {
     let at = game.hook(crate::coop::PLAYER_OAM) + 8;
     (at & 0xFF_0000) | u32::from(u16::from_le_bytes([game.rom_read(at), game.rom_read(at + 1)]))
 }
