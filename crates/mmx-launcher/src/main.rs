@@ -205,6 +205,8 @@ impl App {
         })
         .response
         .on_hover_text("extra scenery left and right of the picture; F10 in game cycles it");
+        ui.checkbox(&mut s.wide_gameplay, "spawn enemies at the wide edges (changes gameplay; both players)")
+            .on_hover_text("enemies spawn, act and leave 136-160 px further out on both sides, whatever the widescreen setting; online, both players must tick it");
         ui.checkbox(&mut s.zero, "Play as Zero (needs X3)");
         ui.add_enabled(!s.online, egui::Checkbox::new(&mut s.coop_local, "Local co-op (2 players)"));
         ui.separator();

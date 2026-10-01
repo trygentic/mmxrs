@@ -41,9 +41,10 @@ pub fn connect(
     x3: Option<&mmx_core::zero_data::ZeroSet>,
     zero: bool,
     timing: mmx_core::Timing,
+    wide_gameplay: bool,
     record: Option<&str>,
 ) -> Result<Net, String> {
-    let mut cfg = NetPlay::<NetTransport>::config(rom, host, mode, delay, x3, zero, timing)?;
+    let mut cfg = NetPlay::<NetTransport>::config_wide(rom, host, mode, delay, x3, zero, timing, wide_gameplay)?;
     if let (NetConfig::Rollback(c), Some(p)) = (&mut cfg, prediction) {
         c.max_prediction = p; // local policy, not negotiated
     }
@@ -192,7 +193,7 @@ mod tests {
         let log = |host: bool| std::env::temp_dir().join(format!("mmxrs-{room}-{}-{}.log", std::process::id(), if host { "host" } else { "guest" }));
         let mk = |host: bool| {
             let path = log(host);
-            connect(rom, host, room, &url, Some("none"), mode, delay, None, None, false, mmx_core::Timing::Auto, path.to_str()).expect("connect")
+            connect(rom, host, room, &url, Some("none"), mode, delay, None, None, false, mmx_core::Timing::Auto, false, path.to_str()).expect("connect")
         };
         let mut peers = [
             (mk(true), session_game(rom, 0, mmx_core::Timing::Auto).unwrap(), 0x1111u32),

@@ -4,7 +4,7 @@ use mmx_core::netgame::Mode;
 
 pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local] [--pads]
-             [--widescreen off|16:10|16:9|21:9|N]
+             [--widescreen off|16:10|16:9|21:9|N] [--wide-gameplay]
        mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
              [--ice 'stun:.. turn:.. username=U credential=C' | none]
              [--mode rollback|lockstep] [--delay N] [--prediction N] [--net-record LOG]
@@ -13,7 +13,8 @@ usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [-
 ROM defaults to $MMX_ROM, --x3-rom (Mega Man X3 USA: P2 is drawn as X3 Zero, X swings
 the saber) to $MMX_X3_ROM. --zero: player 1 plays as Zero too (needs the X3 ROM). Masks are SNES pad words (hex 0x.. or decimal).
 --widescreen draws extra scenery left and right (N = 8-px tiles per side, 0-24; F10 cycles
-the presets; docs/widescreen.md). --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
+the presets; docs/widescreen.md). --wide-gameplay spawns enemies at the wide edges (136/160 px
+past the original ones whatever the preset; changes the game, online both players need it). --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
 Online: both players pass the same --mode (default rollback). --delay is the input delay
 in frames, host's wins: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
 same-region link --mode lockstep --delay 3 plays smoothest; across continents use
@@ -58,6 +59,8 @@ pub struct Args {
     pub net_record: Option<String>,
     /// `--widescreen`: margins each side (docs/widescreen.md). Display only.
     pub widescreen: mmx_core::Widescreen,
+    /// `--wide-gameplay`: enemies spawn at the wide edges (gameplay; netplay id).
+    pub wide_gameplay: bool,
 }
 
 impl Args {
@@ -92,6 +95,7 @@ impl Default for Args {
             timing: mmx_core::Timing::Auto,
             net_record: None,
             widescreen: mmx_core::Widescreen::OFF,
+            wide_gameplay: false,
         }
     }
 }
@@ -174,6 +178,7 @@ pub fn parse<I: IntoIterator<Item = String>>(
                 a.widescreen = mmx_core::Widescreen::parse(&v)
                     .ok_or_else(|| format!("bad --widescreen {v:?}: off, 16:10, 16:9, 21:9 or 0-24"))?;
             }
+            "--wide-gameplay" => a.wide_gameplay = true,
             "--prediction" => {
                 let v = val("--prediction")?;
                 let n: u8 = v.parse().map_err(|_| format!("bad --prediction {v:?}"))?;
@@ -221,6 +226,8 @@ mod tests {
         assert_eq!(p("--widescreen 16:9").unwrap().widescreen, mmx_core::Widescreen::W16_9);
         assert_eq!(p("--widescreen 3").unwrap().widescreen.width(), 304);
         assert!(p("--widescreen 4:3").is_err());
+        assert!(p("--wide-gameplay").unwrap().wide_gameplay);
+        assert!(!p("--widescreen 21:9").unwrap().wide_gameplay);
     }
 
     #[test]

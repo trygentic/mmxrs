@@ -28,6 +28,20 @@ $('widescreen').addEventListener('change', (e) => {
   emu?.set_widescreen(widescreen);
   e.target.blur(); // keep the keys for the game
 });
+// Wide gameplay (changes the game; netplay id): the checkbox, or ?widegame=1.
+// Fixed while online: the session game was built with it.
+let wideGame = new URLSearchParams(location.search).get('widegame') === '1';
+$('wideGame').checked = wideGame;
+$('wideGame').addEventListener('change', (e) => {
+  if (net) {
+    e.target.checked = wideGame;
+    msg = 'wide gameplay: set it before going online';
+  } else {
+    wideGame = e.target.checked;
+    emu?.set_wide_gameplay(wideGame);
+  }
+  e.target.blur();
+});
 
 // --- ROM loading -----------------------------------------------------------
 async function loadRom(file) {
@@ -44,6 +58,7 @@ async function loadRom(file) {
     if (x3) e.set_x3_rom(x3);
     if (x3 && zero) e.set_p1_zero(true);
     e.set_widescreen(widescreen);
+    e.set_wide_gameplay(wideGame);
     emu = e;
     const info = JSON.parse(emu.rom_info_json());
     msg = `${info.title.trim()} v1.${info.version} sha256 ${info.sha256.slice(0, 16)}…${refused}`;
