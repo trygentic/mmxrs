@@ -246,7 +246,14 @@ At the display hook `$80:9A86` (after the OAM build and P2's slice;
    frame; a `$0E68`-table object also when the game stopped queueing it
    after having queued it (`MarginState`, per slot: `id + 1` last seen
    queued), so an enemy past `-32` keeps being drawn and helper objects that
-   never draw stay invisible.
+   never draw stay invisible. **Until its tiles are rewritten**: the pass
+   diffs OBJ VRAM (`$6000`, 512 tiles) each frame and keeps per tile the
+   frame of its last write and per slot the frame it was last queued; an
+   unqueued object one of whose emitted tiles was written after the NMI
+   that followed its last queued frame (that NMI is its own last upload) is
+   dropped and not drawn again until queued. Its slot then holds someone
+   else's graphics: a second mech of the same set streaming into the shared
+   slot `$60`, or a set loading there (measured below: "stale").
 2. For each, the ROM's own emitter runs isolated (`call_isolated_ret(..,
    Rts)`, `M=1 X=0 D=0 DB=$8D`, `X` = the object, OAM cursor `$E4/$E5/$E6`
    = 0) with the camera X `$1E4D` moved 256 px towards the object's side,
@@ -327,7 +334,7 @@ disagree refuse the handshake. Each peer still picks its own display preset.
 
 ### Implementation (`crates/mmx-core/src/wide_gameplay.rs`)
 
-Six `Observe` traps, registered only with the flag on (`TrapTable::unregister`
+Seven `Observe` traps, registered only with the flag on (`TrapTable::unregister`
 takes them off again), every address from `hooks.rs` with signatures that
 resolve on the PAL and USA Rev 1 dumps (bank `$82`/`$84` ones in place,
 bank `$80` ones `+$2B`). None skips an instruction, so the CPU's timing is
@@ -338,9 +345,13 @@ the ROM's; they change a register or a scratch word and let the ROM go on.
 | `queue_test` | `$82:80C3` / same | X `BCS` of `$82:80B4` |
 | `queue_test_big` | `$82:809E` / same | X `BCS` of `$82:808F` |
 | `despawn_test` | `$82:807D` / same | X `BCS` of `$82:806E` |
-| `spawn_column` | `$80:DC56` / `$80:DC81` | horizontal column X in `$00` |
+| `spawn_column` | `$80:DC56` / `$80:DC81` | none: spawns the wide column, isolated |
 | `spawn_row` | `$80:DC9B` / `$80:DCC6` | row sweep start `$00`, count A |
 | `kind_count` | `$84:A1E0` / same | Z at the slot test of `$84:A1D5` |
+| `spawn_entry` | `$80:DD18` / `$80:DD43` | Z, C at a layout entry's section test |
+
+(`obj_gfx_init`, `$82:827D` on both, is resolved too but not trapped: its
+`LDA $A5E4,X` operand is the id -> graphics set table.)
 
 - **Queue / despawn tests**. All three are `REP #$20; SEC; LDA $05; SBC
   $1E4D; CLC; ADC #a; CMP #w; BCS out; SEC; LDA $08; SBC $1E50; CLC; ADC
@@ -353,8 +364,12 @@ the ROM's; they change a register or a scratch word and let the ROM go on.
   those of a ROM whose immediates were widened, and at M = 0 the trap is the
   identity (pinned, below). Decimal mode: no change.
 - **Spawner** (`$80:DC0B`). At `$80:DC56` (a horizontal column is about to
-  be spawned, its X in `$00`): `$00 += 160` when it is `cam + 256`
-  (scrolling right), `$00 -= 160` when it is `cam`. At `$80:DC9B` (`STA $06`
+  be spawned, its X in `$00`): the column at `$00 + 160` when `$00` is `cam
+  + 256` (scrolling right), `$00 - 160` when it is `cam`, is spawned first
+  through the ROM's column spawner `$80:DCB0`, isolated (zero emulated time,
+  DP `$00..$1F` and the registers put back); then the ROM spawns its own
+  column as without wide gameplay (entries already spawned are skipped).
+  At `$80:DC9B` (`STA $06`
   of the row sweep, `A = 10` columns from `$00 = cam - 32`): `$00 -= 160`,
   `A = 20`. The column test itself (did the camera cross a 32-px line?)
   stays the ROM's; 160 being a multiple of 32, the moved column is exactly
@@ -363,6 +378,32 @@ the ROM's; they change a register or a scratch word and let the ROM go on.
   back at it and its removal, `$82:8387`, clears it), so a column spawned
   twice never doubles an enemy. Stage entries step the camera into place a
   row at a time through the row sweep, so they fill the wide window too.
+- **Graphics not loaded yet** (`spawn_entry`). An enemy's init
+  (`$82:827D`, every `$0E68`-table enemy) copies its VRAM slot `+$18` and
+  palette `+$11` once from the loaded-set tables `$7F:8200[set]` /
+  `$7F:8300[set]` (`set` from `$86:A5E4[(id - 1) * 2 + 1]`; DB is `$86` in
+  the object update). The sets are loaded by invisible trigger objects
+  (`$83:FD7B`, ids `$15..`) when the player's X passes theirs: the loader
+  thread `$80:B091` DMAs the set and fills the tables (palette `| $20`).
+  The ROM's spawn line never outruns its triggers; 160 px further out it
+  does, and such an enemy lived on with slot 0 and palette 0, i.e. drawn
+  from X's streamed tiles `$000-$01F` in palette 0, in the margin and later
+  in the window too. Measured on Rev 1 hw-c: the jumping mech (id `$29`,
+  set `$30` -> slot `$60`) spawned at frame 207 at cam + 432, its set loaded
+  at frame 244 (cam 340); the Sky Claws by the trucks (id `$0F`, set `$1E`,
+  slot `$60` after the mech's) likewise (the user's report: Sky Claws at the
+  top right in Zero-like fragments). The trap sits on the `BEQ` after the
+  entry's section test (`LDA ($18); AND #$F8; CMP $1FFE; BEQ spawn; BCS
+  next`; DB `$85`, `($18)` the record: type, Y, id, sub, X): a type-3
+  record (the enemy table) in a column outside the ROM's own (`col - cam`
+  outside `-63..=256`) whose set has `$7F:8300[set] = 0` gets Z clear, C
+  set, the ROM's own "later section" skip. Its spawned byte stays clear, so
+  the ROM's own column (or row sweep) spawns it when the ROM would have,
+  and the next wide column it reaches spawns it once its set is in. PNGs:
+  `target/widescreen/sky-claw-garble/hw-c-sky-claws-16x9.png` (Rev 1 hw-c,
+  P1 and P2 as X3 Zero, 16:9, frames 610-760/25; top row before, bottom
+  after) and `hw-c-f710-right-3x.png` (frame 710, the right part, before |
+  after).
 - **Same-kind counts** (`$84:A1D5`, 22 callers: an object counts the live
   objects with its id, e.g. the Sky Claw at `$82:96AF` deletes itself when 2
   are alive). A live object outside the ROM's own despawn window (X
@@ -375,7 +416,8 @@ the ROM's; they change a register or a scratch word and let the ROM go on.
   checkbox): the columns between the ROM's spawn line and the wide one were
   never spawned and the camera has already crossed them. `wide_gameplay::sweep`
   spawns them once through the ROM's column spawner `$80:DCB0` (isolated,
-  5 columns a side, `$00..$07` and the registers put back). xtask
+  5 columns a side, `$00..$1F` and the registers put back; `spawn_entry`
+  holds back the enemies of sets not loaded yet). xtask
   (`--load` with `--wide-gameplay`, netsim's frame-0 load, netreplay) and the
   web's checkbox call it; a rollback `load_state` never does (the state
   already has them).
@@ -455,6 +497,33 @@ come at him from further and in larger numbers.
   two window boundaries is within the frame's own 90th percentile except
   where real edges sit (highway-start: the stage's first wall at x 0 and a
   pillar edge at x 256).
+- Residency check (`MMX_MARGIN_CHECK=1`, or `MarginState::enable_check`;
+  `margin_sprites::Check`): for every overlay sprite its object, tiles,
+  page and palette, against OBJ VRAM diffed each pass. Findings: `stale`
+  (unqueued object drawn with tiles written since it was last queued),
+  `slot` (enemy `+$18` is not its set's slot), `page` (shadow page on a
+  non-player sprite), `palette` (unqueued object in a palette it never had
+  queued) are garbage; `late` (a tile rewritten in the NMI right after it
+  was drawn) is informational: streamed objects (`+$17` bit 7) change their
+  tiles whenever they animate, and for a queued object the overlay is the
+  ROM's own OAM in a wider window. `xtask dump` prints the summary. Rev 1
+  `states/usa11` hw-a, hw-c, hw-d, hw-e, hw-f, r1-0..3, co-op (P2 as X3
+  Zero), 900 frames each of walk+shoot, walk+jump+shoot (both players),
+  idle, P1 jumping with P2 standing (36 runs per row):
+
+  | config | before: garbage (stale / slot) | after |
+  |---|---|---|
+  | P1 Zero, 16:9, wide gameplay | 774 (0 / 774) | 0 |
+  | P1 Zero, 21:9, wide gameplay | 1035 (0 / 1035) | 0 |
+  | P1 X, 16:9, wide gameplay | 532 (0 / 532) | 0 |
+  | P1 Zero, 16:9 | 81 (81 / 0) | 0 |
+  | P1 X, 21:9 | 165 (165 / 0) | 0 |
+
+  `page` and `palette`: 0 everywhere (P2's and Zero's shadow pages never
+  reach an enemy sprite; `MarginSprite.page` is only set in the P2 path).
+  `slot` only on hw-c (mech `$29`, Sky Claw `$0F`); `stale` on hw-c (two
+  mechs sharing slot `$60`, the left-behind one in the left margin).
+  `wide_spawns_get_their_graphics` (test, below) pins it.
 - Wide gameplay (`cargo test -p mmx-core --test wide_gameplay`, ROM-gated;
   `MMX_STATES=states/usa11` with the Rev 1 ROM): `window_test_m0_is_register_exact`
   (observe-only traps on the three X `BCS`s, ROM untouched, 600 frames of
@@ -467,7 +536,9 @@ come at him from further and in larger numbers.
   save states equal at the end); `off_is_untouched` (on then off: trap set,
   `trapset_id`, 2400 frames of checksums and the final save state equal to a
   game that never had it); `enemies_spawn_at_the_wide_edges` (the table
-  above). Flag off against main (`8429c79`), 2400 frames, the final save
+  above); `wide_spawns_get_their_graphics` (PAL highway-start / Rev 1 hw-c,
+  16:9, 900 frames: every queued enemy's `+$18` is its set's slot, the
+  residency check finds no garbage). Flag off against main (`8429c79`), 2400 frames, the final save
   state byte for byte and every status line: power-on with taps (PAL and Rev
   1), hw-a `--coop`, hw-a at 21:9: identical. `xtask verify --frames 2400
   --coop-off --tap 200,400,600,800,1000 --hold 0100`: OK on both dumps;
