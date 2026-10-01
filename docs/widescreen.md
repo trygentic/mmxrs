@@ -550,3 +550,71 @@ come at him from further and in larger numbers.
   (host only): the handshake refuses (`mismatch: TrapSet`) in both modes.
 - Cost: Launch Octopus at 21:9 (two screens + colour math) 3.9 -> 5.8 ms per
   frame on an M-series Mac, about the main renderer's own cost per pixel.
+
+## Performance
+
+`cargo xtask bench --load S [dump's setup flags and script] --frames N
+[--warmup 30] [--csv F]` steps the game in release and prints the wall time
+per step (mean / p99 / max), the same on frames with 3+ live enemies
+(`$0E68` table), and the **emulated** lag frames (the main loop counter
+`$0B9B` did not move). `MMX_PROFILE=1` adds a per-phase table: every trap
+body under its trap name, exclusive of nested traps (`mmx_core::profile`,
+off until the host installs a clock, so the core stays clock-free for wasm),
+`margin sprites`, `wide tiles`, `ppu margins` (`render_wide_margins`,
+`snes_core::prof`), `emulator` (the rest of the step: CPU/PPU/APU ticks,
+trap dispatch) and `take_audio`.
+
+Rev 1 + X3, script `--hold 0100 --p1tap 4000@1-900/20:6 --p2-hold 0100
+--p2tap 4000@5-900/25:6`, 900 frames, M-series Mac. "full" is the user's
+launcher set (`--zero --coop --wide 16:9 --wide-gameplay`); each other row
+drops one of them. Mean / max ms, before -> after the two fixes below, and
+emulated lag frames (identical before and after):
+
+| state | config | mean ms | max ms | lag frames |
+|---|---|---|---|---|
+| hw-a | full | 4.09 -> 3.92 | 5.26 -> 4.92 | 224 |
+| hw-a | no widescreen | 3.15 -> 3.11 | 3.59 -> 3.68 | 224 |
+| hw-a | no wide gameplay | 3.95 -> 3.74 | 4.67 -> 5.60 | 83 |
+| hw-a | no co-op | 4.05 -> 4.02 | 4.64 -> (noise) | 317 |
+| hw-a | no `--zero` | 4.28 -> 3.84 | (noise) -> 6.27 | 256 |
+| hw-a | none | 3.00 -> 3.00 | 3.41 -> 3.99 | 85 |
+| hw-d | full | 4.03 -> 3.82 | 6.67 -> 4.32 | 170 |
+| hw-d | no wide gameplay | 4.08 -> 3.82 | 6.93 -> 4.20 | 31 |
+| hw-c | full | 3.75 -> 3.60 | 5.78 -> 4.93 | 42 |
+| user-lag | full | 3.58 -> 3.42 | 4.55 -> 5.81 | 39 |
+
+Max is the noisiest column: single 12-17 ms frames show up in random runs
+and configs (other processes); they are not tied to a frame or a feature
+(`--csv` twice: different frames). Per phase, hw-a full, mean (max) ms:
+
+| phase | before | after |
+|---|---|---|
+| emulator | 3.11 (3.57) | 3.06 (3.39) |
+| ppu margins | 0.69 (1.80) | 0.55 (0.64) |
+| margin sprites | 0.22 (0.67) | 0.19 (0.58) |
+| co-op update / physics / contact | 0.03 / 0.03 / 0.02 | same |
+| wide tiles | 0.03 | 0.03 |
+| HUD, effects, Zero, take_audio | < 0.01 each | same |
+
+So the host is not where the lag comes from: the whole step is ~4 ms with
+everything on, half the 8 ms budget, the frontend's 50 ms audio ring and
+4-step catch-up have room to spare, and the audio target stays at 50 ms
+(raising it only adds latency). The lag the player sees is the game's own
+slowdown: MMX drops frames when the 65816 cannot finish an enemy-heavy
+frame, about 28% of 3+ enemy frames on hw-a with or without our features,
+and wide gameplay keeps enemies alive in the margins, so 3+ enemies is the
+usual case (hw-a 693 of 900 frames vs 298) and lag frames go from 83 to 224
+(hw-d 31 -> 170). Removing that is a simulation change (wide gameplay's
+netplay identity), not a performance fix.
+
+Checked and left alone: the trap probe `next_tick_fetches_opcode` (CPU
+clone) only runs on a trapped address; the margin pass snapshots WRAM and
+the CPU once per pass, not per object; `MMX_MARGIN_CHECK` is off unless set;
+contact, co-op slices, the wide tile map and `take_audio` are each under
+0.03 ms. Fixed: the trap table lookup at every instruction boundary went
+through two SipHash lookups (~5% of the step in a sample): now a 64 Kbit
+filter on the address's low 16 bits answers untrapped PCs; the margin
+renderer fetched the map entry and tile per pixel and evaluated the windows
+per pixel: now once per 8-px tile and once per margin side per line. Both
+pixel- and state-identical (dumps of 18 state x preset runs, PNGs and
+status lines, equal to the previous build).
