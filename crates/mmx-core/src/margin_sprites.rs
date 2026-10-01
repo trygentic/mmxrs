@@ -38,10 +38,17 @@ const MAX_SPRITES: usize = 128;
 /// Per object slot, display only: `id + 1` of the object last seen queued
 /// for drawing (`+$0E != 0`), so a live object the game stopped queueing
 /// because it left the window (`$82:80B4`: X outside `-32..288`) is still
-/// drawn, and helper objects that never draw are not.
+/// drawn, and helper objects that never draw are not; until a tile it uses
+/// is written after the game last queued it (then its slot holds someone
+/// else's graphics).
 #[derive(Debug, Clone, Default)]
 pub struct MarginState {
     seen: Vec<u8>,
+    /// Per slot: the frame it was last queued.
+    queued_at: Vec<u64>,
+    /// OBJ VRAM at the last pass and, per tile, the frame it last changed.
+    vram: Vec<u16>,
+    changed: Vec<u64>,
     /// What the last pass handed the PPU (tests, `xtask`).
     pub last: Vec<MarginSprite>,
     /// P2's HP bar slots this step (coop_hud), for widescreen::update_margin_tiles.
@@ -72,6 +79,10 @@ pub(crate) fn observe(game: &mut Game) {
     let mut out = Vec::new();
     let mut seen = std::mem::take(&mut game.margin.seen);
     seen.resize(SLOTS, 0);
+    let frame = game.frame_count();
+    let mut queued_at = std::mem::take(&mut game.margin.queued_at);
+    queued_at.resize(SLOTS, 0);
+    track_vram(game, frame);
     let cam = word(&saved_wram, ram::CAMERA_X);
     let mut slot = 0;
     let mut srcs = Vec::new();
@@ -80,24 +91,39 @@ pub(crate) fn observe(game: &mut Game) {
             let base = first + k * stride;
             let o = &saved_wram[usize::from(base)..usize::from(base + stride)];
             let id = o[0x0A].wrapping_add(1);
-            let draw = match (o[0], o[0x0E] & 0x80) {
+            let mut draw = match (o[0], o[0x0E] & 0x80) {
                 (0, _) => 0,
                 (_, 0) if unqueued && seen[slot] == id => id,
                 (_, 0) => 0,
                 _ => id,
             };
-            if unqueued {
-                seen[slot] = draw;
-                slot += 1;
-            }
+            let queued = o[0x0E] & 0x80 != 0;
             if draw != 0 {
                 let x = u16::from_le_bytes([o[5], o[6]]).wrapping_sub(cam) as i16;
-                emit(game, emitter, base, x, m, o[0x0E] & 0x80 != 0, None, &mut out);
-                srcs.resize(out.len(), Src { base, id: o[0x0A], queued: o[0x0E] & 0x80 != 0, gfx: [o[0x16], o[0x17], o[0x18]] });
+                let at = out.len();
+                emit(game, emitter, base, x, m, queued, None, &mut out);
+                // Unqueued, its tiles are only its own while nothing has
+                // been written over them since the game last drew it (a
+                // later enemy of the same set streams into the same slot,
+                // or a set loads there): from then on, not drawn. The NMI
+                // right after its last queued frame is its own upload.
+                if !queued && out[at..].iter().any(|s| tiles(s).iter().any(|&t| game.margin.changed[t] > queued_at[slot] + 1)) {
+                    out.truncate(at);
+                    draw = 0;
+                }
+                srcs.resize(out.len(), Src { base, id: o[0x0A], queued, gfx: [o[0x16], o[0x17], o[0x18]] });
+            }
+            if unqueued {
+                seen[slot] = draw;
+                if queued {
+                    queued_at[slot] = frame;
+                }
+                slot += 1;
             }
         }
     }
     game.margin.seen = seen;
+    game.margin.queued_at = queued_at;
     p2(game, emitter, m, &saved_wram, &mut out);
     out.truncate(MAX_SPRITES);
     if game.margin.check.is_none() && check_env() {
@@ -113,6 +139,25 @@ pub(crate) fn observe(game: &mut Game) {
     game.coop.in_contact = saved_contact;
     game.margin.last.clone_from(&out);
     game.set_margin_sprites(out);
+}
+
+/// Diff OBJ VRAM against the last pass: `changed[tile] = frame` for every
+/// tile written since (by the NMI's DMA).
+fn track_vram(game: &mut Game, frame: u64) {
+    let mut st = std::mem::take(&mut game.margin);
+    let v = &game.vram()[OBJ_VRAM..OBJ_VRAM + OBJ_TILES * 16];
+    if st.vram.len() == v.len() {
+        for (t, (a, b)) in v.chunks_exact(16).zip(st.vram.chunks_exact_mut(16)).enumerate() {
+            if a != b {
+                b.copy_from_slice(a);
+                st.changed[t] = frame;
+            }
+        }
+    } else {
+        st.vram = v.to_vec();
+        st.changed = vec![0; OBJ_TILES];
+    }
+    game.margin = st;
 }
 
 fn check_env() -> bool {
@@ -203,7 +248,7 @@ impl Check {
             if src.id != 0xFF && !src.queued {
                 match self.queued.get(&src.base) {
                     Some(&(id, qf, pals)) if id == src.id => {
-                        let stale: Vec<usize> = tiles(s).into_iter().filter(|&t| self.changed[t] > qf).collect();
+                        let stale: Vec<usize> = tiles(s).into_iter().filter(|&t| self.changed[t] > qf + 1).collect();
                         if !stale.is_empty() {
                             self.report(format!("stale f={f} obj={:04X} id={:02X} queued_at={qf} x={} tiles={stale:03X?}", src.base, src.id, s.x));
                         }

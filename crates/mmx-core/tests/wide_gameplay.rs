@@ -196,3 +196,44 @@ fn enemies_spawn_at_the_wide_edges() {
         assert!(l_on < -64 - 64, "{st} on: nothing lived far out on the left ({l_on})");
     }
 }
+
+/// The Highway start (the mech, then the Sky Claws by the trucks), 16:9, 900 frames of
+/// `pads()` with HP refilled: every queued enemy has its graphics set's VRAM
+/// slot (`$82:827D` ran after the set loaded: wide spawns of unloaded sets
+/// are held back), and the margin pass's residency check finds no garbage.
+#[test]
+fn wide_spawns_get_their_graphics() {
+    use mmx_core::ram::{wram_index, MAX_HP, X_HP};
+    // The Highway from its start (PAL `highway-start`, Rev 1 `hw-c`).
+    let Some(mut g) = game("highway-start").or_else(|| game("hw-c")) else { return };
+    g.set_wide_gameplay(true);
+    mmx_core::wide_gameplay::sweep(&mut g);
+    g.set_widescreen(mmx_core::Widescreen::parse("16:9").unwrap());
+    g.margin.enable_check();
+    let mut checked = 0;
+    for f in 0..900 {
+        let w = g.wram_mut();
+        let max = w[wram_index(MAX_HP)] & 0x7F;
+        if (1..max).contains(&(w[wram_index(X_HP)] & 0x7F)) {
+            w[wram_index(X_HP)] = max;
+        }
+        g.step(pads(f));
+        for k in 0..15 {
+            let base = 0x0E68 + k * 0x40;
+            let o = &g.wram()[base..base + 0x40];
+            if o[0] == 0 || o[0x0E] & 0x80 == 0 {
+                continue;
+            }
+            let set = usize::from(mmx_core::wide_gameplay::gfx_set(&g, o[0x0A]));
+            let (slot, pal) = (g.wram()[0x1_8200 + set], g.wram()[0x1_8300 + set]);
+            if pal != 0 {
+                assert_eq!(o[0x18], slot, "frame {f}: enemy {:02X} at {base:04X}: +$18 vs its set {set:02X}", o[0x0A]);
+                checked += 1;
+            }
+        }
+    }
+    let c = g.margin.check.as_ref().unwrap();
+    let bad: Vec<_> = c.reports.iter().filter(|r| !r.starts_with("late")).take(5).collect();
+    assert_eq!(c.garbage(), 0, "{bad:?}");
+    assert!(checked > 500 && c.sprites > 1000, "{checked} enemy-frames, {} overlay sprites", c.sprites);
+}
