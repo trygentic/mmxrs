@@ -604,8 +604,8 @@ slowdown: MMX drops frames when the 65816 cannot finish an enemy-heavy
 frame, about 28% of 3+ enemy frames on hw-a with or without our features,
 and wide gameplay keeps enemies alive in the margins, so 3+ enemies is the
 usual case (hw-a 693 of 900 frames vs 298) and lag frames go from 83 to 224
-(hw-d 31 -> 170). Removing that is a simulation change (wide gameplay's
-netplay identity), not a performance fix.
+(hw-d 31 -> 170). Removing that is a simulation change, not a host
+performance fix: see "Slowdown and overclock" below.
 
 Checked and left alone: the trap probe `next_tick_fetches_opcode` (CPU
 clone) only runs on a trapped address; the margin pass snapshots WRAM and
@@ -618,3 +618,78 @@ renderer fetched the map entry and tile per pixel and evaluated the windows
 per pixel: now once per 8-px tile and once per margin side per line. Both
 pixel- and state-identical (dumps of 18 state x preset runs, PNGs and
 status lines, equal to the previous build).
+
+## Slowdown and overclock
+
+The slowdown above is the 65816 running out of time before the next NMI, so
+the fix is a faster CPU: `Game::set_overclock(Overclock::{Off, X1_5, X2})`
+(`snes_core::api::CpuOverclock`, `// mmxrs patch` in `api.rs`).
+
+- **What changes.** Every CPU bus cycle costs fewer master cycles:
+  `mclk * 2 / 3` at 1.5x, `mclk / 2` at 2x. Fast (B bus, I/O, idle) 6 -> 4 /
+  3, slow (ROM, WRAM) 8 -> 5 / 4, joypad ports 12 -> 8 / 6. That is the only
+  change: the cycle the CPU just ran is scaled in `SnesEmulator::tick`, and
+  the DMA unit's end-of-DMA alignment ("a whole number of CPU cycles since
+  DMA began", `next_cpu_cycle_mclk`) uses the same scaled length.
+- **What stays at hardware timing** (all in master cycles): the PPU and its
+  frame rate, HDMA and general DMA (8 master cycles per byte, start on a
+  multiple of 8), the 40-cycle WRAM refresh per line, H/V IRQ and NMI
+  positions, auto-joypad read, the APU/SPC700 (own clock, fed the same master
+  cycles) and so the audio rate. The multiply/divide unit counts CPU cycles,
+  so it finishes in the same number of instructions. The CPU simply gets
+  ~1.6x / 2x the instructions per scanline (synthetic ROM loop: 8626 ->
+  13654 / 17255 iterations per 10 frames, `overclock_runs_more_instructions_per_frame`).
+- One vendored assert went: `update_irq_line` asserted that every tick moves
+  the H counter, which a 3-master-cycle tick need not; the checks themselves
+  already treat "no dot crossed" as no edge.
+- **Deterministic and outside save states.** The factor is a host setting
+  like the widescreen margin: it encodes to nothing (old and new states are
+  byte-identical), `load_state` and `hard_reset` keep the running game's
+  factor, so a state runs at whatever the loading game is set to. Netplay
+  puts it in the trap-set id (docs/netplay.md), so both peers always agree.
+- **Defaults.** `mmxrs --overclock off|1.5|2`; off, except **2x when
+  `--wide-gameplay` is on and `--overclock` is not given** (wide gameplay
+  keeps more enemies alive, which is where the slowdown comes from).
+  Launcher and web: "CPU overclock (removes slowdown; both players)", auto =
+  that rule. `xtask dump/bench/verify/netsim/bginfo/trace --overclock F`
+  default to off whatever `--wide-gameplay` says (parity runs stay plain).
+
+Measured (`cargo xtask bench`, the user's set: Rev 1 + X3, `--zero --coop
+--wide 16:9 --wide-gameplay`, the script above, 900 frames). Lag frames
+(`$0B9B` did not move) and host mean / max ms per step:
+
+| state | off | 1.5x | 2x |
+|---|---|---|---|
+| hw-a | 224 lag, 3.9 / 10.9 ms | 1 lag, 4.9 / 13.7 ms | 0 lag, 5.4 / 6.0 ms |
+| hw-d | 170 lag, 3.7 / 4.2 ms | 1 lag, 4.6 / 5.2 ms | 1 lag, 5.2 / 7.6 ms |
+| hw-c | 42 lag, 3.5 / 4.9 ms | 26 lag, 4.3 / 5.7 ms | 22 lag, 5.0 / 8.2 ms |
+
+The hw-c remainder (and the single hw-a/hw-d frame) is not slowdown: they
+come in runs (`--csv` has a `lag` column), e.g. frames 855-872 are a black
+death fade where the game holds its main loop on purpose. The "3+ enemies"
+count drops (hw-a 693 -> 395 frames) because without slowdown the same 900
+frames cover more of the stage. Host cost grows ~40% (the CPU spins its
+idle loop twice as often), still well under a 16.7 ms frame natively; on
+the web build that margin is smaller.
+
+Checked (PAL dump and its states unless noted):
+
+- Parity: `--overclock off` against the previous build, both dumps (PAL
+  hw-a, octopus-start + wide gameplay; Rev 1 hw-a with the full set, hw-d):
+  PNGs, WRAM, status lines and the save state after 600 frames identical.
+  `xtask verify --frames 2400 --coop-off` with oracle and DUT both at off /
+  1.5 / 2 (PAL) and 2 (Rev 1): identical (deterministic). `netsim` 2400
+  frames, rollback (wide gameplay) and lockstep (1.5x), both peers
+  overclocked: no desync, equal to the plain run; `--overclock-host 2`
+  alone: `closed (mismatch: TrapSet)`.
+- Off vs 2x, same scripts: Highway start to the pit (545 frames right, the
+  fall, death, respawn), Octopus water HDMA (300 frames walking), the pause
+  menu, the game-over continue: same positions, HP and modes; PNGs equal
+  except a frame or two where a CPU-bound load or fade finishes a little
+  sooner (game over -> stage: the stage is up by frame 150 instead of
+  later). Bee Blader 1 with steady fire: the fight runs ahead at 2x (the
+  road collapses earlier), no visual errors.
+- Audio: 600 frames from highway-start and hw-a give the same sample count
+  (32 kHz, 383946/383947), no clipping, music level per second within
+  noise of the off run (identical while the gameplay matches); the SPC
+  handshake and music are unaffected.
