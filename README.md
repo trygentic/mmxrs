@@ -30,6 +30,15 @@ Bring your own ROM: nothing from the cartridge is in this repository. See
 ## Quickstart
 
 ```sh
+make            # build and open the launcher
+make run        # build and start the game (ROM from MMX_ROM or roms/)
+make coop       # local two-player
+make zero       # play as Zero (needs the X3 dump)
+```
+
+Manual commands:
+
+```sh
 cargo build --workspace                 # no ROM needed
 cargo test --workspace                  # ROM-gated tests skip without MMX_ROM
 export MMX_ROM=/path/to/Mega\ Man\ X\ \(USA\).sfc
