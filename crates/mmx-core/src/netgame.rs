@@ -18,13 +18,14 @@ use mmx_net::{
 
 use crate::netlog::{Event, Header, Recorder};
 use crate::zero_data::ZeroSet;
-use crate::{Timing, coop, Game, Pads, RomError};
+use crate::{Timing, coop, Game, Overclock, Pads, RomError};
 
 /// Bump when anything that changes simulation between two builds changes
 /// outside the trap addresses (mixed into [`trapset_id`]). 3: save states
 /// carry `CoopState` (a `--load` state now restores P2 on both peers).
-/// 4: wide gameplay (`Game::set_wide_gameplay`) in the id.
-const NET_REVISION: u64 = 4;
+/// 4: wide gameplay (`Game::set_wide_gameplay`) in the id. 5: the CPU
+/// overclock (`Game::set_overclock`) in the id.
+const NET_REVISION: u64 = 5;
 
 /// Rollback save state: [`Game::save_state`] (co-op state included).
 pub fn net_save(game: &Game) -> Vec<u8> {
@@ -44,8 +45,10 @@ pub fn net_checksum(game: &Game) -> u64 {
 /// Handshake trap-set id: FNV over the sorted trap addresses,
 /// [`NET_REVISION`], whether the X3 Zero set is loaded (`Game::set_zero_set`:
 /// it changes P2's OAM, so both peers must agree), whether P1 plays as
-/// Zero (`Game::set_p1_zero`) and wide gameplay with its margins
-/// (`Game::set_wide_gameplay`). Peers with different ids refuse to start.
+/// Zero (`Game::set_p1_zero`), wide gameplay with its margins
+/// (`Game::set_wide_gameplay`) and the CPU overclock (`Game::set_overclock`:
+/// it changes how much the game gets done per frame). Peers with different
+/// ids refuse to start.
 pub fn trapset_id(game: &Game) -> u64 {
     use crate::wide_gameplay::{WIDE_GAMEPLAY_PX, WIDE_SPAWN_PX};
     let mut addrs: Vec<u32> = game.traps.addrs().collect();
@@ -59,7 +62,7 @@ pub fn trapset_id(game: &Game) -> u64 {
     hash_state(&[
         &NET_REVISION.to_le_bytes(),
         &bytes,
-        &[u8::from(game.zero_set().is_some()), u8::from(game.p1_zero()), game.timing() as u8],
+        &[u8::from(game.zero_set().is_some()), u8::from(game.p1_zero()), game.timing() as u8, game.overclock() as u8],
         &wide,
     ])
 }
@@ -371,11 +374,12 @@ impl<T: Transport> NetPlay<T> {
         p1_zero: bool,
         timing: Timing,
     ) -> Result<NetConfig, String> {
-        Self::config_wide(rom, host, mode, delay, x3, p1_zero, timing, false)
+        Self::config_wide(rom, host, mode, delay, x3, p1_zero, timing, false, Overclock::Off)
     }
 
-    /// [`NetPlay::config`] with wide gameplay on or off (part of the id;
-    /// the session game takes it from the frontend's game, like the X3 set).
+    /// [`NetPlay::config`] with wide gameplay on or off and the CPU overclock
+    /// (part of the id; the session game takes them from the frontend's
+    /// game, like the X3 set).
     #[allow(clippy::too_many_arguments)]
     pub fn config_wide(
         rom: &[u8],
@@ -386,6 +390,7 @@ impl<T: Transport> NetPlay<T> {
         p1_zero: bool,
         timing: Timing,
         wide_gameplay: bool,
+        overclock: Overclock,
     ) -> Result<NetConfig, String> {
         if delay > mode.max_delay() {
             return Err(format!("{} input delay must be 0-{}", mode.name(), mode.max_delay()));
@@ -394,6 +399,7 @@ impl<T: Transport> NetPlay<T> {
         g.set_zero_set(x3.cloned());
         g.set_p1_zero(p1_zero)?;
         g.set_wide_gameplay(wide_gameplay);
+        g.set_overclock(overclock);
         let (crc, traps) = (g.rom_info().crc32, trapset_id(&g));
         Ok(match mode {
             Mode::Rollback => {
@@ -603,6 +609,7 @@ impl<T: Transport> NetPlay<T> {
             x3: game.zero_set().is_some(),
             zero: game.p1_zero(),
             wide: game.wide_gameplay(),
+            overclock: game.overclock(),
             load: None,
         };
         if let Some(r) = self.record.as_mut() {
@@ -870,6 +877,7 @@ fn start_game(
     g.set_p1_zero(game.p1_zero())?;
     // Gameplay, part of the handshake id.
     g.set_wide_gameplay(game.wide_gameplay());
+    g.set_overclock(game.overclock());
     // Display only (docs/widescreen.md): each peer keeps its own.
     g.set_wide_margin(game.wide_margin());
     *game = g;
@@ -1078,11 +1086,22 @@ mod tests {
         assert_ne!(trapset_id(&g), plain);
         g.set_wide_gameplay(false);
         assert_eq!(trapset_id(&g), plain);
-        let cfg = |w| match NetPlay::<mmx_net::LoopbackTransport>::config_wide(&synthetic_rom(), true, Mode::Lockstep, 2, None, false, Timing::Auto, w).unwrap() {
+        let cfg = |w, o| match NetPlay::<mmx_net::LoopbackTransport>::config_wide(&synthetic_rom(), true, Mode::Lockstep, 2, None, false, Timing::Auto, w, o).unwrap() {
             NetConfig::Lockstep(c) => c.trapset_id,
             NetConfig::Rollback(c) => c.trapset_id,
         };
-        assert_ne!(cfg(true), cfg(false));
+        assert_ne!(cfg(true, Overclock::Off), cfg(false, Overclock::Off));
+        assert_ne!(cfg(true, Overclock::X2), cfg(true, Overclock::Off));
+    }
+
+    #[test]
+    fn trapset_id_includes_overclock() {
+        let mut g = session_game(&synthetic_rom(), COOP_TWO_PLAYERS, Timing::Auto).unwrap();
+        let plain = trapset_id(&g);
+        g.set_overclock(Overclock::X2);
+        let x2 = trapset_id(&g);
+        g.set_overclock(Overclock::X1_5);
+        assert!(plain != x2 && x2 != trapset_id(&g) && plain != trapset_id(&g));
     }
 
     #[test]

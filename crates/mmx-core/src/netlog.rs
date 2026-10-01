@@ -45,6 +45,8 @@ pub struct Header {
     pub zero: bool,
     /// Wide gameplay (`Game::set_wide_gameplay`).
     pub wide: bool,
+    /// CPU overclock (`Game::set_overclock`); absent = off.
+    pub overclock: crate::Overclock,
     /// Save state loaded into the session game at frame 0 (netsim only).
     pub load: Option<String>,
 }
@@ -114,6 +116,9 @@ impl Recorder {
         );
         if h.wide {
             self.out.push_str("wide 1\n");
+        }
+        if h.overclock != crate::Overclock::Off {
+            let _ = writeln!(self.out, "overclock {}", h.overclock);
         }
         if let Some(l) = h.load.as_ref().or(self.load.as_ref()) {
             let _ = writeln!(self.out, "load {l}");
@@ -252,6 +257,7 @@ pub fn parse(text: &str) -> Result<Log, String> {
             "x3" => h.x3 = v == "1",
             "zero" => h.zero = v == "1",
             "wide" => h.wide = v == "1",
+            "overclock" => h.overclock = v.parse().map_err(|_| bad())?,
             "load" => h.load = Some(v.to_string()),
             _ => {}
         }
@@ -303,6 +309,7 @@ mod tests {
             x3: true,
             zero: false,
             wide: true,
+            overclock: crate::Overclock::X1_5,
             load: Some("states/hw-spiky.state".into()),
         };
         let mut r = Recorder::new();
