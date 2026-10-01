@@ -4,7 +4,7 @@ use mmx_core::netgame::Mode;
 
 pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local] [--pads]
-             [--widescreen off|16:10|16:9|21:9|N] [--wide-gameplay]
+             [--widescreen off|16:10|16:9|21:9|N] [--wide-gameplay] [--overclock off|1.5|2]
        mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
              [--ice 'stun:.. turn:.. username=U credential=C' | none]
              [--mode rollback|lockstep] [--delay N] [--prediction N] [--net-record LOG]
@@ -14,7 +14,10 @@ ROM defaults to $MMX_ROM, --x3-rom (Mega Man X3 USA: P2 is drawn as X3 Zero, X s
 the saber) to $MMX_X3_ROM. --zero: player 1 plays as Zero too (needs the X3 ROM). Masks are SNES pad words (hex 0x.. or decimal).
 --widescreen draws extra scenery left and right (N = 8-px tiles per side, 0-24; F10 cycles
 the presets; docs/widescreen.md). --wide-gameplay spawns enemies at the wide edges (136/160 px
-past the original ones whatever the preset; changes the game, online both players need it). --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
+past the original ones whatever the preset; changes the game, online both players need it).
+--overclock runs the SNES CPU 1.5x or 2x as fast, which removes the game's own slowdown with
+many enemies (changes the game: online both players need the same); default off, but 2 with
+--wide-gameplay unless --overclock off is given. --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
 Online: both players pass the same --mode (default rollback). --delay is the input delay
 in frames, host's wins: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
 same-region link --mode lockstep --delay 3 plays smoothest; across continents use
@@ -61,12 +64,21 @@ pub struct Args {
     pub widescreen: mmx_core::Widescreen,
     /// `--wide-gameplay`: enemies spawn at the wide edges (gameplay; netplay id).
     pub wide_gameplay: bool,
+    /// `--overclock`: explicit CPU overclock; None = [`Args::overclock`]'s default.
+    pub overclock: Option<mmx_core::Overclock>,
 }
 
 impl Args {
     /// Input delay for the session: `--delay` or the mode's default.
     pub fn net_delay(&self) -> u8 {
         self.delay.unwrap_or(self.mode.default_delay())
+    }
+
+    /// CPU overclock: `--overclock`, else 2x with wide gameplay (it keeps
+    /// more enemies alive, so more slowdown), else off.
+    pub fn overclock(&self) -> mmx_core::Overclock {
+        use mmx_core::Overclock;
+        self.overclock.unwrap_or(if self.wide_gameplay { Overclock::X2 } else { Overclock::Off })
     }
 }
 
@@ -96,6 +108,7 @@ impl Default for Args {
             net_record: None,
             widescreen: mmx_core::Widescreen::OFF,
             wide_gameplay: false,
+            overclock: None,
         }
     }
 }
@@ -179,6 +192,7 @@ pub fn parse<I: IntoIterator<Item = String>>(
                     .ok_or_else(|| format!("bad --widescreen {v:?}: off, 16:10, 16:9, 21:9 or 0-24"))?;
             }
             "--wide-gameplay" => a.wide_gameplay = true,
+            "--overclock" => a.overclock = Some(val("--overclock")?.parse()?),
             "--prediction" => {
                 let v = val("--prediction")?;
                 let n: u8 = v.parse().map_err(|_| format!("bad --prediction {v:?}"))?;
@@ -228,6 +242,16 @@ mod tests {
         assert!(p("--widescreen 4:3").is_err());
         assert!(p("--wide-gameplay").unwrap().wide_gameplay);
         assert!(!p("--widescreen 21:9").unwrap().wide_gameplay);
+    }
+
+    #[test]
+    fn overclock() {
+        use mmx_core::Overclock;
+        assert_eq!(p("").unwrap().overclock(), Overclock::Off);
+        assert_eq!(p("--wide-gameplay").unwrap().overclock(), Overclock::X2);
+        assert_eq!(p("--wide-gameplay --overclock off").unwrap().overclock(), Overclock::Off);
+        assert_eq!(p("--overclock 1.5").unwrap().overclock(), Overclock::X1_5);
+        assert!(p("--overclock 3").is_err());
     }
 
     #[test]

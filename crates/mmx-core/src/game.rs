@@ -264,6 +264,18 @@ impl Game {
         self.wide_gameplay
     }
 
+    /// CPU overclock (docs/widescreen.md "Slowdown and overclock"): the CPU's
+    /// bus cycles cost fewer master cycles, so enemy-heavy frames finish
+    /// before the next NMI. Changes the game (netplay identity); a setting,
+    /// not in save states (a loaded state runs at this game's factor).
+    pub fn set_overclock(&mut self, o: crate::Overclock) {
+        self.emu.set_cpu_overclock(o);
+    }
+
+    pub fn overclock(&self) -> crate::Overclock {
+        self.emu.cpu_overclock()
+    }
+
     /// Draw P2 as X3 Zero (`Some`, from [`crate::zero_data::extract_x3`]) or
     /// as X's tiles in Zero's colours (`None`). Static art: both netplay
     /// peers must load the same set (see `netgame`).

@@ -13,16 +13,18 @@ use mmx_core::netgame::{
 };
 use mmx_core::netlog::{self, Event, Log, Recorder};
 use mmx_core::zero_data::ZeroSet;
-use mmx_core::{ram, Game, Pads, Timing};
+use mmx_core::{ram, Game, Overclock, Pads, Timing};
 use mmx_net::{hash_state, loopback_pair, LoopbackConfig, LoopbackTransport, COOP_TWO_PLAYERS};
 
 /// Rebuild a session game the way both peers (and the replay) do: power-on
-/// with co-op on, the X3 set, P1-as-Zero and wide gameplay, then the save state.
-pub fn sim_game(rom: &[u8], timing: Timing, x3: Option<&ZeroSet>, zero: bool, wide: bool, load: Option<&[u8]>) -> Result<Game, String> {
+/// with co-op on, the X3 set, P1-as-Zero, wide gameplay and the overclock,
+/// then the save state.
+pub fn sim_game(rom: &[u8], timing: Timing, x3: Option<&ZeroSet>, zero: bool, (wide, oc): (bool, Overclock), load: Option<&[u8]>) -> Result<Game, String> {
     let mut g = session_game(rom, COOP_TWO_PLAYERS, timing).map_err(|e| e.to_string())?;
     g.set_zero_set(x3.cloned());
     g.set_p1_zero(zero)?;
     g.set_wide_gameplay(wide);
+    g.set_overclock(oc);
     if let Some(s) = load {
         g.load_state(s)?;
         if wide {
@@ -48,6 +50,8 @@ pub struct SimOpts {
     pub zero: bool,
     /// Wide gameplay per peer (host, guest); different ones refuse the handshake.
     pub wide: [bool; 2],
+    /// CPU overclock per peer (host, guest); different ones refuse the handshake.
+    pub overclock: [Overclock; 2],
     /// `(name for the log header, save state)` loaded on both peers at frame 0.
     pub load: Option<(String, Vec<u8>)>,
     /// Record both peers' session logs into the report.
@@ -74,6 +78,7 @@ impl SimOpts {
             x3: None,
             zero: false,
             wide: [false; 2],
+            overclock: [Overclock::Off; 2],
             load: None,
             record: false,
             corrupt_guest_at: None,
@@ -276,8 +281,8 @@ pub fn netsim(rom: &[u8], o: &SimOpts, script: &dyn Fn(usize, Pads) -> Pads) -> 
     let x3 = o.x3.as_ref();
     let load = o.load.as_ref().map(|(_, s)| s.as_slice());
     let mk = |host: bool, t: LoopbackTransport, hz: u32| -> Result<(NetPlay<LoopbackTransport>, Rc<RefCell<Track>>), String> {
-        let wide = o.wide[usize::from(!host)];
-        let mut cfg = NetPlay::<LoopbackTransport>::config_wide(rom, host, o.mode, o.delay, x3, o.zero, o.timing, wide)?;
+        let (wide, oc) = (o.wide[usize::from(!host)], o.overclock[usize::from(!host)]);
+        let mut cfg = NetPlay::<LoopbackTransport>::config_wide(rom, host, o.mode, o.delay, x3, o.zero, o.timing, wide, oc)?;
         if let NetConfig::Rollback(c) = &mut cfg {
             c.max_prediction = o.prediction;
         }
@@ -315,7 +320,7 @@ pub fn netsim(rom: &[u8], o: &SimOpts, script: &dyn Fn(usize, Pads) -> Pads) -> 
     let (g, gt) = mk(false, tb, 44_100)?;
     let mut nets = [h, g];
     let tracks = [ht, gt];
-    let mut games = [sim_game(rom, o.timing, x3, o.zero, o.wide[0], None)?, sim_game(rom, o.timing, x3, o.zero, o.wide[1], None)?];
+    let mut games = [sim_game(rom, o.timing, x3, o.zero, (o.wide[0], o.overclock[0]), None)?, sim_game(rom, o.timing, x3, o.zero, (o.wide[1], o.overclock[1]), None)?];
     let mut devs = [48_000u64, 44_100].map(|hz| Dev { hz, queue: 0, max: 0, dropped: 0, starved: 0 });
     let mut live_at: [Option<(u64, u32)>; 2] = [None; 2];
     let (mut live_ticks, mut stall_ticks) = ([0u64; 2], [0u64; 2]);
@@ -457,7 +462,7 @@ pub fn netsim(rom: &[u8], o: &SimOpts, script: &dyn Fn(usize, Pads) -> Pads) -> 
     // Plain run: one Game, the host's settled pads.
     let (ht, gt) = (tracks[0].borrow(), tracks[1].borrow());
     let n = nets.iter().map(|n| n.settled_frames()).min().unwrap_or(0).min(o.frames);
-    let mut plain = sim_game(rom, o.timing, x3, o.zero, o.wide[0], load)?;
+    let mut plain = sim_game(rom, o.timing, x3, o.zero, (o.wide[0], o.overclock[0]), load)?;
     for f in 0..n as usize {
         let (Some((_, pads, hh, ..)), Some((_, gpads, gh, ..))) = (ht.settled.get(f).copied().flatten(), gt.settled.get(f).copied().flatten()) else {
             r.plain_mismatch = Some((f as u32, "missing frame"));
@@ -619,7 +624,7 @@ pub fn replay(rom: &[u8], log: &Log, x3: Option<&ZeroSet>, load: Option<&[u8]>) 
     if h.load.is_some() && load.is_none() {
         return Err(format!("the session loaded {} at frame 0: pass --load STATE", h.load.as_deref().unwrap_or("")));
     }
-    let mut g = sim_game(rom, h.timing, if h.x3 { x3 } else { None }, h.zero, h.wide, load)?;
+    let mut g = sim_game(rom, h.timing, if h.x3 { x3 } else { None }, h.zero, (h.wide, h.overclock), load)?;
     if g.rom_info().crc32 != h.rom_crc {
         return Err(format!("ROM CRC {:08x} but the log was recorded with {:08x}", g.rom_info().crc32, h.rom_crc));
     }

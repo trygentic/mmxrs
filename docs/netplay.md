@@ -503,6 +503,7 @@ timing auto                 auto | ntsc | pal
 x3 0                        X3 Zero set loaded
 zero 0                      P1 plays as Zero
 wide 1                      (only when on) wide gameplay
+overclock 2                 (only when on) CPU overclock, 1.5 or 2
 load states/hw-spiky.state  (netsim only) state loaded at frame 0
 ---
 ```
@@ -635,6 +636,16 @@ change was needed for this.
   `--wide-gameplay`, the launcher's "spawn enemies at the wide edges" box,
   the web's checkbox (fixed while a session exists). The widescreen preset
   itself stays per peer (display only).
+- The CPU overclock (`Game::set_overclock`, docs/widescreen.md "Slowdown and
+  overclock") is the last argument of `config_wide`: the game gets more done
+  per frame, so its factor is a byte of the trap-set id (`NET_REVISION` 5):
+  peers with different factors refuse to start (`closed (mismatch: TrapSet)`,
+  `xtask netsim --overclock 2 --overclock-host off`). The session game copies
+  it from the frontend's game. Native `--overclock` (default 2x with
+  `--wide-gameplay`, so two players who both tick wide gameplay agree), the
+  launcher's and the web's "CPU overclock" selects (auto = follow wide
+  gameplay). Not in save states: a rollback or `--load` state runs at the
+  session's factor.
 - `tick_audio(game, pad, now_ms)`: what the frontends call, while their audio
   queue is below ~50 ms: `tick` plus exactly one frame of audio (the new
   frame's, or silence when nothing stepped), so the device clock paces the

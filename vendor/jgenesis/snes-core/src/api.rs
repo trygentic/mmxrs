@@ -148,6 +148,69 @@ pub(crate) struct LatchedInterrupts {
     pub irq: bool,
 }
 
+/// mmxrs patch: CPU overclock. Every CPU bus cycle (6/8/12 master cycles:
+/// fast / slow / joypad ports, idle = fast) costs `mclk * 2 / 3` (4/5/8) or
+/// `mclk / 2` (3/4/6) master cycles instead, so the CPU runs more
+/// instructions per scanline while the PPU, APU, DMA/HDMA, the WRAM refresh
+/// and the H/V timers keep hardware timing (all in master cycles). A host
+/// setting: not in the bincode encoding (encodes nothing, decodes `Off`) and
+/// kept across `load_state`, so a save state runs at the loading game's
+/// factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum CpuOverclock {
+    #[default]
+    Off,
+    X1_5,
+    X2,
+}
+
+impl CpuOverclock {
+    #[inline]
+    #[must_use]
+    pub fn scale(self, mclk: u64) -> u64 {
+        match self {
+            Self::Off => mclk,
+            Self::X1_5 => mclk * 2 / 3,
+            Self::X2 => mclk / 2,
+        }
+    }
+}
+
+impl std::str::FromStr for CpuOverclock {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "off" | "1" | "none" => Ok(Self::Off),
+            "1.5" => Ok(Self::X1_5),
+            "2" => Ok(Self::X2),
+            _ => Err(format!("overclock must be off, 1.5 or 2, not {s:?}")),
+        }
+    }
+}
+
+impl Display for CpuOverclock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Off => "off",
+            Self::X1_5 => "1.5",
+            Self::X2 => "2",
+        })
+    }
+}
+
+impl Encode for CpuOverclock {
+    fn encode<E: bincode::enc::Encoder>(&self, _: &mut E) -> Result<(), EncodeError> {
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for CpuOverclock {
+    fn decode<D: bincode::de::Decoder<Context = C>>(_: &mut D) -> Result<Self, bincode::error::DecodeError> {
+        Ok(Self::Off)
+    }
+}
+bincode::impl_borrow_decode!(CpuOverclock);
+
 /// mmxrs patch: see [`SnesEmulator::cpu_snapshot`].
 pub struct CpuSnapshot(Wdc65816, CpuInternalRegisters, u8);
 
@@ -172,6 +235,7 @@ pub struct SnesEmulator {
     #[partial_clone(default)]
     coprocessor_roms: CoprocessorRoms,
     emulator_config: SnesEmulatorConfig,
+    cpu_overclock: CpuOverclock, // mmxrs patch
 }
 
 impl SnesEmulator {
@@ -223,6 +287,7 @@ impl SnesEmulator {
             last_sram_checksum: sram_checksum,
             coprocessor_roms,
             emulator_config: config,
+            cpu_overclock: CpuOverclock::Off, // mmxrs patch
         };
 
         // Reset CPU so that execution starts from the right place
@@ -285,6 +350,15 @@ impl SnesEmulator {
         let mut cpu = self.main_cpu.clone();
         cpu.tick(&mut Probe(&new_bus!(self)));
         cpu.is_mid_instruction() && cpu.registers().pc != pc
+    }
+
+    pub fn set_cpu_overclock(&mut self, o: CpuOverclock) {
+        self.cpu_overclock = o;
+    }
+
+    #[must_use]
+    pub fn cpu_overclock(&self) -> CpuOverclock {
+        self.cpu_overclock
     }
 
     /// Master clock (debug: lag-frame bisection).
@@ -549,11 +623,14 @@ impl EmulatorTrait for SnesEmulator {
             (MEMORY_REFRESH_CYCLES, None)
         } else {
             let mut bus = new_bus!(self);
+            // mmxrs patch: overclock; DMA aligns its end to the scaled CPU cycle
+            let oc = self.cpu_overclock;
+            let next_mclk = bus::next_cpu_cycle_mclk(&self.main_cpu);
 
             match self.dma_unit.tick(
                 &mut bus,
                 self.total_master_cycles,
-                bus::next_cpu_cycle_mclk(&self.main_cpu),
+                move |b: &Bus<'_>| oc.scale(next_mclk(b)),
             ) {
                 DmaStatus::None => {
                     // DMA not in progress, tick CPU
@@ -562,7 +639,7 @@ impl EmulatorTrait for SnesEmulator {
 
                     bus.cpu_registers.tick_cpu_cycle();
 
-                    (bus.access_master_cycles, bus.pending_write)
+                    (oc.scale(bus.access_master_cycles), bus.pending_write)
                 }
                 DmaStatus::InProgress { master_cycles_elapsed } => {
                     // Latch interrupt lines at the start of DMA to emulate interrupt tests being
@@ -691,14 +768,17 @@ impl EmulatorTrait for SnesEmulator {
         let rom = self.memory.take_rom();
 
         let coprocessor_roms = mem::take(&mut self.coprocessor_roms);
+        let oc = self.cpu_overclock; // mmxrs patch
         *self = Self::create(rom, self.emulator_config, coprocessor_roms, save_writer)
             .expect("Hard resetting should never fail to load");
+        self.cpu_overclock = oc; // mmxrs patch
     }
 
     fn load_state(&mut self, mut state: Self::SaveState) {
         state.memory.take_rom_from(&mut self.memory);
         state.coprocessor_roms = mem::take(&mut self.coprocessor_roms);
         let wide = self.ppu.take_wide(); // mmxrs patch: widescreen is a frontend setting
+        state.cpu_overclock = self.cpu_overclock; // mmxrs patch: so is the overclock
         *self = state;
         self.ppu.put_wide(wide); // mmxrs patch
     }

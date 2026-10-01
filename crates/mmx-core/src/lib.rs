@@ -26,6 +26,8 @@ pub mod zero_data;
 
 pub use game::{Game, StateInfo};
 pub use widescreen::Widescreen;
+/// CPU overclock (`Game::set_overclock`; docs/widescreen.md "Slowdown and overclock").
+pub use snes_core::api::CpuOverclock as Overclock;
 pub use traps::{TrapFn, TrapLog, TrapReturn, TrapTable};
 
 /// SNES joypad state per player in auto-read layout:

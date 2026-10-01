@@ -18,7 +18,10 @@ The window:
   copier header stripped (same hash as `cargo xtask rominfo`).
 * **Options**: window scale 1-8 (`--scale`), `--fullscreen`, Widescreen off/16:10/16:9/21:9 (`--widescreen`), "spawn enemies at the
   wide edges (changes gameplay; both players)" (`--wide-gameplay`, docs/widescreen.md
-  "Wide gameplay"; online both players must tick it), Play as Zero
+  "Wide gameplay"; online both players must tick it), "CPU overclock (removes
+  slowdown; both players)": auto (no flag: the game's default, 2x with wide
+  gameplay, else off), off, 1.5x, 2x (`--overclock`, docs/widescreen.md
+  "Slowdown and overclock"; online both players must pick the same), Play as Zero
   (`--zero`, needs the X3 ROM; a game built before `--zero` landed
   rejects it as an unknown argument), Local co-op (`--coop-local`, ignored online).
 * **Play online**: Host/Join (`--coop-host`/`--coop-join ROOM`), room with a
