@@ -204,7 +204,8 @@ impl Ppu {
     fn wide_pixel(&self, scanline: u16, sx: i32, obj: Pixel) -> Color {
         let r = &self.registers;
         let edge: u16 = if sx < 0 { 0 } else { 255 };
-        let main = self.wide_screen_pixel(Screen::Main, scanline, sx, edge, obj);
+        let mut cache = [None; 4];
+        let main = self.wide_screen_pixel(Screen::Main, scanline, sx, edge, obj, &mut cache);
         let sub_needed = r.sub_bg_obj_enabled && r.color_math_enabled_for_any_layer();
         let in_color_window = r.in_math_window(edge);
         let mut main_px = main;
@@ -222,7 +223,7 @@ impl Ppu {
         };
         let color = if r.color_math_enabled.enabled(in_color_window) && math_layer {
             let (sub_color, sub_transparent) = if sub_needed {
-                let p = self.wide_screen_pixel(Screen::Sub, scanline, sx, edge, obj);
+                let p = self.wide_screen_pixel(Screen::Sub, scanline, sx, edge, obj, &mut cache);
                 (p.color, p.layer == Layer::Backdrop)
             } else {
                 (r.sub_backdrop_color, false)
@@ -235,7 +236,16 @@ impl Ppu {
         convert_snes_color(color, r.brightness)
     }
 
-    fn wide_screen_pixel(&self, screen: Screen, scanline: u16, sx: i32, edge: u16, obj: Pixel) -> RenderedPixel {
+    /// `cache`: this pixel's BG pixels, fetched once for both screens.
+    fn wide_screen_pixel(
+        &self,
+        screen: Screen,
+        scanline: u16,
+        sx: i32,
+        edge: u16,
+        obj: Pixel,
+        cache: &mut [Option<Pixel>; 4],
+    ) -> RenderedPixel {
         let r = &self.registers;
         let (bg_enabled, bg_off_in_window, obj_enabled, obj_off_in_window, backdrop) = match screen {
             Screen::Main => (
@@ -262,25 +272,25 @@ impl Ppu {
         if mode != BgMode::Seven {
             let on = |bg: usize| bg_enabled[bg] && !(bg_off_in_window[bg] && r.bg_in_window(bg, edge));
             if on(0) {
-                let p = self.wide_bg_pixel(0, scanline, sx);
+                let p = *cache[0].get_or_insert_with(|| self.wide_bg_pixel(0, scanline, sx));
                 if !p.is_transparent() {
                     pr.add_bg1(p, m01);
                 }
             }
             if mode.bg2_enabled(r.extbg_enabled) && on(1) {
-                let p = self.wide_bg_pixel(1, scanline, sx);
+                let p = *cache[1].get_or_insert_with(|| self.wide_bg_pixel(1, scanline, sx));
                 if !p.is_transparent() {
                     pr.add_bg2(p, m01);
                 }
             }
             if mode.bg3_enabled() && on(2) {
-                let p = self.wide_bg_pixel(2, scanline, sx);
+                let p = *cache[2].get_or_insert_with(|| self.wide_bg_pixel(2, scanline, sx));
                 if !p.is_transparent() {
                     pr.add_bg3(p, mode == BgMode::One && r.mode_1_bg3_priority);
                 }
             }
             if mode.bg4_enabled() && on(3) {
-                let p = self.wide_bg_pixel(3, scanline, sx);
+                let p = *cache[3].get_or_insert_with(|| self.wide_bg_pixel(3, scanline, sx));
                 if !p.is_transparent() {
                     pr.add_bg4(p);
                 }

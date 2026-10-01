@@ -123,3 +123,65 @@ story vertically. Hence the margin tiles come from the decoder, not VRAM.
   skip it) and `load_state` keeps the live one: a frontend setting.
 - Research hooks: `set_line_record` / `line_regs` (per-line registers),
   `bg_map_entry`, `ppu_registers_debug`.
+
+## The margin provider (`crates/mmx-core/src/widescreen.rs`)
+
+After every `Game::step` with a margin, `update_margin_tiles` decodes BG1
+and BG2 around each layer's camera (`[cam - m - 32, cam + 256 + m + 32)` x
+`[camY - 32, camY + 256)`) into the PPU's margin map, keyed by level
+position mod 1024. MMX scrolls each BG by exactly its camera, so that key is
+the BG's scroll space; one frame of camera lag between the step and the
+next frame's NMI is covered by the 32-px apron. Guards:
+
+- only in a stage (`$D2 = 4`, `$D3 != 0`); elsewhere (title, intro, stage
+  select, ...) the margins are VRAM as is: those 32/64-column maps wrap,
+  which reads well (the title's ribbons simply continue);
+- only for a BG whose decoded on-screen cells match VRAM (`agreement`
+  >= 90%), so a stage or scene that uses BG1/BG2 some other way falls back
+  to VRAM instead of drawing nonsense;
+- off the 8192x8192 layout (left of x 0 at a stage's start) BG1 is blank
+  and BG2 is VRAM's wrap. The camera never shows those areas, the margins
+  do: you see the backdrop past the stage's first wall.
+
+The margins show the layout as data, including areas past the camera's
+limits (a boss door's far side, the next section) the game never scrolls
+to. BG3 (the Octopus water surface) is VRAM, which repeats.
+
+## HUD
+
+The HUD is OAM (slots 0-4 at X 8, the weapon bar next to it), so it stays
+where the game draws it: at the original picture's left edge, 8 px in. Same
+choice as z2rs. Moving it to the wide picture's edge would need a
+display-only X offset for those slots (`set_sprite_offset` clips at X -64,
+so it would need its own path); not done.
+
+## Objects in the margins
+
+Not yet. MMX culls its objects to screen X `-16..256` when it builds OAM
+(a 600-frame OAM scan on the Highway and Launch Octopus saw no visible
+entry with X in `256..496`), so enemies in the margins are not drawn until
+they reach the 256-px picture, and the game only spawns them by the
+original camera window. The next step is z2rs's "margin sprites" observer
+(shadow-run the OAM builder `$80:D544` without its cull and draw what lands
+in the margins) and then "wide gameplay" (spawn by the wide window, which
+changes gameplay and goes into the netplay identity).
+
+## Verification
+
+- `cargo test -p mmx-core --test widescreen` (ROM-gated): the decoder equals
+  VRAM on every on-screen cell (highway-start, highway-mid, octopus-start);
+  300 frames walking and jumping with 21:9 on vs off: WRAM, OAM, CGRAM,
+  VRAM, save state and netplay checksum identical every frame, the wide
+  frame's centre equals the normal frame, the margin survives a state load.
+- `cargo xtask verify --frames 2400 --coop-off --tap 200,400,600,800,1000
+  --hold 0100`: OK (widescreen off; the PPU takes the old path).
+- `xtask bginfo` on the Rev 1 ROM (`usa11-highway-start`, 400 frames
+  walking): decoder 100% on BG1 and BG2, same tables.
+- PNGs: `cargo xtask dump --load states/S.state --wide 16:9|21:9 ...`;
+  `target/widescreen/{highway-start,highway-mid,octopus-start}-{16x9,21x9}-{static,walk}/`
+  (walk = 300 frames holding right, `--refill`). Column-difference at the
+  two window boundaries is within the frame's own 90th percentile except
+  where real edges sit (highway-start: the stage's first wall at x 0 and a
+  pillar edge at x 256).
+- Cost: Launch Octopus at 21:9 (two screens + colour math) 3.9 -> 5.8 ms per
+  frame on an M-series Mac, about the main renderer's own cost per pixel.

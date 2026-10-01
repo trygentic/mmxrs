@@ -2,6 +2,9 @@
 //! side of the 256-px picture; this module picks the margin and feeds the
 //! PPU the stage's real tiles for the margins. Display only.
 
+use crate::{ram, Game};
+use snes_core::api::MARGIN_MAP_CELLS;
+
 /// A widescreen setting: margin per side in whole 8-px tiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Widescreen(pub u8);
@@ -47,9 +50,6 @@ impl Widescreen {
         256 + 2 * usize::from(self.margin_px())
     }
 }
-
-use crate::{ram, Game};
-use snes_core::api::MARGIN_MAP_CELLS;
 
 /// Per layout BG (BG1 terrain, BG2 backdrop): the screen map (32x32 screens
 /// of 256 px, one byte each: the screen number), the screens (16x16 maps of
