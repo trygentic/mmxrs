@@ -126,6 +126,45 @@ fn margin_sprites_are_display_only() {
     }
 }
 
+/// Regression (a playtest panic, `call_isolated($80D6A7) did not return`):
+/// at the end of the Highway, when the camera scrolls on for Vile's scene,
+/// the camera struct `$1E48` has `+$00 != 0` and `+$0E` bit 7 set. The pass
+/// used to read `$1D08` as 16 x `$20` objects, so `$1E48` was one, "queued",
+/// with a garbage frame of 165 pieces: the emitter left through its OAM-full
+/// exit, through `call_isolated`'s sentinel. Rev 1 (`MMX_ROM_V11`) with
+/// `states/usa11/hw-vile-scroll.state` (`MMX_STATES_V11`: another directory);
+/// co-op, 16:9 vs off, wide gameplay and 2x overclock on both, as played.
+#[test]
+fn margin_pass_survives_the_vile_scroll() {
+    let Some(rom) = std::env::var_os("MMX_ROM_V11").and_then(|p| std::fs::read(p).ok()) else {
+        return eprintln!("MMX_ROM_V11 not set; skipping");
+    };
+    let dir = std::env::var("MMX_STATES_V11").unwrap_or_else(|_| format!("{}/../../states/usa11", env!("CARGO_MANIFEST_DIR")));
+    let p = format!("{dir}/hw-vile-scroll.state");
+    let Ok(state) = std::fs::read(&p) else { return eprintln!("{p} missing; skipping") };
+    let mk = || {
+        let mut g = session_game(&rom, mmx_net::COOP_TWO_PLAYERS, Timing::Auto).unwrap();
+        g.load_state(&state).unwrap();
+        g.set_wide_gameplay(true);
+        g.set_overclock("2".parse().unwrap());
+        g
+    };
+    let (mut a, mut b) = (mk(), mk());
+    b.set_widescreen(Widescreen::W16_9);
+    let mut camera_queued = 0;
+    for f in 0..120 {
+        let pads = Pads { p1: if f % 8 < 4 { 0x4000 } else { 0 }, p2: 0 };
+        let w = b.wram();
+        camera_queued += usize::from(w[0x1E48] != 0 && w[0x1E56] & 0x80 != 0);
+        a.step(pads);
+        b.step(pads);
+        assert_eq!(net_checksum(&a), net_checksum(&b), "frame {f}");
+    }
+    assert!(camera_queued > 0, "the state no longer reaches the scroll");
+    assert_eq!(a.wram()[..], b.wram()[..]);
+    same_state_unwidened(&mut a, &mut b);
+}
+
 /// The save state holds the PPU's last picture and its sprite evaluation,
 /// which the HUD shift changes (the HUD is not in the centre; STAT77's
 /// overflow flags, which MMX never reads): one frame with `b`'s widescreen

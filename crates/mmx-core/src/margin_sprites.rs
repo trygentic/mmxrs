@@ -19,11 +19,14 @@ use crate::Game;
 use snes_core::api::MarginSprite;
 
 /// `(first, count, stride, unqueued)`: enemies / shots / items / more
-/// objects (`$0E68..$1928`, 43 x `$40`), effects (`$1928`, 31 x `$20`),
-/// `$1D08`. `unqueued`: also drawn when the game stopped queueing it (see
+/// objects (`$0E68..$1928`, 43 x `$40`), effects (`$1928..$1D08`, 31 x
+/// `$20`). `unqueued`: also drawn when the game stopped queueing it (see
 /// [`MarginState`]); effects are not: off the window some stop moving (the
 /// Sky Claw's cable links hang where they were) and they die soon anyway.
-const TABLES: [(u16, u16, u16, bool); 3] = [(0x0E68, 43, 0x40, true), (0x1928, 31, 0x20, false), (0x1D08, 16, 0x20, false)];
+/// Not `$1D08`: that pool is 16 x `$10` (`$80:D39D`, to `$1E08`) and never
+/// reaches the emitter; read as 16 x `$20` its entry 10 is the camera
+/// struct `$1E48` (docs/widescreen.md "Objects in the margins").
+const TABLES: [(u16, u16, u16, bool); 2] = [(0x0E68, 43, 0x40, true), (0x1928, 31, 0x20, false)];
 const SLOTS: usize = 43;
 /// Camera-relative X the emitter keeps (`x + 16 < $10F`).
 const KEPT: std::ops::RangeInclusive<i16> = -16..=254;
@@ -358,6 +361,12 @@ fn emit(game: &mut Game, emitter: u32, base: u16, x: i16, m: i16, queued: bool, 
     if (64..192).contains(&x) || !(-m - 128..256 + m + 128).contains(&x) {
         return;
     }
+    // The emitter loops `DEC $0C; BNE` over the frame's piece count (0 =
+    // 256) and leaves through its OAM-full exit after slot 127: only a
+    // frame that fits from slot 0 can be drawn here.
+    if !(1..128).contains(&pieces(game, base)) {
+        return;
+    }
     let shift = if x < 128 { -SHIFT } else { SHIFT };
     let saved = game.wram()[ix(ram::CAMERA_X)..][..2].to_vec();
     let cam = u16::from_le_bytes([saved[0], saved[1]]).wrapping_add(shift as u16);
@@ -373,9 +382,14 @@ fn emit(game: &mut Game, emitter: u32, base: u16, x: i16, m: i16, queued: bool, 
     r.p = (r.p | 0x20) & !0x18;
     r.x = base;
     game.set_regs(r);
-    game.call_isolated_ret(emitter, crate::TrapReturn::Rts);
+    // Display only: an emitter that does not come back (anything the checks
+    // above missed) skips this object; `observe` puts WRAM and the CPU back.
+    let done = game.try_call_isolated_ret(emitter, crate::TrapReturn::Rts);
     let w = game.wram_mut();
     w[ix(ram::CAMERA_X)..][..2].copy_from_slice(&saved);
+    if done.is_err() {
+        return;
+    }
     let n = usize::from(w[OAM_CURSOR] & 0x7F);
     for k in 0..n {
         let mut e: [u8; 4] = w[ix(ram::OAM_BUF) + 4 * k..][..4].try_into().unwrap();
@@ -388,6 +402,18 @@ fn emit(game: &mut Game, emitter: u32, base: u16, x: i16, m: i16, queued: bool, 
         if let Some(s) = margin_sprite(e, hi & 3, shift, m, queued) {
             out.push(s);
         }
+    }
+}
+
+/// The piece count the emitter reads for the object at `base`: the first
+/// byte of its frame layout (`$8D:8000[+$16 * 3]` -> `[+$17 & $7F * 3]`).
+fn pieces(game: &Game, base: u16) -> u16 {
+    let o = &game.wram()[usize::from(base)..];
+    let long = |a: u32| u32::from_le_bytes([game.rom_read(a), game.rom_read(a + 1), game.rom_read(a + 2), 0]);
+    let frames = long(0x8D_8000 + 3 * u32::from(o[0x16]));
+    match game.rom_read(long(frames + 3 * u32::from(o[0x17] & 0x7F))) {
+        0 => 256,
+        n => n.into(),
     }
 }
 
