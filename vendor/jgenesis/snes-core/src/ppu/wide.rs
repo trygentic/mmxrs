@@ -53,6 +53,8 @@ pub struct MarginSprite {
     pub attr: u8,
     pub large: bool,
     pub page: Option<u8>,
+    /// Coloured from `P2Tiles::palette` (as a slot in its `pal` mask).
+    pub extra_palette: bool,
 }
 
 #[derive(Debug, Default)]
@@ -321,7 +323,7 @@ impl Ppu {
             Layer::Bg2 => r.bg_color_math_enabled[1],
             Layer::Bg3 => r.bg_color_math_enabled[2],
             Layer::Bg4 => r.bg_color_math_enabled[3],
-            Layer::Obj => r.obj_color_math_enabled && main_px.palette >= 4,
+            Layer::Obj => r.obj_color_math_enabled && main_px.palette & 7 >= 4,
             Layer::Backdrop => r.backdrop_color_math_enabled,
         };
         let color = if r.color_math_enabled.enabled(in_color_window) && math_layer {
@@ -394,7 +396,7 @@ impl Ppu {
         pr.get().map_or(
             RenderedPixel { color: backdrop, palette: 0, layer: Layer::Backdrop },
             |(p, layer)| RenderedPixel {
-                color: resolve_pixel_color(&self.cgram, layer, mode, r.direct_color_mode_enabled, p.palette, p.color),
+                color: pixel_color(&self.cgram, &self.p2_tiles.0.palette, layer, mode, r.direct_color_mode_enabled, p),
                 palette: p.palette,
                 layer,
             },
@@ -466,7 +468,7 @@ impl Ppu {
         for s in self.wide.sprites.iter().rev() {
             let (w, h) = if s.large { (lw, lh) } else { (sw, sh) };
             let page = s.page.map(|p| usize::from(p & 3) * P2_PAGE_WORDS);
-            self.wide_obj(&mut out, m, ev, &[i32::from(s.x)], s.y, (w, h), s.tile, s.attr, page);
+            self.wide_obj(&mut out, m, ev, &[i32::from(s.x)], s.y, (w, h), s.tile, s.attr, page, s.extra_palette);
         }
         for idx in (0..128u8).rev() {
             let [x_lsb, y] = self.oam_low[usize::from(idx) << 1].to_le_bytes();
@@ -494,13 +496,15 @@ impl Ppu {
                 (((self.p2_tiles.0.page1 >> idx) & 1) | ((self.p2_tiles.0.page2 >> idx) & 1) << 1) as usize
                     * P2_PAGE_WORDS
             });
-            self.wide_obj(&mut out, m, ev, xs, y, size, tile_lsb, attr, page);
+            let extra = (self.p2_tiles.0.pal >> idx) & 1 != 0;
+            self.wide_obj(&mut out, m, ev, xs, y, size, tile_lsb, attr, page, extra);
         }
         out
     }
 
     /// One sprite's pixels on line `ev` at each X of `xs` into the margin
-    /// line `out`; `page` = offset of its P2 shadow page.
+    /// line `out`; `page` = offset of its P2 shadow page; `extra`: coloured
+    /// from the P2 palette.
     #[allow(clippy::too_many_arguments)]
     fn wide_obj(
         &self,
@@ -513,6 +517,7 @@ impl Ppu {
         tile_lsb: u8,
         attr: u8,
         page: Option<usize>,
+        extra: bool,
     ) {
         if !line_overlaps_sprite(y, h, ev) {
             return;
@@ -556,7 +561,8 @@ impl Ppu {
                     color |= u8::from(word.bit(bit + 8)) << (2 * i + 1);
                 }
                 if color != 0 {
-                    out[slot as usize] = Pixel { palette: (attr >> 1) & 7, color, priority: (attr >> 4) & 3 };
+                    let palette = (attr >> 1) & 7 | if extra { EXTRA_PALETTE } else { 0 };
+                    out[slot as usize] = Pixel { palette, color, priority: (attr >> 4) & 3 };
                 }
             }
         }

@@ -118,6 +118,7 @@ pub fn fill_page(game: &mut Game, o: usize, bytes: &[u8]) {
 pub fn clear_slots(game: &mut Game) {
     if game.coop.enabled || game.coop.p1.on {
         game.set_p2_tile_slots(0);
+        game.clear_p2_palette_slots();
     }
 }
 

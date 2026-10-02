@@ -45,9 +45,15 @@ impl std::fmt::Display for IsolatedError {
 /// Version marker before the appended P2 tile pages in a save state. v1 (no
 /// marker) had a 512-word page; its tail is ignored (empty page). v2
 /// (`P2T2`) had one 768-word page: it loads as page 0. v3 (`P2T3`) had two
-/// pages (no wave page): they load as pages 0 and 1.
-const P2_TILES_MAGIC: &[u8; 4] = b"P2T5";
+/// pages (no wave page): they load as pages 0 and 1. v5 (`P2T5`) had no
+/// P2 palette (`P2Tiles::pal`): it loads with none (refilled at the next
+/// OAM build).
+const P2_TILES_MAGIC: &[u8; 4] = b"P2T6";
+const P2_TILES_MAGIC_V5: &[u8; 4] = b"P2T5";
 const P2_TILES_MAGIC_V4: &[u8; 4] = b"P2T4";
+/// `P2T5`'s `P2Tiles`: pages, slots, next pages, next slots, pending,
+/// page1, next page1, page2, next page2 (no palette).
+type P2TilesV5 = (Box<[u16; P2_PAGE_WORDS * P2_PAGES]>, u128, Box<[u16; P2_PAGE_WORDS * P2_PAGES]>, u128, bool, u128, u128, u128, u128);
 const P2_TILES_MAGIC_V3: &[u8; 4] = b"P2T3";
 const P2_TILES_MAGIC_V2: &[u8; 4] = b"P2T2";
 /// Marker after the P2 tile pages: `COOP`, a `u32` LE length, then the
@@ -572,6 +578,35 @@ impl Game {
         self.emu.set_p2_tile_slots(t.next_slots | mask, on(1, t.next_page1), on(2, t.next_page2));
     }
 
+    /// Add `mask` to the pending slots drawn with P2's own sprite palette
+    /// (the PPU's ninth, [`Game::set_p2_palette`]) instead of CGRAM. Live with
+    /// the shadow pages, on the next OAM upload; cleared with them at the OAM
+    /// build (`p2tiles::clear_slots`).
+    pub fn add_p2_palette_slots(&mut self, mask: u128) {
+        let t = self.emu.p2_tiles();
+        let (m, p) = (t.next_pal | mask, t.next_palette);
+        self.emu.set_p2_palette(m, p);
+    }
+
+    /// Clear the pending P2-palette slot mask.
+    pub fn clear_p2_palette_slots(&mut self) {
+        let p = self.emu.p2_tiles().next_palette;
+        self.emu.set_p2_palette(0, p);
+    }
+
+    /// The colours of P2's sprite palette (pending, see
+    /// [`Game::add_p2_palette_slots`]). Part of the save state.
+    pub fn set_p2_palette(&mut self, colours: [u16; 16]) {
+        let m = self.emu.p2_tiles().next_pal;
+        self.emu.set_p2_palette(m, colours);
+    }
+
+    /// Live P2 palette: (slot mask, colours), what the renderer uses now.
+    pub fn p2_palette(&self) -> (u128, [u16; 16]) {
+        let t = self.emu.p2_tiles();
+        (t.pal, t.palette)
+    }
+
     /// Draw `player`'s (0 = P1, 1 = P2) sprites `(dx, dy)` px off from OAM
     /// from the next frame rendered on (netplay smoothing, docs/netplay.md
     /// "Rollback smoothing"). Render time only: OAM, WRAM and save states are
@@ -838,16 +873,18 @@ impl Game {
         let cfg = bincode::config::standard();
         let ((_, frame_count, _), n): ((SnesEmulator, u64, Option<u32>), _) =
             bincode::decode_from_slice(s, cfg).map_err(|e| e.to_string())?;
-        let tiles = [P2_TILES_MAGIC, P2_TILES_MAGIC_V4, P2_TILES_MAGIC_V3, P2_TILES_MAGIC_V2]
+        let tiles = [P2_TILES_MAGIC, P2_TILES_MAGIC_V5, P2_TILES_MAGIC_V4, P2_TILES_MAGIC_V3, P2_TILES_MAGIC_V2]
             .into_iter()
             .find(|m| s[n..].starts_with(m.as_slice()))
             .map(|m| String::from_utf8_lossy(m).into_owned());
-        let coop = match s[n..].strip_prefix(P2_TILES_MAGIC.as_slice()) {
-            Some(t) => {
-                let (_, m): (P2Tiles, _) = bincode::decode_from_slice(t, cfg).map_err(|e| e.to_string())?;
-                Self::coop_tail(&t[m..])?
-            }
-            None => None,
+        let coop = if let Some(t) = s[n..].strip_prefix(P2_TILES_MAGIC.as_slice()) {
+            let (_, m): (P2Tiles, _) = bincode::decode_from_slice(t, cfg).map_err(|e| e.to_string())?;
+            Self::coop_tail(&t[m..])?
+        } else if let Some(t) = s[n..].strip_prefix(P2_TILES_MAGIC_V5.as_slice()) {
+            let (_, m): (P2TilesV5, _) = bincode::decode_from_slice(t, cfg).map_err(|e| e.to_string())?;
+            Self::coop_tail(&t[m..])?
+        } else {
+            None
         };
         Ok(StateInfo { frame_count, tiles, coop })
     }
@@ -864,6 +901,11 @@ impl Game {
         if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC.as_slice()) {
             let (t, m) = bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
             self.emu.set_p2_tiles(t);
+            coop = Self::coop_tail(&tail[m..])?;
+        } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V5.as_slice()) {
+            let ((page, slots, next_page, next_slots, pending, page1, next_page1, page2, next_page2), m): (P2TilesV5, _) =
+                bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
+            self.emu.set_p2_tiles(P2Tiles { page, slots, next_page, next_slots, pending, page1, next_page1, page2, next_page2, ..P2Tiles::default() });
             coop = Self::coop_tail(&tail[m..])?;
         } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V4.as_slice()) {
             const W3: usize = P2_PAGE_WORDS * 3;

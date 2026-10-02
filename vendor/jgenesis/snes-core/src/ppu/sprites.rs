@@ -328,7 +328,9 @@ impl Ppu {
 
             let base_tile_number =
                 u16::from_le_bytes([tile_number_lsb, u8::from(attributes.bit(0))]);
-            let palette = (attributes >> 1) & 0x07;
+            let palette = (attributes >> 1) & 0x07
+                // mmxrs patch: this slot is coloured from the P2 palette
+                | if (self.p2_tiles.0.pal >> oam_idx) & 1 != 0 { super::EXTRA_PALETTE } else { 0 };
             let priority = (attributes >> 4) & 0x03;
             let x_flip = attributes.bit(6);
             let y_flip = attributes.bit(7);

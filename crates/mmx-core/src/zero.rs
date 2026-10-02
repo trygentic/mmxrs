@@ -1,10 +1,13 @@
 //! Zero's colours for player 2. See `docs/zero.md`.
 //!
-//! P2 is drawn with X's tiles (coop display slice) and a sprite palette forced
-//! on its OAM slots (`CoopState::zero_palette`). This module fills that palette
-//! with X's palette recoloured to Zero's ROM colours, through the game's own
-//! CGRAM mirror at `$0300` and upload flag `$A1` (NMI copies all 512 bytes to
-//! CGRAM when `$A1 != 0`, then clears it).
+//! P2 is drawn with X's tiles (coop display slice) or X3 Zero's, coloured by
+//! P2's own sprite palette: a ninth one in the vendored PPU
+//! (`Game::set_p2_palette`), since the game uses all eight in CGRAM (3 is X's
+//! charged shots; docs/coop.md "Palettes"). This module fills it with X's
+//! palette recoloured to Zero's ROM colours (or X3 Zero's). A Zero P1 wears
+//! CGRAM slot 1 instead, through the game's own mirror at `$0300` and upload
+//! flag `$A1` (NMI copies all 512 bytes to CGRAM when `$A1 != 0`, then
+//! clears it).
 
 use crate::hooks::HookId;
 use crate::ram::{self, wram_index as ix};
@@ -131,6 +134,8 @@ pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
     let w = n_fx.min(e.len().saturating_sub(n_sp));
     game.add_p2_tile_slots(mask(f, f + w), 2);
     game.add_p2_tile_slots(mask(f + w, usize::from(last)), 0);
+    // Arc and body in P2's own palette; the sparkles keep the ROM's.
+    game.add_p2_palette_slots(mask(f, usize::from(last)));
     last
 }
 
@@ -255,7 +260,7 @@ fn frame_entries(game: &Game, set: &ZeroSet, obj: &[u8], f: usize, attr: u8) -> 
 /// Zero wears): the arc draws with 1-5 (`$8C:A460`: white `73BC`, greens
 /// `5394 3B8E 2308 1284`) and 15 (`18C6`); Zero's has white 4 (`639C`),
 /// greens 12 (`2388`) and 1 (`1284`, the same) and dark 15 (`1084`). No
-/// sprite palette is free with co-op on (docs/zero.md).
+/// CGRAM sprite palette is free with co-op on (docs/zero.md).
 pub const SLASH_ON_ZERO: [u8; 16] = [0, 4, 12, 12, 12, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 15];
 
 /// Sprites the slash arc of `saber` draws now (upper bound for slot
@@ -488,10 +493,11 @@ fn oam_build(game: &mut Game) {
     }
 }
 
-/// Trap body: keep P2's sprite palette = `palette_for(X's)` in the mirror
-/// (and a Zero P1's: Zero's palette over X's slot 1); flag an upload only
-/// when it changed (the game reloads palettes on stage load, fades and
-/// weapon swaps, so the check doubles as a repair).
+/// Trap body: P2's palette (the PPU's ninth) = X3 Zero's or `palette_for(X's)`,
+/// with the charge flash; and a Zero P1's: Zero's palette over X's slot 1 in
+/// the mirror, flagging an upload only when it changed (the game reloads
+/// palettes on stage load, fades and weapon swaps, so the check doubles as a
+/// repair).
 pub fn write_palette(game: &mut Game) {
     if let Some(z) = game.zero_set.as_ref().filter(|_| game.coop.p1.on) {
         let b = ix(ram::X_BASE);
@@ -502,10 +508,10 @@ pub fn write_palette(game: &mut Game) {
         return;
     }
     let src = sprite_palette_offset(X_SPRITE_PALETTE);
-    let w = game.wram_mut();
+    let w = game.wram();
     let x: [u16; 16] = std::array::from_fn(|i| u16::from_le_bytes([w[src + 2 * i], w[src + 2 * i + 1]]));
     let want = game.zero_set.as_ref().map_or_else(|| palette_for(&x), |z| charge_palette(&game.coop.p2, &z.palette));
-    put_palette(game, game.coop.zero_palette, &want);
+    game.set_p2_palette(want);
 }
 
 fn put_palette(game: &mut Game, pal: u8, want: &[u16; 16]) {

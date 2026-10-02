@@ -19,7 +19,7 @@ Highway start (identical after 400 frames of walking, except slot 5):
 | 0 | `4215 7FFF 7FFE .. 7FF1` (white ramp) | flashes, 6-80 frames per run |
 | 1 | `35AF 739C 239D 091E 7B6F 7A8A 5963 7E00 7900 40C4 42DF 2597 1110 739C 4210 0C63` | **X** (block `+$11 = $62`) |
 | 2 | `3DF2 7FFF 3B9F 1EDE 325E 1DDF 087F 5294 7F45 61E5 5903 031F 051A 6318 4631 0C63` | HUD, always |
-| 3 | `35D0 7FFF 5BED 3780 3720 2EA0 7FD8 7FA6 7B1F 7F20 38F9 6E9F 555F 7E80 7D80 14A5` | **no sprite seen** |
+| 3 | `35D0 7FFF 5BED 3780 3720 2EA0 7FD8 7FA6 7B1F 7F20 38F9 6E9F 555F 7E80 7D80 14A5` | **X's charged shots** (none in the runs below) |
 | 4 | `35D0 4106 69C5 7F00 ..` | enemies |
 | 5 | `4A0D 46BF 19BD ..` / `4A6F 1DC7 ..` | enemies (reloaded) |
 | 6 | `41AC 4AFF 221D ..` | enemies; Zero's palette in the Vile scene |
@@ -36,10 +36,14 @@ Frames with a non-P2 visible sprite per palette (`[0..7]`):
 
 Palette 7 is not free: the Highway cars use it, and on the Octopus stage it is
 the busiest enemy palette. With `coop` forcing 7, P2 wears the car colours, and
-writing Zero into 7 recolours the cars. **Palette 3 had no sprite in any run.**
-No `LDA #imm / STA $11` in the listing sets palette 3 either. What uses id `$20`
-is not known; pickups are the likely user, and they would turn Zero-coloured
-while P2 is on screen. The title screen was not checked.
+writing Zero into 7 recolours the cars. Palette 3 had no sprite in these
+runs, but they never charged: **palette 3 (id `$20`) is X's charged shots'**
+(OAM attr `$66`; the first level draws with colours 1-5, the greens, the
+full charge with 1, 6, 7, 9, 13, 14, the blues, measured on `usa11/hw-a`).
+Co-op used to write P2's Zero palette into it every frame, so X's (and P2's)
+charged shots came out in Zero's colours (playtest: "greenish brown"). **No
+sprite palette is free**, so P2's palette is now a ninth one in the PPU
+(docs/coop.md "Palettes"); CGRAM is the game's.
 
 ## Zero's palette
 
@@ -67,12 +71,13 @@ and X's tiles have no hair to carry the gold. Compare
 **Upload.** The NMI (`$80:8207` in the listing) DMAs all 512 bytes of `$0300`
 into CGRAM when `$A1 != 0`, then clears `$A1`. There is no dirty range, only the
 whole buffer. The game's own loaders do `INC $A1` / `STY $A1`.
-`zero::write_palette` runs as an `Observe` trap on the OAM build `$80:D544`. It
-rewrites P2's slot in `$0300` and sets `$A1` only when the slot differs. That
-also repairs the slot after the game reloads palettes. It checked out on the real
-ROM: CGRAM matched `$0300` afterwards, and the cars kept palette 7. Fades read
-the buffer, so P2 fades with the screen while it is hidden. While P2 is visible,
-the trap puts its full colours back.
+`zero::write_palette` runs as an `Observe` trap on the OAM build `$80:D544`.
+For a Zero P1 it rewrites slot 1 in `$0300` and sets `$A1` only when the slot
+differs (that also repairs it after the game reloads palettes). P2's palette
+does not go to CGRAM at all: the trap hands it to the PPU
+(`Game::set_p2_palette`), whose ninth sprite palette colours P2's slots
+(docs/coop.md "Palettes"). P2 does not fade with the screen (it did not
+while visible before either: the trap put its full colours back).
 
 ## X's sprites in VRAM
 
@@ -134,11 +139,12 @@ Code: `crates/mmx-core/src/p2tiles.rs`, PPU patch in
   `verify --coop-off` parity run stays identical).
 - **Save state.** The page is inside the PPU, so `to_save_state` clones it.
   Its bincode encoding inside `SnesEmulator` is empty (`P2TilesSlot`), and
-  `Game::save_state` appends the marker `P2T5` and the `P2Tiles` after
+  `Game::save_state` appends the marker `P2T6` and the `P2Tiles` after
   `(emu, frame_count, fired_at)`. States written before the patch (no tail)
   or with the old 512-word page (tail without the marker) load with an empty
   page; `P2T2` states (one 768-word page) load it as page 0, `P2T3` states
-  (two pages) as pages 0 and 1, `P2T4` states (three) as pages 0-2.
+  (two pages) as pages 0 and 1, `P2T4` states (three) as pages 0-2, `P2T5`
+  states (before P2's palette) with no palette.
 - **Four pages.** `page` holds four 768-word pages back to back; a slot
   also set in `page1: u128` reads the second, one set in `page2` the third,
   one set in both the fourth (`Game::add_p2_tile_slots(mask, page)`, page =
@@ -522,15 +528,15 @@ entries into the same slots (from `$E3` rounded up to 4, padding hidden):
 - per sprite (`zero::oam_entry`, the ROM's `$80:D6EA`/`$D73F`): facing right
   (`+11` bit 6) mirrors `x' = -x - 8` (or `-16`) and toggles hflip; culled when
   `x + 16 >= $10F` or `y + 15 >= $EF` (unsigned); attr = `+11 & $30`
-  (priority) | palette 3 | the layout's flips; high table: x bit 8 and size,
+  (priority) | palette 3 (OAM bits; colours from P2's palette, below) | the layout's flips; high table: x bit 8 and size,
   P2 owns whole bytes. Checked against the ROM emitter on X's own layouts in
   both facings (test `zero_emitter_matches_rom`, walk/jump from `highway-start`).
 - tiles: `set.page(f)` (48 tiles, 1.5 KiB) into the shadow page when `f`
   changes (`CoopState::zero_frame`, restored with the page by `Game::load_state`, reset for a state without co-op data); every P2
   slot gets its mask bit. The X1 streamer interception still runs for P2 but
   copies nothing (`p2tiles::stream_exit`).
-- palette: `ZeroSet.palette` into sprite palette 3 through `$0300`/`$A1`
-  (replaces `palette_for`). X's armour parts are not drawn on Zero.
+- palette: `ZeroSet.palette` as P2's palette (the PPU's ninth; replaces
+  `palette_for`), body and arc slots flagged for it, the sparkles not. X's armour parts are not drawn on Zero.
 
 Checked on the real ROMs (PNGs in `target/z/`; `--x3 PATH` or `MMX_X3_ROM`,
 `xtask` = `cargo run --release -q -p xtask --`):
@@ -620,8 +626,8 @@ sprite palette 3 while X plays (`x3-intro-play` CGRAM), the effects
 palette. X's saber itself was not reached in our states (it needs Zero's
 saber handed over), so the pairing is inferred; in Zero's own palette the
 arc comes out blue and white. **Remapped onto Zero's palette**, as the wave
-was (no sprite palette is free with co-op on: 0 flashes, 1 X or a Zero P1,
-2 HUD, 3 P2's Zero, 4-7 enemies): `zero::SLASH_ON_ZERO` 1 -> 4 (`639C`
+was (no CGRAM sprite palette is free with co-op on: 0 flashes, 1 X or a Zero
+P1, 2 HUD, 3 X's charged shots, 4-7 enemies; P2's is the PPU's ninth): `zero::SLASH_ON_ZERO` 1 -> 4 (`639C`
 white), 2-4 -> 12 (`2388` green), 5 -> 1 (`1284`, the same dark green),
 15 -> 15. It reads as a green crescent with white bands. No CGRAM writes.
 
@@ -773,11 +779,11 @@ columns 0-7, P1 8-15; `CoopState::wave_frames` tracks what is loaded).
 Drawn during the i-frame blink too.
 
 **Palette: remapped onto Zero's.** No sprite palette is free with co-op
-on: 0 flashes, 1 X (or a Zero P1), 2 the HUD, 3 P2's Zero, 4-7 enemies
-(table above). Zero's own palette has white and two greens, so the wave's
+on: 0 flashes, 1 X (or a Zero P1), 2 the HUD, 3 X's charged shots, 4-7
+enemies (table above); P2's Zero is the PPU's ninth. Zero's own palette has white and two greens, so the wave's
 five colours map onto it (`zero::WAVE_ON_ZERO`: 1 -> 4 `639C`, 6/7 -> 12
 `2388`, 8/9 -> 1 `1284`) and it draws with its wearer's palette (P1: 1, P2:
-3). No CGRAM writes.
+its own). No CGRAM writes.
 
 **Damage (removed).** The wave was its own shot (`saber::wave_shot_bytes`, slot
 `Saber::wave_slot`, same insert/take-back as the blade's): id 2, position =
@@ -846,7 +852,8 @@ X's position by absolute address: only P1's charge has sparkles.
   flash (`CHARGE_FLASH`; `CHARGE_FLASH_3`, purple, at X1's third level)
   while `+5B != 0` and `+82 & 2`, else Zero's palette. Written where
   Zero's palette is written each frame (`write_palette`, the OAM build
-  hook): P1's from `$0BA8`, P2's from its block. X1's timing (2 on, 2 off,
+  hook): P1's from `$0BA8` (CGRAM slot 1), P2's from its block (P2's
+  palette in the PPU). X1's timing (2 on, 2 off,
   from 30 frames) against X3's (from 25).
 - P2's charge no longer touches slot 1: two `Observe` traps on the palette
   loaders `$82:8000` (`X = $10`) and `$82:8011` (`Y = $100 + weapon`,
@@ -991,14 +998,15 @@ checks both against VRAM and CGRAM.
 
 The emblem draws with 1 (white plate), 13-15 (greys), 11 (yellow body) and
 6 (red stroke ends). `coop_hud::HUD_ON_ZERO` remaps it onto Zero's palette
-(which P2's palette 3 and a Zero P1's palette 1 hold): body -> red 7, ends
+(which P2's palette and a Zero P1's palette 1 hold): body -> red 7, ends
 -> gold 13 (all red read as an X at 16 px), plate 4, greys 5, 6, 15. The
 four tiles go into shadow page 3 at cells 6, 7, 22, 23, where the PPU's
 `(t & $3F) % 48` puts tile `$86`, so the OAM entries keep X's tile number
 and only their slots are flagged for page 3 (`add_p2_tile_slots(.., 3)`).
 Written every HUD frame (64 words), so loaded states need nothing. P1:
 slot 0 gets palette 1 and the flag each frame the bar is shown. Without X3
-nothing changes: X's icon, recoloured to palette 3 for P2.
+nothing changes: the same Z, in P2's palette (`palette_for(X)`: its gold
+13 is X's light grey there).
 
 ### Player 1 as Zero (`--zero`)
 

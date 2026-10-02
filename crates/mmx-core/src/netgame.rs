@@ -24,8 +24,10 @@ use crate::{Timing, coop, Game, Overclock, Pads, RomError};
 /// outside the trap addresses (mixed into [`trapset_id`]). 3: save states
 /// carry `CoopState` (a `--load` state now restores P2 on both peers).
 /// 4: wide gameplay (`Game::set_wide_gameplay`) in the id. 5: the CPU
-/// overclock (`Game::set_overclock`) in the id.
-const NET_REVISION: u64 = 5;
+/// overclock (`Game::set_overclock`) in the id. 6: P2's palette moved out of
+/// CGRAM (`$0300` sprite palette 3 is the game's again) into the PPU, and
+/// the save state's `P2T6` tail carries it.
+const NET_REVISION: u64 = 6;
 
 /// Rollback save state: [`Game::save_state`] (co-op state included).
 pub fn net_save(game: &Game) -> Vec<u8> {

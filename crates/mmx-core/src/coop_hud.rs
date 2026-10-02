@@ -260,7 +260,11 @@ fn hud(game: &mut Game) {
             e[1] = BAR_MIRROR.wrapping_sub(e[1]);
             e[3] ^= u8::from(k > 0) << 7;
         }
-        coop::set_oam_palette(e, pal);
+        // The pieces keep X's attr (`$34`: the HUD palette, 2), so they are
+        // X's colours; only the icon is Zero's.
+        if k == 0 {
+            coop::set_oam_palette(e, pal);
+        }
     }
     let e = &mut w[oam + (start + BAR_SLOTS) * 4..][..4];
     match marker {
@@ -270,9 +274,11 @@ fn hud(game: &mut Game) {
         }
         None => e[1] = OAM_HIDDEN_Y,
     }
+    let icons = 1 << start | u128::from(marker.is_some()) << (start + BAR_SLOTS);
     if put_icon(game) {
-        game.add_p2_tile_slots(1 << start | u128::from(marker.is_some()) << (start + BAR_SLOTS), ICON_PAGE);
+        game.add_p2_tile_slots(icons, ICON_PAGE);
     }
+    game.add_p2_palette_slots(icons);
     // Widescreen: the bar goes to the wide picture's left edge with X's (the
     // marker stays where P2 fell).
     game.margin.p2_bar = crate::display::slots(start, start + BAR_SLOTS);

@@ -386,7 +386,17 @@ pub struct P2Tiles {
     pub next_page1: u128,
     pub page2: u128,
     pub next_page2: u128,
+    /// Slots drawn with `palette` instead of their CGRAM sprite palette (the
+    /// OAM palette bits still decide colour math): a ninth sprite palette for
+    /// mmx-core's player 2, so it needs none of the game's eight.
+    pub pal: u128,
+    pub next_pal: u128,
+    pub palette: [u16; 16],
+    pub next_palette: [u16; 16],
 }
+
+/// `Pixel::palette` bit for a sprite pixel coloured from `P2Tiles::palette`.
+pub(crate) const EXTRA_PALETTE: u8 = 8;
 
 impl Default for P2Tiles {
     fn default() -> Self {
@@ -406,6 +416,10 @@ impl P2Tiles {
             next_page1: 0,
             page2: 0,
             next_page2: 0,
+            pal: 0,
+            next_pal: 0,
+            palette: [0; 16],
+            next_palette: [0; 16],
         }
     }
 
@@ -414,6 +428,8 @@ impl P2Tiles {
         self.slots = self.next_slots;
         self.page1 = self.next_page1;
         self.page2 = self.next_page2;
+        self.pal = self.next_pal;
+        self.palette = self.next_palette;
         self.pending = false;
     }
 }
@@ -1176,7 +1192,8 @@ impl Ppu {
                 Layer::Bg3 => self.registers.bg_color_math_enabled[2],
                 Layer::Bg4 => self.registers.bg_color_math_enabled[3],
                 Layer::Obj => {
-                    self.registers.obj_color_math_enabled && main_screen_pixel.palette >= 4
+                    // mmxrs patch: `& 7` drops `EXTRA_PALETTE`
+                    self.registers.obj_color_math_enabled && main_screen_pixel.palette & 7 >= 4
                 }
                 Layer::Backdrop => self.registers.backdrop_color_math_enabled,
             };
@@ -1389,13 +1406,13 @@ impl Ppu {
             screen_pixels.iter_mut().zip(screen_rendered_pixels)
         {
             *rendered_pixel = priority_resolver.get().map_or(backdrop_pixel, |(pixel, layer)| {
-                let color = resolve_pixel_color(
+                let color = pixel_color(
                     &self.cgram,
+                    &self.p2_tiles.0.palette,
                     layer,
                     mode,
                     self.registers.direct_color_mode_enabled,
-                    pixel.palette,
-                    pixel.color,
+                    pixel,
                 );
                 RenderedPixel { color, palette: pixel.palette, layer }
             });
@@ -1648,6 +1665,13 @@ impl Ppu {
 
     pub fn p2_tiles(&self) -> &P2Tiles {
         &self.p2_tiles.0
+    }
+
+    /// mmxrs patch: `P2Tiles::palette` for the slots in `mask` (pending, like the page).
+    pub fn set_p2_palette(&mut self, mask: u128, palette: [u16; 16]) {
+        self.p2_tiles.0.next_pal = mask;
+        self.p2_tiles.0.next_palette = palette;
+        self.p2_tiles.0.pending = true;
     }
 
     pub fn set_p2_tiles(&mut self, t: P2Tiles) {
@@ -2215,6 +2239,15 @@ fn line_overlaps_sprite(sprite_y: u8, sprite_height: u16, scanline: u16) -> bool
     } else {
         scanline >= sprite_y || scanline < sprite_bottom
     }
+}
+
+/// mmxrs patch: `resolve_pixel_color`, or the P2 palette (`P2Tiles::palette`)
+/// for a sprite pixel flagged `EXTRA_PALETTE`.
+fn pixel_color(cgram: &Cgram, p2: &[u16; 16], layer: Layer, mode: BgMode, direct: bool, p: Pixel) -> u16 {
+    if layer == Layer::Obj && p.palette & EXTRA_PALETTE != 0 {
+        return p2[usize::from(p.color & 15)];
+    }
+    resolve_pixel_color(cgram, layer, mode, direct, p.palette, p.color)
 }
 
 fn resolve_pixel_color(

@@ -176,8 +176,9 @@ pub const P2_AWAY_FRAMES: u16 = 90;
 /// Frames P2 stays down before respawning next to P1 at half HP (no life
 /// cost), unless P1 revives it sooner (`coop_hud::still_down`).
 pub const P2_DOWN_FRAMES: u16 = 600;
-/// unverified: sprite palette for "Zero red". Placeholder; nobody checked
-/// what palette 7 holds in each stage, nor wrote Zero's colours into it.
+/// OAM palette bits of P2's sprites. Their colours come from P2's own
+/// palette in the PPU (`Game::set_p2_palette`), not CGRAM palette 3 (X's
+/// charged shots); the bits (< 4) keep colour math off, as for X.
 pub const ZERO_PALETTE: u8 = 3;
 /// Frame-layout table of the sprite emitter (`$80:D6AA`): `+$16` (set) * 3
 /// -> 24-bit pointer to the set's frame list, `+$17 & $7F` (frame) * 3 ->
@@ -205,7 +206,7 @@ pub struct CoopState {
     pub p2_oam_count: usize,
     /// `(D, DB, P)` seen at the display hook (diagnostic).
     pub dbg_regs: (u16, u8, u8),
-    /// Sprite palette (0-7) forced onto P2's OAM entries.
+    /// OAM palette bits (0-7) forced onto P2's entries (colours: P2's PPU palette).
     pub zero_palette: u8,
     /// Frames left while P2 is down.
     pub down_frames: u16,
@@ -785,12 +786,14 @@ fn p2_display(game: &mut Game) {
         let o = ix(ram::OAM_BUF) + slot * 4;
         set_oam_palette(&mut w[o..o + 4], pal);
     }
+    let p2_slots = crate::display::slots(first.into(), last.into());
     w[..0x100].copy_from_slice(&dp);
     game.set_regs(saved);
     let base = used.min(first);
     game.coop.p2_oam_base = usize::from(base);
     game.coop.p2_oam_count = usize::from(last - base);
-    game.oam_slots[1] = crate::display::slots(first.into(), last.into());
+    game.oam_slots[1] = p2_slots;
+    game.add_p2_palette_slots(p2_slots);
     // Route P2's slots to the PPU's shadow tile page (p2tiles.rs).
     crate::p2tiles::mark_p2_slots(game);
 }

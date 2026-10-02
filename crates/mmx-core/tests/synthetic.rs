@@ -258,15 +258,24 @@ fn save_state_carries_p2_tile_page() {
     g.p2_tile_page_mut()[5] = 0xBEEF;
     g.p2_tile_page_mut()[3 * 768 + 5] = 0xCAFE; // page 3 (HUD icon)
     g.set_p2_tile_slots(1 << 3);
+    // P2's own sprite palette (the PPU's ninth) and its slots.
+    let pal: [u16; 16] = std::array::from_fn(|i| 0x1000 + i as u16);
+    g.set_p2_palette(pal);
+    g.add_p2_palette_slots(1 << 9);
     let s = g.save_state();
+    g.clear_p2_palette_slots();
+    g.set_p2_palette([0; 16]);
+    assert_ne!(g.save_state(), s, "P2's palette is not in the state");
     g.p2_tile_page_mut()[5] = 0;
     g.p2_tile_page_mut()[3 * 768 + 5] = 0;
     g.set_p2_tile_slots(0);
     g.load_state(&s).unwrap();
+    assert_eq!(g.save_state(), s, "P2's palette did not come back");
     assert_eq!(g.p2_tile_page_mut()[5], 0xBEEF);
     assert_eq!(g.p2_tile_page_mut()[3 * 768 + 5], 0xCAFE);
     // Not live until the game's next OAM upload.
     assert_eq!(g.p2_tiles().1, 0);
+    assert_eq!(g.p2_palette(), (0, [0; 16]));
 }
 
 #[test]
@@ -286,7 +295,7 @@ fn save_state_carries_coop_state() {
     g.coop.revive.spot = Some((0x100, 0x80));
     let s = g.save_state();
     let info = Game::state_info(&s).unwrap();
-    assert_eq!((info.frame_count, info.tiles.as_deref()), (2, Some("P2T5")));
+    assert_eq!((info.frame_count, info.tiles.as_deref()), (2, Some("P2T6")));
     assert_eq!(info.coop.as_ref(), Some(&g.coop));
 
     let mut fresh = game();

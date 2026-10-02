@@ -331,7 +331,7 @@ fn p2(game: &mut Game, emitter: u32, m: i16, saved: &[u8], out: &mut Vec<MarginS
         set_camera(game, saved, shift);
         for (e, hi, page) in crate::zero::margin_entries(game, &z) {
             if let Some(s) = margin_sprite(e, hi, shift, m, true) {
-                out.push(MarginSprite { page: Some(page), ..s });
+                out.push(MarginSprite { page: Some(page), extra_palette: true, ..s });
             }
         }
         return;
@@ -340,6 +340,7 @@ fn p2(game: &mut Game, emitter: u32, m: i16, saved: &[u8], out: &mut Vec<MarginS
     emit(game, emitter, ram::X_BASE as u16, x, m, true, Some(pal), out);
     let base = u16::from(p2[crate::p2tiles::OFF_TILE_BASE]);
     for s in &mut out[start..] {
+        s.extra_palette = true;
         if crate::p2tiles::in_window(u16::from(s.tile) | u16::from(s.attr & 1) << 8, base) {
             s.page = Some(0);
         }
@@ -425,7 +426,7 @@ fn margin_sprite(e: [u8; 4], hi: u8, shift: i16, m: i16, queued: bool) -> Option
     let w = if hi & 2 != 0 { 16 } else { 8 };
     let in_margin = (x < 0 && x + w > -m) || (x + w > 256 && x < 256 + m);
     (in_margin && !(queued && KEPT.contains(&x)))
-        .then_some(MarginSprite { x, y: e[1], tile: e[2], attr: e[3], large: hi & 2 != 0, page: None })
+        .then_some(MarginSprite { x, y: e[1], tile: e[2], attr: e[3], large: hi & 2 != 0, page: None, extra_palette: false })
 }
 
 #[cfg(test)]

@@ -301,8 +301,9 @@ save direct page and slots 0..6, swap a copy of P2's block in with
 $80:D801)` with M=1, X=0, D=0, DB=`$80`, take the seven entries it wrote,
 put slots 0..6, the block and direct page back. The entries go into 8 slots
 (bar + down marker, `HUD_SLOTS`) right after P2's sprites (4-aligned, whole
-high-table bytes set to `$AA`), with X = 8 and palette 3 (`zero_palette`),
-under X's bar: the vertical mirror of the redraw's output, `y' = $B8 - y`
+high-table bytes set to `$AA`), with X = 8, under X's bar. The pieces keep
+X's attr (`$34`, the HUD palette 2), so they are X's colours; only the icon
+gets P2's palette ("Palettes" below). The bar sits the vertical mirror of the redraw's output, `y' = $B8 - y`
 (`BAR_MIRROR`), pieces vflipped (hidden `$E0` entries stay hidden). So P2's
 icon sits at Y `$68`, 8 px under X's (`$50`), and its pieces grow down from
 it: 16 HP spans Y 104..168, 32 HP (X's cap at Y 0) ends at 200. The weapon
@@ -314,7 +315,11 @@ slice leaves `HUD_SLOTS` slots free below 128 (`room`); with P2 hidden and
 the game at 128 slots the bar takes the game's last 8. The bar is rebuilt
 every frame from P2's block, so there is no cache to carry. The icon: X's
 "X" recoloured to palette 3; with X3 loaded, a Z glyph drawn in code (X3 keeps X's emblem for Zero; see `coop_hud::Z_GLYPH`) emblem from shadow
-page 3 (also for a Zero P1's own icon; docs/zero.md "The HUD icon").
+page 3 (also for a Zero P1's own icon; docs/zero.md "The HUD icon"),
+in P2's palette (red/gold on white; without X3 the gold is X's light grey).
+Before: the pieces were forced to palette 3 too, i.e. X1's bar tiles in
+Zero's colours (green frame and greenish-brown segments; `zero.md` noted
+the green outline).
 
 Checked (4x crops of the left edge, frame 30):
 
@@ -339,7 +344,7 @@ above the window, so `spot = None` and only the timeout applies. While down
 re-anchors next to P1 as before (`p2_anchor_ok`) with half of max HP
 (`respawn_hp`, `Revive::half_hp`). Leaving gameplay (P1 dies, stage
 change) clears `half_hp`: P2 comes back at full HP there. The marker is
-slot 8 of the HUD block: the bar's icon (tile `$86`, palette 3) centred on
+slot 8 of the HUD block: the bar's icon (tile `$86`, P2's palette) centred on
 the spot, blinking every 8 frames of the timer, only while the spot is on
 screen. All of it (`CoopState::revive`, `down_frames`) is in `CoopState`,
 so netplay rollback carries it. ponytail: P2 is hidden while down; the X3
@@ -514,6 +519,42 @@ moves a Zero player's shot at `HOOK_SHOT_SLOT_DONE` (the owner's block is
 live there) whenever it sits exactly at X's muzzle: the first update and
 every re-anchor. P2's slots when the X3 set is loaded, every other slot when
 P1 is Zero (`--zero`). No-op otherwise (parity).
+
+## Palettes
+
+The game uses all eight sprite palettes: 0 white flashes and sparkles, 1 X,
+2 the HUD (bars, lemons, full-charge sparkles), 3 X's charged shots (id
+`$20`, `$85:B860`), 4-7 enemies, reloaded per stage. Co-op used to write
+P2's Zero palette over 3 every frame (`ZERO_PALETTE`; it had looked unused
+because the survey runs never charged), so every charged shot, X's and
+P2's, and the third-level sparkles were drawn in Zero's colours (playtest:
+"greenish brown"). That predates the charge work of `a815c90` (palette 3
+since `cde36b3`; `60826bc` writes it the same way); `a815c90`'s loader
+traps only skip P2's flash loads into slot 1.
+
+Fix: **P2's palette is a ninth sprite palette in the vendored PPU**, not in
+CGRAM. `P2Tiles` (the shadow-page state, `ppu.rs`) has `pal: u128` (slots)
+and `palette: [u16; 16]` with pending copies, latched with the pages and
+the OAM on the game's OAM upload. A sprite whose slot is in `pal` takes its
+colours from `palette`; its OAM palette bits (still 3) only decide colour
+math (< 4: none, as before). Main screen and widescreen margins
+(`MarginSprite::extra_palette`) both do it. With `pal = 0` nothing
+changes (`verify --coop-off` identical). mmx-core: `Game::set_p2_palette`
+(the colours; `zero::write_palette` from the OAM-build hook: X3 Zero's, or
+`palette_for(X's)` without X3, with the charge flash), `add_p2_palette_slots`
+(cleared each OAM build in `p2tiles::clear_slots`; set for P2's body,
+armour parts and slash arc, P2's HP icon and down marker, P2's margin
+sprites, not for P2's sparkles, which keep the ROM's palettes 0/2/3).
+Saved in the state (`P2T6`). P2's shots are the game's objects in palette
+3, so they now look like X's. A Zero P1 still wears CGRAM slot 1 (X is not
+drawn then, and X's lemons are palette 2, shots 3), so two Zeros keep two
+independent charge flashes.
+
+Tests `coop_x_charged_shot_matches_solo` (both charge levels, with and
+without X3: CGRAM palette 3 and the shot's OAM entries equal the solo
+run's every frame) and `coop_p2_bar_matches_x` (`tests/coop_palette.rs`).
+Checked on Rev 1 `usa11/hw-a` (Y held 45 / 120 frames) and PAL `hw-spiky`
+(half HP, down marker), co-op with and without X3, `--zero`, both Zeros.
 
 ## Platforms and items (`coop_objects.rs`)
 
