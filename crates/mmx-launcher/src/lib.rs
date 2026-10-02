@@ -95,10 +95,6 @@ pub struct Settings {
     /// online, both players need it).
     #[serde(default)]
     pub wide_gameplay: bool,
-    /// `--overclock`: "" / "auto" (the game's default: 2x with wide
-    /// gameplay, else off), "off", "1.5" or "2". Changes the game.
-    #[serde(default)]
-    pub overclock: String,
 }
 
 impl Default for Settings {
@@ -121,7 +117,6 @@ impl Default for Settings {
             ice: String::new(),
             widescreen: String::new(),
             wide_gameplay: false,
-            overclock: String::new(),
         }
     }
 }
@@ -178,11 +173,6 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
     }
     if s.wide_gameplay {
         push(&["--wide-gameplay"]);
-    }
-    match s.overclock.as_str() {
-        "" | "auto" => {}
-        o @ ("off" | "1.5" | "2") => push(&["--overclock", o]),
-        other => return Err(format!("bad overclock {other:?}")),
     }
     if s.online {
         let room = s.room.trim();
@@ -411,9 +401,6 @@ mod tests {
         assert!(build_args(&Settings { widescreen: "4:3".into(), ..base() }).is_err());
         let wg = Settings { widescreen: "21:9".into(), wide_gameplay: true, ..base() };
         assert_eq!(build_args(&wg).unwrap()[4..], ["--widescreen", "21:9", "--wide-gameplay"]);
-        let oc = Settings { wide_gameplay: true, overclock: "off".into(), ..base() };
-        assert_eq!(build_args(&oc).unwrap()[4..], ["--wide-gameplay", "--overclock", "off"]);
-        assert!(build_args(&Settings { overclock: "3".into(), ..base() }).is_err());
         let net = Settings { online: true, room: "bad/room".into(), ..base() };
         assert!(build_args(&net).is_err());
         let net = Settings { online: true, room: "r".into(), delay: Some(4), ..base() };

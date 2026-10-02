@@ -3,8 +3,8 @@
 Run: `cargo run -p mmx-native --release -- --rom mmx.sfc [--x3-rom mmx3.sfc [--zero]] [--scale 1-8] [--fullscreen] [--coop-local] [--pads] [--widescreen off|16:10|16:9|21:9|N] [--wide-gameplay] [--overclock off|1.5|2]` (docs/widescreen.md;
 `--wide-gameplay` makes enemies spawn, act and leave at the wide edges whatever the preset: it
 changes the game, so online both players need it or the handshake refuses; `--overclock` runs
-the SNES CPU 1.5x/2x as fast so busy scenes stop slowing down, default off but **2x with
-`--wide-gameplay` unless `--overclock off` is given**; it changes the game too, online both
+the SNES CPU 1.5x/2x as fast so busy scenes stop slowing down, **default 2x**, `--overclock off` restores the
+original slowdown; it changes the game too, online both
 players need the same; docs/widescreen.md "Slowdown and overclock")
 (`--rom` falls back to `$MMX_ROM`, `--x3-rom` to `$MMX_X3_ROM`; default scale 3).
 `--x3-rom` takes your Mega Man X3 (USA) image: P2 is drawn as X3 Zero and P2's

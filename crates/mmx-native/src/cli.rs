@@ -16,8 +16,8 @@ the saber) to $MMX_X3_ROM. --zero: player 1 plays as Zero too (needs the X3 ROM)
 the presets; docs/widescreen.md). --wide-gameplay spawns enemies at the wide edges (136/160 px
 past the original ones whatever the preset; changes the game, online both players need it).
 --overclock runs the SNES CPU 1.5x or 2x as fast, which removes the game's own slowdown with
-many enemies (changes the game: online both players need the same); default off, but 2 with
---wide-gameplay unless --overclock off is given. --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
+many enemies (changes the game: online both players need the same); default 2, off restores
+the original slowdown. --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
 Online: both players pass the same --mode (default rollback). --delay is the input delay
 in frames, host's wins: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
 same-region link --mode lockstep --delay 3 plays smoothest; across continents use
@@ -74,11 +74,10 @@ impl Args {
         self.delay.unwrap_or(self.mode.default_delay())
     }
 
-    /// CPU overclock: `--overclock`, else 2x with wide gameplay (it keeps
-    /// more enemies alive, so more slowdown), else off.
+    /// CPU overclock: `--overclock`, else 2x (no reason to keep the SNES's
+    /// slowdown; `--overclock off` is for purists and slow hosts).
     pub fn overclock(&self) -> mmx_core::Overclock {
-        use mmx_core::Overclock;
-        self.overclock.unwrap_or(if self.wide_gameplay { Overclock::X2 } else { Overclock::Off })
+        self.overclock.unwrap_or(mmx_core::Overclock::X2)
     }
 }
 
@@ -247,9 +246,8 @@ mod tests {
     #[test]
     fn overclock() {
         use mmx_core::Overclock;
-        assert_eq!(p("").unwrap().overclock(), Overclock::Off);
-        assert_eq!(p("--wide-gameplay").unwrap().overclock(), Overclock::X2);
-        assert_eq!(p("--wide-gameplay --overclock off").unwrap().overclock(), Overclock::Off);
+        assert_eq!(p("").unwrap().overclock(), Overclock::X2);
+        assert_eq!(p("--overclock off").unwrap().overclock(), Overclock::Off);
         assert_eq!(p("--overclock 1.5").unwrap().overclock(), Overclock::X1_5);
         assert!(p("--overclock 3").is_err());
     }

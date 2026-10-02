@@ -803,11 +803,9 @@ the fix is a faster CPU: `Game::set_overclock(Overclock::{Off, X1_5, X2})`
   byte-identical), `load_state` and `hard_reset` keep the running game's
   factor, so a state runs at whatever the loading game is set to. Netplay
   puts it in the trap-set id (docs/netplay.md), so both peers always agree.
-- **Defaults.** `mmxrs --overclock off|1.5|2`; off, except **2x when
-  `--wide-gameplay` is on and `--overclock` is not given** (wide gameplay
-  keeps more enemies alive, which is where the slowdown comes from).
-  Launcher and web: "CPU overclock (removes slowdown; both players)", auto =
-  that rule. `xtask dump/bench/verify/netsim/bginfo/trace --overclock F`
+- **Defaults.** `mmxrs --overclock off|1.5|2`; **default 2x** (nobody wants
+  the slowdown; `off` is for purists and slow hosts). The launcher has no
+  control for it; web: "CPU overclock", auto = 2x. `xtask dump/bench/verify/netsim/bginfo/trace --overclock F`
   default to off whatever `--wide-gameplay` says (parity runs stay plain).
 
 Measured (`cargo xtask bench`, the user's set: Rev 1 + X3, `--zero --coop

@@ -207,25 +207,23 @@ impl App {
         .on_hover_text("extra scenery left and right of the picture; F10 in game cycles it");
         ui.checkbox(&mut s.wide_gameplay, "spawn enemies at the wide edges (changes gameplay; both players)")
             .on_hover_text("enemies spawn, act and leave 136-160 px further out on both sides, whatever the widescreen setting; online, both players must tick it");
-        ui.horizontal(|ui| {
-            ui.label("CPU overclock (removes slowdown; both players)");
-            let auto = if s.wide_gameplay { "auto (2x)" } else { "auto (off)" };
-            let name = |o: &str| match o { "" | "auto" => auto.to_string(), "1.5" | "2" => format!("{o}x"), o => o.to_string() };
-            egui::ComboBox::from_id_salt("overclock").selected_text(name(&s.overclock)).show_ui(ui, |ui| {
-                for o in ["", "off", "1.5", "2"] {
-                    ui.selectable_value(&mut s.overclock, o.to_string(), name(o));
-                }
-            });
-        })
-        .response
-        .on_hover_text("runs the SNES CPU faster so scenes with many enemies stop slowing down; auto follows wide gameplay; online, both players must pick the same");
         ui.checkbox(&mut s.zero, "Play as Zero (needs X3)");
-        ui.add_enabled(!s.online, egui::Checkbox::new(&mut s.coop_local, "Local co-op (2 players)"));
         ui.separator();
 
-        egui::CollapsingHeader::new("Play online").default_open(s.online).show(ui, |ui| {
-            ui.checkbox(&mut s.online, "Online co-op");
-            ui.add_enabled_ui(s.online, |ui| {
+        // One choice; the two saved bools stay as they are in launcher.json.
+        ui.horizontal(|ui| {
+            ui.label("Players");
+            let mut mode = if s.online { 2 } else { u8::from(s.coop_local) };
+            for (m, name) in ["1 player", "Local co-op", "Online co-op"].into_iter().enumerate() {
+                ui.radio_value(&mut mode, m as u8, name);
+            }
+            (s.coop_local, s.online) = (mode == 1, mode == 2);
+        });
+        if s.coop_local {
+            ui.weak("Player 2 (Zero): WASD, G jump, F buster, H dash, T saber, or a second gamepad.");
+        }
+        if s.online {
+            ui.group(|ui| {
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut s.host, true, "Host");
                     ui.radio_value(&mut s.host, false, "Join");
@@ -277,9 +275,9 @@ impl App {
                     ui.label("ICE");
                     ui.add(egui::TextEdit::singleline(&mut s.ice).hint_text("game default; or none, or stun:.. turn:.. username=U credential=C"));
                 });
+                ui.weak("Host and guest need identical ROM dumps and the same mode.");
             });
-            ui.weak("Host and guest need identical ROM dumps and the same mode.");
-        });
+        }
         ui.separator();
 
         let args = build_args(s);

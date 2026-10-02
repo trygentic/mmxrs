@@ -47,7 +47,7 @@ $('wideGame').addEventListener('change', (e) => {
 // auto = 2x with wide gameplay (more enemies alive, more slowdown), else off.
 let overclock = new URLSearchParams(location.search).get('overclock') || 'auto';
 $('overclock').value = overclock;
-const overclockNow = () => (overclock === 'auto' ? (wideGame ? '2' : 'off') : overclock);
+const overclockNow = () => (overclock === 'auto' ? '2' : overclock);
 $('overclock').addEventListener('change', (e) => {
   if (net) {
     e.target.value = overclock;
