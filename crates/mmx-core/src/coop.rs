@@ -797,14 +797,18 @@ fn p2_display(game: &mut Game) {
 
 /// Sprites the emitter `$80:D67C` would write for object `obj` (upper bound:
 /// it skips off-screen pieces): 0 unless `+$0E` (visible), else the first
-/// byte of its frame layout (see [`LAYOUT_SETS`]).
+/// byte of its frame layout (see [`LAYOUT_SETS`]); a count of 0 is 256 to
+/// the emitter's `DEC $0C; BNE` loop.
 pub(crate) fn layout_len(game: &Game, obj: &[u8]) -> usize {
     if obj[0x0E] == 0 {
         return 0;
     }
     let long = |a: u32| u32::from_le_bytes([game.rom_read(a), game.rom_read(a + 1), game.rom_read(a + 2), 0]);
     let frames = long(LAYOUT_SETS + 3 * u32::from(obj[0x16]));
-    usize::from(game.rom_read(long(frames + 3 * u32::from(obj[0x17] & 0x7F))))
+    match game.rom_read(long(frames + 3 * u32::from(obj[0x17] & 0x7F))) {
+        0 => 256,
+        n => n.into(),
+    }
 }
 
 /// `$84:9B03` entry, `D` = the enemy: run the same contact routine once more

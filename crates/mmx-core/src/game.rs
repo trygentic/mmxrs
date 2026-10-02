@@ -23,6 +23,25 @@ use crate::{coop, Pads, Registers, RomError, RomInfo, Timing, TrapLog, TrapTable
 const SENTINEL_PC: u16 = 0xFFFF;
 /// CPU cycles `call_isolated` allows before giving up (a few frames' worth).
 const CALL_ISOLATED_BUDGET: u32 = 2_000_000;
+
+/// Why [`Game::try_call_isolated_ret`] gave up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolatedError {
+    /// Not back at the sentinel within `CALL_ISOLATED_BUDGET` cycles.
+    Budget,
+    /// The stack pointer went above the caller's: the routine popped its own
+    /// return address and is leaving through a frame that is not there.
+    Unwound,
+}
+
+impl std::fmt::Display for IsolatedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            IsolatedError::Budget => "did not return",
+            IsolatedError::Unwound => "unwound past its caller",
+        })
+    }
+}
 /// Version marker before the appended P2 tile pages in a save state. v1 (no
 /// marker) had a 512-word page; its tail is ignored (empty page). v2
 /// (`P2T2`) had one 768-word page: it loads as page 0. v3 (`P2T3`) had two
@@ -702,6 +721,25 @@ impl Game {
     /// call is still taken). Panics if the routine has not returned within
     /// `CALL_ISOLATED_BUDGET` CPU cycles.
     pub fn call_isolated_ret(&mut self, addr: u32, ret: TrapReturn) {
+        if let Err(e) = self.run_isolated(addr, ret, false) {
+            panic!("call_isolated(${addr:06X}) {e}");
+        }
+    }
+
+    /// [`Game::call_isolated_ret`] for display-only callers, which skip what
+    /// they were drawing instead of panicking. Fails (registers restored,
+    /// nothing else) when the routine has not returned within the budget,
+    /// or as soon as it unwinds past its own return address (the stack
+    /// pointer above the caller's: the sprite emitter's OAM-full exit
+    /// `PLX; PLX; JMP` to the build's tail, `$80:D739` in the PAL listing),
+    /// before it runs any of its caller's code. Whatever the routine wrote
+    /// before that stays written: the caller puts back what it may touch
+    /// (the margin pass restores WRAM `$0000..$1FFF` and a CPU snapshot).
+    pub fn try_call_isolated_ret(&mut self, addr: u32, ret: TrapReturn) -> Result<(), IsolatedError> {
+        self.run_isolated(addr, ret, true)
+    }
+
+    fn run_isolated(&mut self, addr: u32, ret: TrapReturn, fallible: bool) -> Result<(), IsolatedError> {
         let saved = self.regs();
         let saved_fired = self.fired_at.take();
         let bank = (addr >> 16) as u8;
@@ -718,13 +756,26 @@ impl Game {
         self.set_regs(r);
         self.isolated_depth += 1;
         let mut budget = CALL_ISOLATED_BUDGET;
-        loop {
+        let result = loop {
             self.dispatch_traps();
-            if self.emu.at_instruction_boundary() && self.regs().pbr_pc() == sentinel {
-                break;
+            let boundary = self.emu.at_instruction_boundary();
+            if boundary && self.regs().pbr_pc() == sentinel {
+                break Ok(());
             }
-            assert!(budget > 0, "call_isolated(${addr:06X}) did not return");
-            budget -= 1;
+            if fallible && boundary {
+                // Popped past the return address the call pushed: it is
+                // leaving through its caller's frame, which is not there.
+                if self.regs().s > saved.s {
+                    break Err(IsolatedError::Unwound);
+                }
+                if budget == 0 {
+                    break Err(IsolatedError::Budget);
+                }
+            }
+            if budget == 0 && !fallible {
+                break Err(IsolatedError::Budget);
+            }
+            budget = budget.saturating_sub(1);
             if self.isolated_trace.is_some()
                 && self.emu.at_instruction_boundary()
                 && self.emu.next_tick_fetches_opcode()
@@ -736,10 +787,11 @@ impl Game {
             }
             // One CPU tick (the sentinel check inside is the same as ours).
             self.emu.run_cpu_isolated(sentinel, 1);
-        }
+        };
         self.isolated_depth -= 1;
         self.set_regs(saved);
         self.fired_at = saved_fired;
+        result
     }
 
     /// Byte of the (header-stripped) ROM at a 24-bit LoROM address:

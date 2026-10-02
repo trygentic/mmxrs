@@ -51,6 +51,19 @@ Caveats: no new NMI/IRQ edge can arrive (the callee must not wait for one);
 a routine that never returns panics after 2,000,000 CPU cycles; a pending
 DMA is not modelled at the trap boundary (it runs after the body).
 
+`try_call_isolated_ret` is the same call for display-only callers (the
+margin sprite pass): instead of panicking it returns `Err` with the
+registers restored, on the budget or, at the first instruction boundary
+where `S` is above the caller's (the routine popped the return address the
+call pushed and is leaving through a frame that is not there, like the
+sprite emitter's OAM-full exit `PLX; PLX; JMP` to the build's tail), before
+any of that frame's code runs. What the routine wrote until then stays
+written; the caller restores what it may touch. Simulation calls (P2's
+update, physics, slice, effects, contact) keep the panic: their skip would
+have to be proved the same on both netplay peers, and their guards (P2's
+sprite count from `layout_len`, a frame count of 0 being 256 to the
+emitter) keep the emitter below its exit.
+
 ## Why no CPU-crate patch
 
 `wdc65816-emu` is untouched. Everything the hook needs is outside the CPU:

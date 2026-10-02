@@ -253,8 +253,8 @@ At the display hook `$80:9A86` (after the OAM build and P2's slice;
 `coop::display_slice`), with a margin on:
 
 1. Every live object of the `$0E68..$1928` tables (43 x `$40`: enemies,
-   shots, items, more) and of the effect pools `$1928` (31 x `$20`) and
-   `$1D08` (16 x `$20`) whose X is within `-margin-128 .. 256+margin+128`
+   shots, items, more) and of the effect pool `$1928` (31 x `$20`) whose X
+   is within `-margin-128 .. 256+margin+128`
    and not mid-window (`64..192`). An effect counts only when queued this
    frame; a `$0E68`-table object also when the game stopped queueing it
    after having queued it (`MarginState`, per slot: `id + 1` last seen
@@ -267,9 +267,13 @@ At the display hook `$80:9A86` (after the OAM build and P2's slice;
    dropped and not drawn again until queued. Its slot then holds someone
    else's graphics: a second mech of the same set streaming into the shared
    slot `$60`, or a set loading there (measured below: "stale").
-2. For each, the ROM's own emitter runs isolated (`call_isolated_ret(..,
-   Rts)`, `M=1 X=0 D=0 DB=$8D`, `X` = the object, OAM cursor `$E4/$E5/$E6`
-   = 0) with the camera X `$1E4D` moved 256 px towards the object's side,
+2. For each whose frame has 1..127 pieces (the first byte of its layout;
+   the emitter loops `DEC $0C; BNE`, so 0 is 256, and leaves through its
+   OAM-full exit after slot 127), the ROM's own emitter runs isolated
+   (`try_call_isolated_ret(.., Rts)`, `M=1 X=0 D=0 DB=$8D`, `X` = the
+   object, OAM cursor `$E4/$E5/$E6` = 0; an object whose call fails is
+   skipped, step 4 puts everything back) with the camera X `$1E4D` moved
+   256 px towards the object's side,
    so its margin pieces land inside the emitter's window. The entries it
    wrote at `$0700` (and their high-table bits at `$0900` / the partial
    byte in `$E6`) are read back, moved 256 px back, and kept when some of
@@ -292,6 +296,32 @@ and body): a netplay session game has it anyway, so a peer turning
 widescreen on does not change the trap set; a solo game gets it from
 `Game::set_wide_margin`. Paused frames do not reach `$9A86`: the last list
 stays (the world is frozen too). Outside a stage the list is cleared.
+
+**Not `$1D08`.** The pass used to walk a third pool, `$1D08` as 16 x `$20`.
+That pool is 16 x `$10` (`$80:D39D`, `$82:8309`, `$84:A20F` stop at
+`$1E08`) and never reaches the emitter (traced: Highway solo walk/shoot and
+the PAL Vile scene, every emitter call has `X` in `$0BA8`/`$0E68..$1D08`).
+Read as `$20` entries, entry 10 is the camera struct `$1E48` (`+$05` =
+`$1E4D`, the camera X). When the camera scrolls on for Vile's scene (Rev 1,
+`X` act `$1E`), `$1E48 != 0` and `$1E56` bit 7 is set, so the pass took the
+camera for a queued object at X 0 with a garbage frame (`+$16/+$17` =
+`$D8/$1D`, 165 pieces): the emitter filled slot 127 and left through its
+OAM-full exit (`PLX; PLX; JMP` to the build's tail: `$80:D765` in Rev 1,
+`$80:D739` in PAL),
+unwinding through the sentinel, and the game panicked
+(`call_isolated($80D6A7) did not return`) with any widescreen preset, solo
+or co-op. Now: the pool is gone, the frame's piece count is checked, and
+the call is `try_call_isolated_ret` (a failure skips the object). Test
+`margin_pass_survives_the_vile_scroll` (Rev 1, `states/usa11/hw-vile-scroll.state`,
+git-ignored). That state was made from `states/usa11/hw-end.state` (both
+Bee Bladers shot, the pits crossed, then `--poke 7E0BB0=2C,7E0BB1=01`
+holding X's Y at 300 to walk over the rest; `xtask dump --coop --wide 16:9
+--wide-gameplay --overclock 2`, X's HP held at 16 against the cars, Y tapped
+every 8 frames until the scroll); to see the old panic:
+
+```
+xtask dump --load states/usa11/hw-vile-scroll.state --wide 16:9 --frames 60 --out /tmp/v
+```
 
 ### What cannot be drawn, and wide gameplay
 

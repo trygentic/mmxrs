@@ -7,10 +7,12 @@
 //! $00:8030  sub:     INC $0200 / RTS
 //! $00:8040  sublong: INC $0210 / RTL
 //! $00:8050  nmi:     RTI
+//! $00:8060  unwind:  PLX / PLX / JMP loop  (leaves through its caller's frame)
+//! $00:8070  spin:    BRA spin
 //! ```
 //! Counters are 16-bit words (A is 16-bit), so they sit two bytes apart.
 
-use mmx_core::{Game, Pads, RomError, TrapReturn};
+use mmx_core::{Game, IsolatedError, Pads, RomError, TrapReturn};
 
 const SUB: u32 = 0x00_8030;
 const SUBLONG: u32 = 0x00_8040;
@@ -35,6 +37,8 @@ fn rom_with(title: &str, chipset: u8, version: u8) -> Vec<u8> {
         (0x0030, &[0xEE, 0x00, 0x02, 0x60]), // INC $0200 / RTS
         (0x0040, &[0xEE, 0x10, 0x02, 0x6B]), // INC $0210 / RTL
         (0x0050, &[0x40]),                   // RTI
+        (0x0060, &[0xFA, 0xFA, 0x4C, 0x12, 0x80]), // PLX / PLX / JMP $8012
+        (0x0070, &[0x80, 0xFE]),             // BRA $8070
     ];
     for (at, bytes) in code {
         rom[*at..*at + bytes.len()].copy_from_slice(bytes);
@@ -178,6 +182,34 @@ fn call_isolated_costs_nothing() {
     assert_eq!(g.regs(), regs);
     step(&mut g, 1); // still runs normally afterwards
     assert!(word(&g, SUB_CTR) > sub + 100);
+}
+
+/// A routine that pops its own return address and leaves through its
+/// caller's frame (the sprite emitter's OAM-full exit), or never returns:
+/// `try_call_isolated_ret` gives up with the registers put back, where
+/// `call_isolated_ret` would panic.
+#[test]
+fn try_call_isolated_gives_up() {
+    let mut g = game();
+    step(&mut g, 1);
+    let regs = g.regs();
+    let loops = word(&g, LOOP_CTR);
+    assert_eq!(g.try_call_isolated_ret(0x00_8060, TrapReturn::Rts), Err(IsolatedError::Unwound));
+    assert_eq!(g.regs(), regs);
+    assert_eq!(word(&g, LOOP_CTR), loops, "ran its caller's code");
+    assert_eq!(g.try_call_isolated_ret(0x00_8070, TrapReturn::Rts), Err(IsolatedError::Budget));
+    assert_eq!(g.regs(), regs);
+    assert_eq!(g.try_call_isolated_ret(SUB, TrapReturn::Rts), Ok(()));
+    step(&mut g, 1);
+    assert!(word(&g, LOOP_CTR) > loops + 100);
+}
+
+#[test]
+#[should_panic(expected = "call_isolated($008060) did not return")]
+fn call_isolated_panics_when_unwound() {
+    let mut g = game();
+    step(&mut g, 1);
+    g.call_isolated_ret(0x00_8060, TrapReturn::Rts);
 }
 
 #[test]
