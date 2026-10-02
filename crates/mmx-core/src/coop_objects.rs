@@ -30,6 +30,16 @@ pub const HOOK_PLATFORM_TOUCH: HookId = HookId::PlatformTouch;
 /// the previous `+$2C` in `+$3A` and sets `+$37 = 2` (the landing dip) when
 /// the rider lands. Ends in `RTS`.
 pub const HOOK_CAR: HookId = HookId::Car;
+/// The collapsing road chunk's trigger (`$1428` type 9, update `$82:E727`;
+/// listing `$82:E9E6`, cartridge +7), `JSR`ed from its update with `D` = the
+/// chunk while its timer `+$2F` is 0: `LDX #$0BA8; JSL $84:9C0E` (box test
+/// vs X), X on the terrain (`$0BD3` bit 2), above it (`$0002 < 0`) and within
+/// 16 px of its centre (`$0BAD`) -> `+$2F = $1E` (frames to the fall), `+$1F =
+/// $30`, sound `$22`. It reads X's block by absolute address, so only P1
+/// ever started a collapse. Ends in `RTS` (`SEP #$30` first).
+pub const HOOK_COLLAPSE: HookId = HookId::CollapseTrigger;
+/// The chunk's countdown to the fall (`+$2F`, 0 = not triggered).
+const COLLAPSE_TIMER: u16 = 0x2F;
 
 /// Object slots from the enemy table to the end of the `$1428` table
 /// (`$0E68 + 43 * $40 = $1928`), bit n of `CoopState::p2_on_obj`.
@@ -75,6 +85,7 @@ pub fn register(game: &mut Game) {
     game.traps.register(game.hook(HOOK_PLATFORM), "coop_platform", TrapReturn::Observe, platform);
     game.traps.register(game.hook(HOOK_PLATFORM_TOUCH), "coop_platform_touch", TrapReturn::Observe, platform);
     game.traps.register(game.hook(HOOK_CAR), "coop_car", TrapReturn::Observe, platform);
+    game.traps.register(game.hook(HOOK_COLLAPSE), "coop_collapse", TrapReturn::Observe, collapse);
     for a in PICKUPS {
         game.traps.register(game.hook(a), "coop_pickup", TrapReturn::Observe, pickup);
     }
@@ -115,6 +126,39 @@ fn platform(game: &mut Game) {
     w[..0x20].copy_from_slice(&dp);
     if pc != game.hook(HOOK_PLATFORM_TOUCH) {
         game.coop.p2_on_obj = if p2_carry { game.coop.p2_on_obj | bit } else { game.coop.p2_on_obj & !bit };
+    }
+}
+
+/// [`HOOK_COLLAPSE`]: the chunk's trigger test once more with P2's block
+/// swapped in, before P1's (the ROM's). P2 standing on the chunk starts the
+/// countdown exactly as X does; then the ROM's pass is skipped (`RTS` with
+/// the routine's `SEP #$30`), since P1 on it too would only restart the
+/// same countdown and queue the crumble sound twice. Otherwise only the box
+/// test's direct-page scratch changed, and it is put back.
+fn collapse(game: &mut Game) {
+    if !p2_up(game) {
+        return;
+    }
+    let r = game.regs();
+    if slot_bit(r.d).is_none() {
+        return;
+    }
+    let timer = usize::from(r.d + COLLAPSE_TIMER);
+    if game.wram()[timer] != 0 {
+        return;
+    }
+    let dp: [u8; 0x20] = game.wram()[..0x20].try_into().unwrap();
+    game.coop.in_contact = true;
+    with_p2_swapped(game, |game| game.call_isolated_ret(r.pbr_pc(), TrapReturn::Rts));
+    game.coop.in_contact = false;
+    game.wram_mut()[..0x20].copy_from_slice(&dp);
+    if game.wram()[timer] != 0 {
+        let mut r = game.regs();
+        r.p |= 0x30;
+        r.x &= 0xFF;
+        r.y &= 0xFF;
+        game.set_regs(r);
+        game.emulate_return(false);
     }
 }
 
@@ -261,4 +305,63 @@ fn near(game: &Game, base: usize) -> bool {
     let at = |o: usize| u16::from_le_bytes([w[base + o], w[base + o + 1]]);
     let p2at = |o: usize| u16::from_le_bytes([p2[o], p2[o + 1]]);
     at(5).abs_diff(p2at(OFF_POS_X)) < PICKUP_NEAR && at(8).abs_diff(p2at(OFF_POS_Y)) < PICKUP_NEAR
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ram::X_POS_X;
+
+    /// `r2-1` (PAL): X walks right to 3912, just short of the collapsing road
+    /// chunk at 3984 (`$1428` type 9); then co-op starts, P1 stands, P2 walks
+    /// onto the chunk. P2 alone starts the collapse (`+$2F` counts down from
+    /// `$1E`, as for X at the same spot solo); with the trap off it doesn't.
+    #[test]
+    fn coop_p2_triggers_collapse() {
+        let Some(rom) = std::env::var_os("MMX_ROM") else {
+            return eprintln!("MMX_ROM not set; skipping");
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/r2-1.state");
+        let Ok(state) = std::fs::read(st) else {
+            return eprintln!("{st} missing; skipping");
+        };
+        let rom = std::fs::read(rom).unwrap();
+        for trap in [true, false] {
+            let mut g = Game::from_rom(rom.clone()).unwrap();
+            if g.load_state(&state).is_err() {
+                return eprintln!("{st} is not a state of this dump; skipping");
+            }
+            for _ in 0..120 {
+                g.step(crate::Pads { p1: crate::BTN_RIGHT, p2: 0 });
+            }
+            let chunk = (0..20u16)
+                .map(|k| 0x1428 + k * 0x40)
+                .find(|&a| g.wram()[usize::from(a)] != 0 && g.wram()[usize::from(a) + 0x0A] == 9)
+                .map(usize::from)
+                .expect("a road chunk ahead");
+            assert_eq!(g.wram()[chunk + usize::from(COLLAPSE_TIMER)], 0);
+            g.coop.enabled = true;
+            crate::coop::register_coop_traps(&mut g).unwrap();
+            if !trap {
+                let a = g.hook(HOOK_COLLAPSE);
+                g.traps.set_untrapped(a, true);
+            }
+            let p1x = |g: &Game| u16::from_le_bytes([g.wram()[ix(X_POS_X)], g.wram()[ix(X_POS_X) + 1]]);
+            let x = p1x(&g);
+            let mut started = None;
+            for f in 1..=70 {
+                g.step(crate::Pads { p1: 0, p2: if f <= 50 { crate::BTN_RIGHT } else { 0 } });
+                if started.is_none() && g.wram()[chunk + usize::from(COLLAPSE_TIMER)] != 0 {
+                    started = Some(f);
+                }
+            }
+            assert_eq!(p1x(&g), x, "P1 stood still");
+            if trap {
+                let f = started.expect("P2 on the chunk starts the collapse");
+                assert!((30..=50).contains(&f), "started at f{f}");
+            } else {
+                assert_eq!(started, None);
+            }
+        }
+    }
 }

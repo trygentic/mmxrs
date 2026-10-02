@@ -70,6 +70,7 @@ pub enum HookId {
     GfxTrigger,
     GfxLoader,
     GfxDecomp,
+    CollapseTrigger,
 }
 
 const fn hook(id: HookId, name: &'static str, addr_pal: u32, sig_offset: i32, sig: &'static str) -> Hook {
@@ -81,7 +82,7 @@ use HookId::*;
 /// Indexed by `HookId as usize`. Signatures extracted from the PAL dump
 /// (unique in the whole ROM with their wildcards; `hooks::tests`).
 #[rustfmt::skip]
-pub const HOOKS: [Hook; 39] = [
+pub const HOOKS: [Hook; 40] = [
     hook(P2Update, "p2_update", 0x80D1EF, -4, "22 ?? ?? ?? 9C D4 0B AE 13 1F F0 05 20 ?? ?? 80"),
     hook(P2Physics, "p2_physics", 0x80D241, -4, "22 ?? ?? ?? 9C 1C 1F AE 19 1F D0 09 20 ?? ?? 20"),
     hook(P2Display, "p2_display", 0x809A86, -3, "20 ?? ?? AD 30 1F C9 80 D0 07 9C 30 1F A9 0F 85"),
@@ -133,6 +134,9 @@ pub const HOOKS: [Hook; 39] = [
     // its decompressor thread (`LDA $F6F7,Y`: per set size, source); read only.
     hook(GfxLoader, "gfx_loader", 0x80B066, 0, "C2 30 A9 00 00 5B 64 F8 64 48 64 49 AD 08 1F 29 FF 00 0A 85 00 AD 7A 1F"),
     hook(GfxDecomp, "gfx_decomp", 0x80B230, 13, "0A AA 0A 18 65 00 A8 A5 F8 9F 00 80 7F B9 ?? ?? 69 07 00 4A 4A 4A"),
+    // The collapsing road chunk's "X stands on me" test (listing `$82:E9E6`,
+    // `JSR` from its update): box test vs `$0BA8`, `$0BD3` bit 2, centred.
+    hook(CollapseTrigger, "collapse_trigger", 0x82E9ED, 0, "C2 10 A2 A8 0B 22 ?? ?? ?? 90 33 AD D3 0B 29 04 F0 2C"),
 ];
 
 impl HookId {

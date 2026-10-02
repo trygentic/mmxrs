@@ -154,6 +154,12 @@ pub const OFF_INPUT: usize = 0x36; // $0BDE held, $0BE0 prev, $0BE2 pressed
 /// `$81:A3FD`, `$81:A4BA`, `$81:A541`) from the shot loop, which runs P2's
 /// shots with P2's block in place ([`HOOK_SHOT_SLOT`]).
 pub const OFF_SHOTS: usize = 0x35;
+/// `$0C24` (block `+$7C`): X rides the ride armour (set by `$83:8605`). Its
+/// only other reader is the charge code (`$81:97DB`): while set, a charge
+/// in progress is cancelled (charge-sound stop `$17`, `+$58/+$5A/+$5B = 0`)
+/// instead of firing on the Y release. P2's copy is set around a locked
+/// update ([`p2_update`]).
+const OFF_RIDE_ARMOUR: usize = 0x7C;
 /// `$0C0B` (block `+$63`), decremented with `$0BDD` by the despawn at `$81:A541`.
 const OFF_CHARGED_SHOTS: usize = 0x63;
 /// X's shots: 8 slots of `$40` at `$1228` (`ram::ITEMS_BASE`), `+0` = active.
@@ -418,7 +424,11 @@ fn p2_update(game: &mut Game) {
         p2.copy_within(OFF_POS_X..OFF_POS_X + 2, OFF_PREV_X);
         p2.copy_within(OFF_POS_Y..OFF_POS_Y + 2, OFF_PREV_X + 2);
     }
-    let mut pad = word(game.wram(), PAD2_HELD) & !(BTN_START | BTN_SELECT);
+    // Cutscenes: while the ROM holds X (boss intro, door, Vile's capture,
+    // stage clear: `coop_stages::p1_scripted`) P2's pad is dropped. Its own
+    // actions then resolve as with no input: it stops, lands and stands.
+    let locked = coop_stages::p1_scripted(game.wram());
+    let mut pad = if locked { 0 } else { word(game.wram(), PAD2_HELD) & !(BTN_START | BTN_SELECT) };
     if game.zero_set.is_some() {
         // X swings the saber; during a swing the ROM gets a masked pad.
         pad = crate::saber::update(&mut game.coop.saber, &game.coop.p2, pad);
@@ -431,14 +441,24 @@ fn p2_update(game: &mut Game) {
         // Run the ROM's own input remapper (`$80:E518`, JSR/RTS) with pad 2
         // in pad 1's slot: it reads `$A7` and the block's previous input and
         // writes the block's `$0BDE..$0BE3`, so P2 gets P1's button config.
+        // Locked: held, previous and pressed all 0, and the charge is
+        // cancelled the ROM's way rather than fired by the Y release.
         let w = game.wram_mut();
-        let i = ix(ram::PAD1_HELD);
-        let saved_pad1 = [w[i], w[i + 1]];
-        w[i..i + 2].copy_from_slice(&pad.to_le_bytes());
-        game.call_isolated_ret(game.hook(INPUT_REMAP), crate::TrapReturn::Rts);
-        let w = game.wram_mut();
-        w[i..i + 2].copy_from_slice(&saved_pad1);
+        let ride = ix(ram::X_BASE) + OFF_RIDE_ARMOUR;
+        let saved_ride = w[ride];
+        if locked {
+            w[ix(ram::X_BASE) + OFF_INPUT..ix(ram::X_BASE) + OFF_INPUT + 6].fill(0);
+            w[ride] = 1;
+        } else {
+            let i = ix(ram::PAD1_HELD);
+            let saved_pad1 = [w[i], w[i + 1]];
+            w[i..i + 2].copy_from_slice(&pad.to_le_bytes());
+            game.call_isolated_ret(game.hook(INPUT_REMAP), crate::TrapReturn::Rts);
+            let w = game.wram_mut();
+            w[i..i + 2].copy_from_slice(&saved_pad1);
+        }
         game.call_isolated(game.hook(PLAYER_UPDATE));
+        game.wram_mut()[ride] = saved_ride;
     });
     // B3: remember which slots P2 fired into (the count went up); see `shot_books`.
     if game.coop.p2[OFF_SHOTS] > fired {
@@ -799,6 +819,11 @@ fn contact(game: &mut Game) {
     if !game.coop.enabled || game.coop.in_contact || game.coop.p2_hidden || p2_is_down(p2) || p2[0x88] != 0 || p2[0x8A] != 0 {
         return;
     }
+    // A cutscene (P2's pad is dropped, see `p2_update`): nothing hurts P2,
+    // e.g. Vile walking over it while it stands through the capture scene.
+    if coop_stages::p1_scripted(game.wram()) {
+        return;
+    }
     // The box test scribbles on direct page `$00..$11` and the damage on `$0000`;
     // P1's pass may bail before writing them, so put them back.
     let dp: [u8; 0x20] = game.wram()[..0x20].try_into().unwrap();
@@ -885,6 +910,49 @@ mod tests {
         let mut dead = p2;
         dead[OFF_HP] = 0x80;
         assert!(p2_is_down(&dead));
+    }
+
+    /// `highway-vile` (PAL): the Vile fight. P1 walks right; P2 walks right
+    /// and holds Y (charging) into Vile's capture of X (action `$2E`). From
+    /// the frame after the capture starts, P2's input is 0, it stands (action
+    /// 0) where it is, its charge is cancelled without a shot, and it takes
+    /// no contact damage, for the rest of the scene.
+    #[test]
+    fn coop_p2_locked_in_cutscene() {
+        let Some(rom) = std::env::var_os("MMX_ROM") else {
+            return eprintln!("MMX_ROM not set; skipping");
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/highway-vile.state");
+        let Ok(state) = std::fs::read(st) else {
+            return eprintln!("{st} missing; skipping");
+        };
+        let mut g = crate::Game::from_rom(std::fs::read(&rom).unwrap()).unwrap();
+        if g.load_state(&state).is_err() {
+            return eprintln!("{st} is not a state of this dump; skipping");
+        }
+        g.coop.enabled = true;
+        register_coop_traps(&mut g).unwrap();
+        let pads = |f: usize| crate::Pads { p1: crate::BTN_RIGHT, p2: crate::BTN_RIGHT | if f >= 850 { crate::BTN_Y } else { 0 } };
+        let mut f = 0;
+        while !coop_stages::p1_scripted(g.wram()) {
+            f += 1;
+            assert!(f < 2000, "no capture");
+            g.step(pads(f));
+        }
+        assert_eq!(g.wram()[ix(ram::X_ACTION)], coop_stages::act::CAPTURED);
+        assert_ne!(g.coop.p2[0x58], 0, "P2 is charging");
+        let p2 = |g: &crate::Game| (u16::from_le_bytes([g.coop.p2[OFF_POS_X], g.coop.p2[OFF_POS_X + 1]]), g.coop.p2[OFF_ACTION], g.coop.p2[OFF_HP]);
+        g.step(pads(f + 1));
+        g.step(pads(f + 2));
+        let held = p2(&g);
+        assert_eq!(held.1, coop_stages::act::STAND);
+        for k in 3..400 {
+            g.step(pads(f + k));
+            assert_eq!(&g.coop.p2[OFF_INPUT..OFF_INPUT + 6], &[0; 6]);
+            assert_eq!(p2(&g), held, "P2 stands still");
+            assert_eq!((g.coop.p2[0x58], g.coop.p2_shots), (0, 0), "no charge, no shot");
+            assert!(coop_stages::p1_scripted(g.wram()));
+        }
     }
 
     /// hw-spiky: P2 walks 40 px left of X and fires, X fires right. Each

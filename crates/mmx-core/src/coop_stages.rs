@@ -33,6 +33,36 @@ pub mod act {
     pub const WALL_SLIDE: u8 = 0x12;
     /// Beam-in drop at stage start / after a respawn (`vy = -2048`).
     pub const BEAM_IN: u8 = 0x22;
+    /// Stage exit (teleport out after a boss / the Vile scene).
+    pub const STAGE_EXIT: u8 = 0x1A;
+    /// "Hold still": the generic cutscene action, set by `$84:9FE6` (34
+    /// callers: boss intros, doors, ...) and ended by `$84:9FFE` (action 0).
+    /// Its handler (`$81:8B4D`) lets an airborne X fall, lands it and stands.
+    pub const HOLD: u8 = 0x1E;
+    /// Vile's capture (`$84:A04D` / `$A061` / `$A070`: grabbed, held, down).
+    pub const CAPTURED: u8 = 0x2E;
+    pub const CAPTURED_HELD: u8 = 0x30;
+    pub const CAPTURED_DOWN: u8 = 0x32;
+}
+
+/// `$1F23`: the stage is cleared (the boss died, `$84:AA28`): X's action
+/// dispatcher (`$81:8258`) runs the victory/teleport code instead of X's
+/// action, then `$D3 = 8`.
+const STAGE_CLEAR: u32 = 0x7E1F23;
+
+/// The ROM has taken X's control away: a scripted sequence (boss intro and
+/// health-bar fill, boss door, Vile's capture and the scene with the NPC
+/// Zero, stage clear / teleport out). X's input is still remapped from the
+/// pad in all of these; it is the action that ignores it. Every action an
+/// object forces on X through the setters at `$84:9F85..$84:A07B` is
+/// listed except `$18` / `$1C` (P1's own health / tank pickups, where the
+/// world freezes but P2 plays on, docs/coop.md "Items").
+pub fn p1_scripted(w: &Wram) -> bool {
+    b(w, STAGE_CLEAR) != 0
+        || matches!(
+            b(w, ram::X_ACTION),
+            act::STAGE_EXIT | act::HOLD | act::CAPTURED | act::CAPTURED_HELD | act::CAPTURED_DOWN | 0x34..=0x40 | 0x46
+        )
 }
 
 fn b(w: &Wram, a: u32) -> u8 {
@@ -201,6 +231,23 @@ mod tests {
         set16(&mut w, ram::X_POS_Y, 500);
         set16(&mut w, ram::CAMERA_Y, 256);
         assert!(!p2_anchor_ok(&w));
+    }
+
+    #[test]
+    fn coop_stages_scripted() {
+        let free = [act::STAND, act::READY, act::WALK, act::JUMP, act::FALL, act::LAND, act::HURT, act::WALL_KICK, act::WALL_SLIDE, 0x18, 0x1C, 0x24];
+        for a in free {
+            let mut w = gameplay();
+            set(&mut w, ram::X_ACTION, a);
+            assert!(!p1_scripted(&w), "act {a:02X}");
+            set(&mut w, STAGE_CLEAR, 1);
+            assert!(p1_scripted(&w), "act {a:02X}, stage clear");
+        }
+        for a in [act::STAGE_EXIT, act::HOLD, act::CAPTURED, act::CAPTURED_HELD, act::CAPTURED_DOWN, 0x34, 0x40, 0x46] {
+            let mut w = gameplay();
+            set(&mut w, ram::X_ACTION, a);
+            assert!(p1_scripted(&w), "act {a:02X}");
+        }
     }
 
     #[test]
