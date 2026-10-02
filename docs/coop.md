@@ -39,7 +39,8 @@ bank `$80` `+$20`/`+$2B`) find them too; see `docs/rom-variants.md`.
 | `$80:D3B8` / `$80:D3C1` | shot loop, before / after each `$1228` slot (`D` = the slot) | P2's shots (B3): P2's block swapped in around their update |
 | `$80:D1FF` | instruction after the object master's `JSR $80:D3B2` (the shot loop; the enemy loops follow) | saber (X3 set only): the arc's shot into a free `$1228` slot, taken out at `$80:D241` (docs/zero.md "The saber") |
 | `$80:9A94` | `LDA $1F30`, where both paths after `$9A86` meet (every gameplay frame, after the display slice) | P2's HP bar and down marker (`coop_hud.rs`, "P2 HP bar and revive") |
-| `$84:9B03` | entry of the enemy-vs-X contact routine; every enemy's AI `JSL`s it with `D` = the enemy (154 call sites) | contact pass: the same routine again, isolated, with P2's block swapped in |
+| `$84:9B03` | entry of the enemy-vs-X contact routine; every enemy's AI `JSL`s it with `D` = the enemy (154 call sites) | contact pass: the same routine again, isolated, with P2's block swapped in (not during a cutscene, see "Cutscenes") |
+| `$82:E9ED` | the collapsing road chunk's "X stands on me" test (`JSR` from its update) | collapse pass: the same test with P2's block swapped in; P2 starts the collapse (see "Platforms and items") |
 
 Per-frame order in the object master `$80:D1C2`: player phase 1 (`$81:812E`)
 -> item/shot/enemy loops -> player phase 2 (`$81:9D67`) -> camera `$80:DDB0`.
@@ -89,6 +90,82 @@ falls into that pit (`(3365,516)` act `$0C` at f72, like P1 at f222) and
 nothing moves it sideways (`target/qa/follow/after-f66.png`); P2 idle on
 `highway-start`: warped to P1's spot at f~185 (X 393) and f~365 (X 591).
 The ROM's own edge rules for P1 are untouched.
+
+## Cutscenes: P2's pad is locked
+
+Playtest: "Zero (P2) shouldn't be able to move during boss opening
+cutscenes": in the Vile scene at the end of the Highway P2 kept running
+and shooting while X was held.
+
+**How the ROM takes X's control.** Not by masking the pad: the input remap
+`$80:E518` runs every gameplay frame (skipped only while `$1F7F` is set,
+the attract demo), and X's `$0BDE` follows the pad all through the Vile
+scene (dump `xin`). It is X's *action*: objects force one through a family
+of setters in bank `$84` (`$84:9F85..$84:A07B`, `STA $0BAA`, most also
+`STA $0C16`), and those actions ignore the input:
+
+| action | setter | callers | what |
+|---|---|---|---|
+| `$1E` | `$84:9FE6` (released by `$84:9FFE`: action 0) | 34: boss intros in banks `$83`/`$87`/`$88` (e.g. `$83:B161`, the boss init that then waits for the health bar), doors, ... | "hold still": handler `$81:8B4D` lets an airborne X fall (`$82:8174`), lands it, stands |
+| `$2E` / `$30` / `$32` | `$84:A04D` / `$A061` / `$A070` | Vile (`$83:CFF3`, `$83:D4FE`, `$88:A58A`) | grabbed, held up, knocked down; X stays in them through the NPC Zero's arrival and the text |
+| `$34`..`$40`, `$46` | `$84:A008..$A041`, `$9FF2` | bosses in banks `$87`/`$88` | boss-specific holds |
+| `$1A` | X itself, when `$1F23` is set | | stage exit (teleport out) |
+| `$18` / `$1C` | `$84:9F85` / `$9FC9` | pickups (`$81:E0xx`, `$81:E7xx`) | P1's own heal / tank fill: not a cutscene, P2 plays on |
+
+`$1F23` (stage clear, `INC` by `$84:AA28` when a boss dies) makes X's
+dispatcher (`$81:8258`) run the victory code whatever the action, then `$D3
+= 8`. The player code's own `$0C16` check (`$81:9831`) is also why X's
+charge stops in these actions.
+
+**P2.** `coop_stages::p1_scripted` = `$1F23 != 0` or X's action in `$1A`,
+`$1E`, `$2E..$40`, `$46` (pure WRAM, same on both netplay peers, nothing
+new in `CoopState`). While it holds, `p2_update` does not run the remap:
+P2's held/previous/pressed input (`+$36..+$3B`) is 0, so its own actions
+resolve as with the pad released (walk stops, a jump falls and lands, then
+it stands where it is, facing as it was). A charge held into the scene is
+cancelled the ROM's way, not fired by the release: around the locked update
+P2's `+$7C` (`$0C24`, "on the ride armour", read only by the charge code
+`$81:97DB` besides the ride armour itself) is set, so `$81:97C8` clears
+`+$58/+$5A/+$5B` and queues the charge-sound stop `$17`. P2's contact pass
+is skipped too (Vile walks over P2 during the capture; nothing may hurt or
+move it). P2's shots already in flight finish their flight. The lock takes
+a frame: Vile sets X's action from the enemy loop, after P2's update.
+
+Forced movement (a boss door walking X in): P2 is locked and stays where
+it is; if that leaves it outside the window, "Following the camera" warps
+it to P1's spot at the next `p2_anchor_ok` frame, i.e. once the ROM gives
+X back (action 0 is "stand"). unverified: no boss-door state; `$1E` is set
+by 34 callers, the door among them assumed, not traced.
+
+**The Vile scene** (PAL `states/highway-vile.state`: the fight already
+running; the drop-in before it was not reached, see coop-qa.md). P1 holds
+Right, taps B from f1000; P2 holds Right, taps Y every 16 frames and B
+every 50 (`--x3`, `vb` = before, `va` = after):
+
+```
+dump --load highway-vile.state --x3 X3 --coop --frames 2600 --at 1-2600/10 --hold 0100 \
+  --p1tap 8000@1000-3000/40 --p2-hold 0100 --p2tap 4000@1-2600/16:6,8000@5-2600/50:10
+f1-930     fight: X has control, so does P2 (walks, jumps, shoots; Vile's HP $74 -> $67 from P2's shots)
+f920-932   P2 jumping (act 08), lands at f932, walks on (act 04)
+f936       Vile grabs X (act 2E); f938 P2 act 00, input 0000, standing at (7562,431)
+f1201      X held up (act 30); P2 still there
+f1921      Vile's HP $67 -> $57: the NPC Zero's shot, not P2's
+f1951      the NPC Zero (enemy id $33) has run in and stands next to P2: two Zeros side by side
+f2101-2501 Vile leaves, text box; X act 32; P2 still standing, input 0000
+(then $D3 = 8, X act 1A teleports out: P2 is hidden by p2_should_exist, as before)
+```
+
+Before (same run with `--p2-hold 0200`): P2 walked and shot through the
+capture and the text (input `0042`, Left + Y, at f1201, f1601, f2401).
+Charge test (`--p2tap 4000@850:600`, no `--x3`, holding Y into the capture
+at f1149): with only the pad zeroed, the release fired a charged shot from
+P2 at f1150; with `+$7C` none, and the sound ring gets the `$17` stop. PNGs:
+`target/qa/coop-lock/vile-before.png` (f911, 1001, 1201, 1951, 2101,
+2501), `vile-after.png` (f921, 961, 1201, 1951, 2101, 2501). Test
+`coop_p2_locked_in_cutscene` (PAL `highway-vile`: P2 charging into the
+capture; then 400 frames of input 0, same position/action/HP, no shot).
+Two Zeros: P2 is drawn as usual while the ROM's Zero is on screen;
+standing still next to it looks intended enough.
 
 ## Walls
 
@@ -572,6 +649,52 @@ f49 X=(3949,351) act 00 | P2 pos=(3993,406) act 00
 
 P1's lines in the second run are identical to the solo run.
 
+**Collapsing road: the trigger.** Playtest: "Zero can't trigger crumbling
+platforms": with X elsewhere, Zero standing on a collapsing section did
+nothing. Carrying (above) was P2's, but what starts the collapse is a
+separate test in the chunk's own update (`$1428` type 9, cartridge
+`$82:E727`, listing `$82:E720`, +7): states 2/6/`$A`/`$E` call it while the
+timer `+$2F` is 0, listing `$82:E9E6` = cartridge **`$82:E9ED`** (`RTS`):
+`LDX #$0BA8; JSL $84:9C0E` (box test vs X), `$0BD3` bit 2 (X on the
+terrain: the road chunk is level tiles too, not `$0BD4`), `$0002 < 0` (X
+above it), `|$0BAD - +$05| < 16`; then `+$2F = $1E` (frames to the fall),
+`+$1F = $30`, `+$1A/+$1C = 0`, sound `$22`. A direct test of X's block, not
+the `+$2C` "stood on me" byte (that one is only the carry; `p2_on_obj`
+keeps P2's) and not a stage trigger. Same address and bytes on PAL and
+Rev 1 (`hooks.rs` `collapse_trigger`).
+
+Fix: `coop_objects::HOOK_COLLAPSE`, an `Observe` trap on `$82:E9ED`: when
+P2 is up and the timer is 0, the test runs isolated with P2's block
+swapped in (direct page `$00..$1F` put back). If P2 started the collapse,
+the ROM's pass (P1's) is skipped (`RTS`, with the routine's `SEP #$30`):
+P1 on it too would only restart the same countdown and queue the crumble
+sound twice. Repro (PAL; `hw-collapse` = `r2-1` + 120 frames holding Right,
+X at 3912, chunk at 3984):
+
+```
+dump --load hw-collapse.state --frames 160 --at 1-160/4 --coop --p2-hold 0100 --to 50 --wram
+        before                                       after
+f37  P2 (3965,351) act 04 | chunk +2F 00       P2 (3965,351) | +2F 00
+f41  P2 (3971,351) act 04 | +2F 00             P2 (3971,351) | +2F 1D +1F 30   P2 within 16 px: starts
+f49  P2 (3983,351) act 04 | +2F 00             P2 (3983,351) | +2F 15
+f73  P2 (3983,351) act 00 | +2F 00 (forever)   P2 (3983,347) act 0A | chunk falls (+01 = 4)
+f101                                           P2 (3983,438) riding it down; f121 down in the pit
+```
+
+X stands at 3912 throughout, its lines identical in both. Solo, X walking
+right starts the same chunk at X 3969 (timer `$1C` at 3972), the same
+threshold as P2 (3971). PNGs: `target/qa/collapse/before.png`,
+`after.png` (f41, 61, 81, 101). Test `coop_p2_triggers_collapse` (PAL
+`states/r2-1.state`; asserts it does not start with the trap off).
+
+Other stand-to-trigger objects: the listing has 57 `LDX #$0BA8` tests;
+the only ones followed by a `$0BD3`/`$0BD4` read are this chunk, the
+platform pair `$84:AB77`/`$AB4C` (hooked), `$82:D875` and `$84:9A05`,
+`$88:B5B3`, `$88:C33D` (side-touch flags `$0BD4 |= $80/$40`, like `$AB4C`),
+and `$87:B4E9` (an object that switches state when X is in its box or
+grounded, `$0BD3`). None of the latter are on the Highway; unverified, P2
+does not trigger them.
+
 Not covered: other pickups (heart tanks, sub-tanks, armour capsules: their
 own routines, e.g. listing `$81:E4AB`, `$81:EB2A`), weapon energy and the
 1-up are hooked but were not seen on the Highway; platform code outside
@@ -604,6 +727,9 @@ P2 can:
 - Die in pits, or be taken out when the camera scrolls away vertically;
   be revived by P1 (or come back after 10 s) at half HP, no life lost;
   its own HP bar under X's (see "P2 HP bar and revive").
+
+- Start a collapsing road chunk by standing on it, like X.
+- Not move or be hurt while the ROM holds X in a cutscene (see "Cutscenes").
 
 P2 can't:
 - Take damage from enemy shots or hazards that go through `$84:9F2A`.
