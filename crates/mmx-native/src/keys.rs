@@ -44,7 +44,7 @@ pub enum Hotkey {
     Quit,
     Pause,
     FrameStep,
-    /// F10: next widescreen preset.
+    /// F10: next widescreen setting (presets, then auto).
     Widescreen,
 }
 

@@ -4,7 +4,7 @@ use mmx_core::netgame::Mode;
 
 pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local] [--pads]
-             [--widescreen off|16:10|16:9|21:9|N] [--wide-gameplay] [--overclock off|1.5|2]
+             [--widescreen off|16:10|16:9|21:9|auto|N] [--wide-gameplay] [--overclock off|1.5|2]
        mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
              [--ice 'stun:.. turn:.. username=U credential=C' | none]
              [--mode rollback|lockstep] [--delay N] [--prediction N] [--net-record LOG]
@@ -12,8 +12,9 @@ usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [-
              [--hold P1MASK] [--p2-hold MASK] [--coop-local]
 ROM defaults to $MMX_ROM, --x3-rom (Mega Man X3 USA: P2 is drawn as X3 Zero, X swings
 the saber) to $MMX_X3_ROM. --zero: player 1 plays as Zero too (needs the X3 ROM). Masks are SNES pad words (hex 0x.. or decimal).
---widescreen draws extra scenery left and right (N = 8-px tiles per side, 0-24; F10 cycles
-the presets; docs/widescreen.md). --wide-gameplay spawns enemies at the wide edges (136/160 px
+--widescreen draws extra scenery left and right (N = 8-px tiles per side, 0-24; auto follows
+the window's shape so a maximized or fullscreen window is filled; F10 cycles the presets and
+auto; docs/widescreen.md). --wide-gameplay spawns enemies at the wide edges (136/160 px
 past the original ones whatever the preset; changes the game, online both players need it).
 --overclock runs the SNES CPU 1.5x or 2x as fast, which removes the game's own slowdown with
 many enemies (changes the game: online both players need the same); default 2, off restores
@@ -61,11 +62,45 @@ pub struct Args {
     /// `--net-record LOG`: session log (`mmx_core::netlog`) for `xtask netreplay`.
     pub net_record: Option<String>,
     /// `--widescreen`: margins each side (docs/widescreen.md). Display only.
-    pub widescreen: mmx_core::Widescreen,
+    pub widescreen: WideSetting,
     /// `--wide-gameplay`: enemies spawn at the wide edges (gameplay; netplay id).
     pub wide_gameplay: bool,
     /// `--overclock`: explicit CPU overclock; None = [`Args::overclock`]'s default.
     pub overclock: Option<mmx_core::Overclock>,
+}
+
+/// `--widescreen`: a fixed margin, or `auto` (the window's aspect picks it,
+/// `video::auto_margin`; the frontend re-evaluates it on every resize).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WideSetting {
+    Fixed(mmx_core::Widescreen),
+    Auto,
+}
+
+impl WideSetting {
+    pub fn parse(s: &str) -> Option<Self> {
+        if s.trim().eq_ignore_ascii_case("auto") {
+            return Some(Self::Auto);
+        }
+        mmx_core::Widescreen::parse(s).map(Self::Fixed)
+    }
+
+    /// F10: off, 16:10, 16:9, 21:9, auto, off ... (a custom N goes to off).
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Fixed(mmx_core::Widescreen::OFF),
+            Self::Fixed(w) if w == mmx_core::Widescreen::W21_9 => Self::Auto,
+            Self::Fixed(w) => Self::Fixed(w.next()),
+        }
+    }
+
+    /// The margin to start with (auto: none until the window exists).
+    pub fn initial(self) -> mmx_core::Widescreen {
+        match self {
+            Self::Fixed(w) => w,
+            Self::Auto => mmx_core::Widescreen::OFF,
+        }
+    }
 }
 
 impl Args {
@@ -105,7 +140,7 @@ impl Default for Args {
             prediction: None,
             timing: mmx_core::Timing::Auto,
             net_record: None,
-            widescreen: mmx_core::Widescreen::OFF,
+            widescreen: WideSetting::Fixed(mmx_core::Widescreen::OFF),
             wide_gameplay: false,
             overclock: None,
         }
@@ -187,8 +222,8 @@ pub fn parse<I: IntoIterator<Item = String>>(
             "--net-record" => a.net_record = Some(val("--net-record")?),
             "--widescreen" => {
                 let v = val("--widescreen")?;
-                a.widescreen = mmx_core::Widescreen::parse(&v)
-                    .ok_or_else(|| format!("bad --widescreen {v:?}: off, 16:10, 16:9, 21:9 or 0-24"))?;
+                a.widescreen = WideSetting::parse(&v)
+                    .ok_or_else(|| format!("bad --widescreen {v:?}: off, 16:10, 16:9, 21:9, auto or 0-24"))?;
             }
             "--wide-gameplay" => a.wide_gameplay = true,
             "--overclock" => a.overclock = Some(val("--overclock")?.parse()?),
@@ -236,8 +271,29 @@ mod tests {
 
     #[test]
     fn widescreen() {
-        assert_eq!(p("--widescreen 16:9").unwrap().widescreen, mmx_core::Widescreen::W16_9);
-        assert_eq!(p("--widescreen 3").unwrap().widescreen.width(), 304);
+        use mmx_core::Widescreen;
+        assert_eq!(p("--widescreen 16:9").unwrap().widescreen, WideSetting::Fixed(Widescreen::W16_9));
+        assert_eq!(p("--widescreen 3").unwrap().widescreen.initial().width(), 304);
+        assert_eq!(p("--widescreen auto").unwrap().widescreen, WideSetting::Auto);
+        assert_eq!(p("--widescreen AUTO").unwrap().widescreen.initial(), Widescreen::OFF);
+        // F10: the presets, then auto, then back to off.
+        let mut w = WideSetting::Fixed(Widescreen::OFF);
+        let mut seen = vec![];
+        for _ in 0..5 {
+            w = w.next();
+            seen.push(w);
+        }
+        assert_eq!(
+            seen,
+            [
+                WideSetting::Fixed(Widescreen::W16_10),
+                WideSetting::Fixed(Widescreen::W16_9),
+                WideSetting::Fixed(Widescreen::W21_9),
+                WideSetting::Auto,
+                WideSetting::Fixed(Widescreen::OFF)
+            ]
+        );
+        assert_eq!(WideSetting::Fixed(Widescreen(3)).next(), WideSetting::Fixed(Widescreen::OFF));
         assert!(p("--widescreen 4:3").is_err());
         assert!(p("--wide-gameplay").unwrap().wide_gameplay);
         assert!(!p("--widescreen 21:9").unwrap().wide_gameplay);

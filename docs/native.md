@@ -1,6 +1,6 @@
 # mmx-native (binary `mmxrs`)
 
-Run: `cargo run -p mmx-native --release -- --rom mmx.sfc [--x3-rom mmx3.sfc [--zero]] [--scale 1-8] [--fullscreen] [--coop-local] [--pads] [--widescreen off|16:10|16:9|21:9|N] [--wide-gameplay] [--overclock off|1.5|2]` (docs/widescreen.md;
+Run: `cargo run -p mmx-native --release -- --rom mmx.sfc [--x3-rom mmx3.sfc [--zero]] [--scale 1-8] [--fullscreen] [--coop-local] [--pads] [--widescreen off|16:10|16:9|21:9|auto|N] [--wide-gameplay] [--overclock off|1.5|2]` (docs/widescreen.md;
 `--wide-gameplay` makes enemies spawn, act and leave at the wide edges whatever the preset: it
 changes the game, so online both players need it or the handshake refuses; `--overclock` runs
 the SNES CPU 1.5x/2x as fast so busy scenes stop slowing down, **default 2x**, `--overclock off` restores the
@@ -48,10 +48,35 @@ sends a goodbye. The full SNES pad travels. Cargo feature `netplay` (default) ca
 WebRTC transport; `--no-default-features` builds without it.
 
 Hotkeys: Tab hold fast-forward (8 frames per present, muted), F5 save state,
-F7 load state, 1-9 pick slot, F11 fullscreen, F10 next widescreen preset (also online: display only), P or F6 pause, `.` single-step
+F7 load state, 1-9 pick slot, F11 fullscreen, F10 next widescreen setting (off, 16:10, 16:9, 21:9, auto; also online: display only), P or F6 pause, `.` single-step
 while paused, Esc quit. States live in `$HOME/.mmxrs/slotN.state` (format and
 bug reports: [savestates.md](savestates.md)).
 Title bar: fps, `[coop]` or `[NET ...]`, `[SLOT n]`, `[PAUSED]`, `[FF]`.
+
+## Window and scaling
+
+The picture is scaled to the largest size that fits the window at the
+frame's aspect, fractional scales included, centred with black bars, on
+resize, maximize and fullscreen alike (`src/video.rs`, drawn through
+`pixels`' `render_with` with our own pass instead of its integer-only
+scaling renderer). Fractional nearest-neighbour shimmers (columns 7 or 8 px
+wide at 7.14x), so the shader is "sharp bilinear": the same as a
+nearest-neighbour pre-scale by `ceil(scale)` then a linear resize to the fit
+size, in one pass; texels stay flat with a blended seam under one screen
+pixel wide. At an exact integer scale it is plain nearest-neighbour.
+
+`--widescreen auto` picks the margin from the window's aspect on every resize
+and stretches away the last few percent so the window is filled edge to edge
+(docs/widescreen.md "Presets"). An explicit preset keeps its aspect and is
+letterboxed. F10 to a preset reshapes a plain window to the preset's aspect
+(not a maximized or fullscreen one).
+
+`MMX_VIDEO_DEBUG=1` logs each layout to stderr:
+
+```
+video: start: window 3440x1440 (scale factor 1), widescreen auto margin 17 tiles, frame 528x224, dest 3440x1440 at (0,0), scale 6.515x6.429 (fills window)
+video: frame now 528x224, dest 3440x1440 at (0,0)
+```
 
 ## Gamepads
 

@@ -88,7 +88,8 @@ pub struct Settings {
     pub timing: String,
     /// Empty = the game's default ICE servers; `none` = no ICE servers.
     pub ice: String,
-    /// `--widescreen`: "" / "off", "16:10", "16:9" or "21:9" (docs/widescreen.md).
+    /// `--widescreen`: "" / "off", "16:10", "16:9", "21:9" or "auto" (the
+    /// window's aspect picks the margin; docs/widescreen.md).
     #[serde(default)]
     pub widescreen: String,
     /// `--wide-gameplay`: enemies spawn at the wide edges (changes the game;
@@ -168,7 +169,7 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
     }
     match s.widescreen.as_str() {
         "" | "off" => {}
-        w @ ("16:10" | "16:9" | "21:9") => push(&["--widescreen", w]),
+        w @ ("16:10" | "16:9" | "21:9" | "auto") => push(&["--widescreen", w]),
         other => return Err(format!("bad widescreen {other:?}")),
     }
     if s.wide_gameplay {
@@ -399,6 +400,8 @@ mod tests {
         let ws = Settings { widescreen: "16:9".into(), ..base() };
         assert_eq!(build_args(&ws).unwrap()[4..], ["--widescreen", "16:9"]);
         assert!(build_args(&Settings { widescreen: "4:3".into(), ..base() }).is_err());
+        let auto = Settings { widescreen: "auto".into(), ..base() };
+        assert_eq!(build_args(&auto).unwrap()[4..], ["--widescreen", "auto"]);
         let wg = Settings { widescreen: "21:9".into(), wide_gameplay: true, ..base() };
         assert_eq!(build_args(&wg).unwrap()[4..], ["--widescreen", "21:9", "--wide-gameplay"]);
         let net = Settings { online: true, room: "bad/room".into(), ..base() };

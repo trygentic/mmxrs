@@ -198,7 +198,7 @@ impl App {
             ui.label("Widescreen");
             let shown = if s.widescreen.is_empty() { "off" } else { s.widescreen.as_str() }.to_string();
             egui::ComboBox::from_id_salt("widescreen").selected_text(shown).show_ui(ui, |ui| {
-                for w in ["off", "16:10", "16:9", "21:9"] {
+                for w in ["off", "16:10", "16:9", "21:9", "auto"] {
                     ui.selectable_value(&mut s.widescreen, w.to_string(), w);
                 }
             });

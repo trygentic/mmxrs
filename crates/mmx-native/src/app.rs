@@ -4,9 +4,10 @@
 //! tick, silence when the session held the frame back).
 
 use crate::audio::Audio;
-use crate::cli::Args;
+use crate::cli::{Args, WideSetting};
 use crate::keys::{self, Hotkey, KeyAction};
 use crate::netplay::Net;
+use crate::video::{self, FitRenderer};
 use mmx_core::{Game, Pads};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,6 +38,14 @@ struct App {
     coop: bool,
     window: Option<Arc<Window>>,
     pixels: Option<pixels::Pixels<'static>>,
+    /// Scales the frame to fit the window (`video`).
+    fit: Option<FitRenderer>,
+    /// Surface size in physical pixels.
+    surface: (u32, u32),
+    /// `--widescreen` / F10; `Auto` re-picks the margin on every resize.
+    wide: WideSetting,
+    /// `MMX_VIDEO_DEBUG=1`: log window, margin, frame and picture rectangle.
+    video_debug: bool,
     tex: (usize, usize),
     audio: Option<Audio>,
     gilrs: Option<gilrs::Gilrs>,
@@ -96,7 +105,11 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         coop: args.coop_local,
         window: None,
         pixels: None,
-        tex: (args.widescreen.width(), 224),
+        fit: None,
+        surface: (0, 0),
+        wide: args.widescreen,
+        video_debug: std::env::var_os("MMX_VIDEO_DEBUG").is_some_and(|v| v == "1"),
+        tex: (args.widescreen.initial().width(), 224),
         audio,
         gilrs,
         #[cfg(target_os = "macos")]
@@ -371,15 +384,23 @@ impl App {
                 }
             }
             Hotkey::Widescreen => {
-                // Display only, fine online. The window follows the aspect
-                // (the buffer resizes with the next frame, `draw`).
-                let ws = self.game.widescreen().next();
-                self.game.set_widescreen(ws);
-                eprintln!("widescreen: {}", ws.name());
-                if let Some(w) = self.window.as_ref().filter(|w| w.fullscreen().is_none()) {
-                    let h = w.inner_size().height.max(224);
-                    let _ = w.request_inner_size(winit::dpi::PhysicalSize::new(h * ws.width() as u32 / 224, h));
+                // Display only, fine online. A preset in a plain window
+                // reshapes the window to its aspect (the buffer resizes with
+                // the next frame, `draw`); auto fits the window instead.
+                self.wide = self.wide.next();
+                match self.wide {
+                    WideSetting::Fixed(ws) => {
+                        self.game.set_widescreen(ws);
+                        eprintln!("widescreen: {}", ws.name());
+                        let plain = |w: &&Arc<Window>| w.fullscreen().is_none() && !w.is_maximized();
+                        if let Some(w) = self.window.as_ref().filter(plain) {
+                            let h = w.inner_size().height.max(224);
+                            let _ = w.request_inner_size(winit::dpi::PhysicalSize::new(h * ws.width() as u32 / 224, h));
+                        }
+                    }
+                    WideSetting::Auto => eprintln!("widescreen: auto"),
                 }
+                self.relayout("widescreen");
             }
             Hotkey::Quit => self.quit(event_loop),
             Hotkey::Pause => {
@@ -414,23 +435,80 @@ impl App {
         }
     }
 
+    /// The picture's rectangle in the window for the current frame size.
+    fn dest(&self) -> video::Rect {
+        let tol = if self.wide == WideSetting::Auto { video::AUTO_FILL_TOLERANCE } else { 0.0 };
+        video::fit_rect(self.surface, (self.tex.0 as u32, self.tex.1 as u32), tol)
+    }
+
+    /// After a resize (maximize, fullscreen) or F10: auto re-picks the
+    /// margin for the window's aspect. Logs with `MMX_VIDEO_DEBUG=1`.
+    fn relayout(&mut self, why: &str) {
+        let Some(w) = &self.window else { return };
+        let size = w.inner_size();
+        self.surface = (size.width, size.height);
+        if self.wide == WideSetting::Auto && size.width > 0 && size.height > 0 {
+            let ws = video::auto_margin(self.surface, self.tex.1 as u32);
+            if ws != self.game.widescreen() {
+                self.game.set_widescreen(ws);
+            }
+        }
+        if self.video_debug {
+            let ws = self.game.widescreen();
+            // The frame takes the new width with the next frame drawn.
+            let frame = (ws.width() as u32, self.tex.1 as u32);
+            let tol = if self.wide == WideSetting::Auto { video::AUTO_FILL_TOLERANCE } else { 0.0 };
+            let d = video::fit_rect(self.surface, frame, tol);
+            let mode = if self.wide == WideSetting::Auto { "auto" } else { "fixed" };
+            eprintln!(
+                "video: {why}: window {}x{} (scale factor {}), widescreen {mode} margin {} tiles, frame {}x{}, dest {}x{} at ({},{}), scale {:.3}x{:.3}{}",
+                size.width,
+                size.height,
+                w.scale_factor(),
+                ws.0,
+                frame.0,
+                frame.1,
+                d.w,
+                d.h,
+                d.x,
+                d.y,
+                f64::from(d.w) / f64::from(frame.0),
+                f64::from(d.h) / f64::from(frame.1),
+                if (d.w, d.h) == self.surface { " (fills window)" } else { "" },
+            );
+        }
+    }
+
     fn draw(&mut self) {
+        let (px, w, h) = self.game.frame();
         let Some(p) = self.pixels.as_mut() else {
             return;
         };
-        let (px, w, h) = self.game.frame();
         if (w, h) != self.tex {
-            // 256/512 wide, 224/239 (x2 interlaced) tall
+            // 256-640 wide (widescreen), 224/239 (x2 interlaced) tall
             if let Err(e) = p.resize_buffer(w as u32, h as u32) {
                 eprintln!("resize buffer: {e}");
                 return;
             }
             self.tex = (w, h);
+            if self.video_debug {
+                let d = self.dest();
+                eprintln!("video: frame now {w}x{h}, dest {}x{} at ({},{})", d.w, d.h, d.x, d.y);
+            }
         }
+        let p = self.pixels.as_mut().expect("pixels");
         for (dst, &c) in p.frame_mut().chunks_exact_mut(4).zip(&px[..w * h]) {
             dst.copy_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8, 0xFF]);
         }
-        if let Err(e) = p.render() {
+        let dest = self.dest();
+        let (Some(p), Some(fit)) = (self.pixels.as_ref(), self.fit.as_mut()) else {
+            return;
+        };
+        let r = p.render_with(|encoder, target, ctx| {
+            fit.render(encoder, target, ctx, dest);
+            Ok(())
+        });
+        if let Err(e) = r {
             eprintln!("render: {e}");
         }
     }
@@ -462,13 +540,17 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         let surface = pixels::SurfaceTexture::new(size.width, size.height, window.clone());
         match pixels::Pixels::new(self.tex.0 as u32, self.tex.1 as u32, surface) {
-            Ok(p) => self.pixels = Some(p),
+            Ok(p) => {
+                self.fit = Some(FitRenderer::new(&p));
+                self.pixels = Some(p);
+            }
             Err(e) => {
                 eprintln!("create pixels: {e}");
                 return event_loop.exit();
             }
         }
         self.window = Some(window);
+        self.relayout("start");
         self.last = Instant::now();
     }
 
@@ -481,6 +563,7 @@ impl ApplicationHandler for App {
                         let _ = p.resize_surface(s.width, s.height);
                     }
                 }
+                self.relayout("resize");
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else {

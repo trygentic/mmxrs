@@ -26,6 +26,19 @@ Margins are whole 8-px tiles. Height stays 224 (239 in overscan).
 | `16:9` | 9 | 72 | 400x224 | 1.79 (16:9 is 398 px) |
 | `21:9` | 17 | 136 | 528x224 | 2.36 (21:9 is 523 px) |
 | `N` | N (0-24) | 8N | 256+16N | |
+| `auto` (frontend) | follows the window | | | the window's |
+
+`auto` is a native-frontend setting (`--widescreen auto`, the launcher's
+dropdown, last in F10's cycle off, 16:10, 16:9, 21:9, auto): on start and on
+every resize, maximize or fullscreen it picks the N whose `256+16N` by 224
+frame is closest in aspect to the window (`round((W*224/H - 256) / 16)`,
+clamped to 0-24; `crates/mmx-native/src/video.rs` `auto_margin`), then
+stretches away the leftover (at most half a tile per side, under 3.5%) so the
+window is filled edge to edge. 2560x1600 gets 6 (352x224), 1920x1080 9 (the
+16:9 preset), 3440x1440 17 (the 21:9 preset); a window narrower than 8:7
+keeps 0 with bars top and bottom. Display only like the presets, so fine
+online. Explicit presets keep their aspect and are letterboxed (docs/native.md
+"Window and scaling"). The web frontend has no auto yet.
 
 `mmx_core::Widescreen` (`parse`, `name`, `next`, `margin_px`, `width`),
 `Game::set_widescreen` / `set_wide_margin`. `Game::frame()` reports the wide

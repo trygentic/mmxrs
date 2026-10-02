@@ -9,6 +9,7 @@ mod gc_pad;
 mod headless;
 mod keys;
 mod netplay;
+mod video;
 
 use mmx_core::Game;
 
@@ -77,7 +78,7 @@ fn main() {
         std::process::exit(2);
     });
 
-    game.set_widescreen(args.widescreen);
+    game.set_widescreen(args.widescreen.initial());
     game.set_wide_gameplay(args.wide_gameplay);
     game.set_overclock(args.overclock());
     if args.headless {
