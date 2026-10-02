@@ -8,7 +8,8 @@
 //! air: left/right only, the jump carries on), and the display shows the
 //! saber frame instead of the ROM's.
 //!
-//! Damage: for the arc pose (88 / 97) a shot object is put into a free slot
+//! Damage: while the slash arc is drawn (the arc pose 88 / 97 and the tail
+//! pose after it) a shot object is put into a free slot
 //! of X's shot table `$1228` *after* the shot loop has run
 //! ([`HOOK_SHOTS_DONE`]) and taken out again at the physics hook (after the
 //! enemy loop). Enemies test it in their own AI through the ROM's
@@ -20,7 +21,8 @@
 //! swing: the damage routine does `INC +30` on the shot, which ends it.
 //!
 //! The green slash arc (`zero_data::X3_SLASH_SET`, [`slash_frame`]) is
-//! drawn on Zero by `zero.rs`; the damage box is the arc's drawn extent.
+//! drawn on Zero by `zero.rs`; the damage box ([`BOX_GROUND`], [`BOX_AIR`],
+//! carried in the shot itself) covers the blade and the arc's drawn extent.
 
 use crate::coop::{OFF_POS_X, OFF_POS_Y};
 use crate::ram::wram_index as ix;
@@ -35,19 +37,31 @@ const SHOT_LEN: usize = 0x40;
 /// shot (`$86:EEDB` row 3, the Highway enemies and Bee Blader: lemon 1,
 /// half charge 2, full charge 4).
 pub const DAMAGE_ID: u8 = 2;
-/// Hit box `+20` (bank `$86`, `x, y, half w, half h`; the enemy-vs-shot
-/// test `$84:9C0E` mirrors `x` by the shot's facing): `$BB34` = `00 00 18
-/// 17`, 48 x 46 px, centred on the shot's position. The slash arc's full
-/// crescent (set `$4F` frame 3 / 9) is 50 x 40 px.
-pub const BOX: u16 = 0xBB34;
-/// Shot position relative to Zero's drawn origin (`+05`, `+08 + (i8)+19 +
-/// X3_Y_OFFSET`; x toward his facing) = the crescent's centre: frame 3 runs
-/// from 48 px in front to 2 behind, 37 above to 3 below the origin; frame 9
-/// from 53 to 3 in front, 39 above to 1 below.
-pub const REACH_X: i16 = 23;
-pub const REACH_Y: i16 = -17;
-pub const REACH_X_AIR: i16 = 28;
-pub const REACH_Y_AIR: i16 = -19;
+/// The damage box, against Zero's drawn origin (`+05`, `+08 + (i8)+19 +
+/// X3_Y_OFFSET`): centre `(x toward his facing, y)` and half sizes. It is
+/// the union of every opaque pixel of the body poses (blade included) and
+/// the slash arc while the arc is drawn (test `saber_box_covers_swing`,
+/// from the X3 ROM's frames), plus [`MARGIN`] in front, behind and above;
+/// below it stops at his feet. Ground (86-89, arc 2-5): pixels 48 in front
+/// to 21 behind, 39 above to 23 below (the feet) -> x -29..57, y -47..23.
+/// Air (97-98, arc 8-11): 53 / 23 / 39 / 27 -> x -31..61, y -47..27.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HitBox {
+    pub x: i16,
+    pub y: i16,
+    pub half_w: u8,
+    pub half_h: u8,
+}
+pub const MARGIN: i16 = 8;
+pub const BOX_GROUND: HitBox = HitBox { x: 14, y: -12, half_w: 43, half_h: 35 };
+pub const BOX_AIR: HitBox = HitBox { x: 15, y: -10, half_w: 46, half_h: 37 };
+/// No box in X1's bank `$86` has these sizes on every dump (the bank moves
+/// between releases), so the shot carries its own: the enemy-vs-shot test
+/// `$84:9C0E` reads the box `x, y, half w, half h` at `DB = $86` through
+/// the 16-bit pointer `+20`, and `$86:0000-$1FFF` is low WRAM, so `+20`
+/// points at bytes `+BOX_AT..+BOX_AT+3` of the shot's own slot (unused by
+/// the enemy code; the slot is cleared again after the enemy loop).
+pub const BOX_AT: usize = 0x38;
 pub const FRAMES_PER_POSE: u8 = 4;
 /// The arc pose is held longer than X3 does (4 frames, ~67 ms, half of it
 /// lost while blinking): playtesters could not see the blade at all.
@@ -163,25 +177,27 @@ pub fn whoosh(s: &Saber) -> bool {
     pose_at(s.t, s.air) == Some((ARC, 0))
 }
 
-/// The swing is on its arc pose and has not hit yet.
+/// The swing deals damage (the slash arc is drawn: the arc pose and the
+/// tail after it) and has not hit yet.
 fn arc(s: &Saber) -> bool {
-    s.t > 0 && !s.hit && pose_index(s.t, s.air) == Some(ARC)
+    !s.hit && slash_frame(s).is_some()
 }
 
-/// The shot the arc puts into the table (`+05/+08` = the box centre). Pure.
+/// The shot the swing puts into the table (`+05/+08` = the box centre, the
+/// box itself at [`BOX_AT`]; `+20` is set by the slot it goes to). Pure.
 pub fn shot_bytes(p2: &[u8], air: bool) -> [u8; SHOT_LEN] {
     let w = |o: usize| i16::from_le_bytes([p2[o], p2[o + 1]]);
     let right = p2[0x11] & 0x40 != 0;
-    let (rx, ry) = if air { (REACH_X_AIR, REACH_Y_AIR) } else { (REACH_X, REACH_Y) };
-    let x = w(OFF_POS_X).wrapping_add(if right { rx } else { -rx });
-    let y = w(OFF_POS_Y).wrapping_add(i16::from(p2[0x19] as i8)).wrapping_add(crate::zero::X3_Y_OFFSET).wrapping_add(ry);
+    let b = if air { BOX_AIR } else { BOX_GROUND };
+    let x = w(OFF_POS_X).wrapping_add(if right { b.x } else { -b.x });
+    let y = w(OFF_POS_Y).wrapping_add(i16::from(p2[0x19] as i8)).wrapping_add(crate::zero::X3_Y_OFFSET).wrapping_add(b.y);
     let mut s = [0u8; SHOT_LEN];
     s[0x00] = 1;
     s[0x0A] = DAMAGE_ID;
     s[0x05..0x07].copy_from_slice(&x.to_le_bytes());
     s[0x08..0x0A].copy_from_slice(&y.to_le_bytes());
     s[0x11] = p2[0x11];
-    s[0x20..0x22].copy_from_slice(&BOX.to_le_bytes());
+    s[BOX_AT..BOX_AT + 4].copy_from_slice(&[0, 0, b.half_w, b.half_h]);
     s
 }
 
@@ -207,7 +223,11 @@ pub fn shots_done(game: &mut Game) {
 fn put_shot(game: &mut Game, shot: &[u8; SHOT_LEN]) -> u8 {
     let w = game.wram_mut();
     let Some(k) = (0..8).find(|&k| w[ix(SHOTS) + k * SHOT_LEN] == 0) else { return 0xFF };
-    w[ix(SHOTS) + k * SHOT_LEN..][..SHOT_LEN].copy_from_slice(shot);
+    let o = ix(SHOTS) + k * SHOT_LEN;
+    w[o..o + SHOT_LEN].copy_from_slice(shot);
+    // `+20` -> the box in this slot (bank `$86` mirrors low WRAM).
+    let at = (SHOTS as usize + k * SHOT_LEN + BOX_AT) as u16;
+    w[o + 0x20..o + 0x22].copy_from_slice(&at.to_le_bytes());
     k as u8
 }
 
@@ -266,6 +286,73 @@ mod tests {
         assert_eq!(s.t, 0);
     }
 
+    /// Opaque pixels of `sprites` drawn from `page` (16-wide, 32 B slots),
+    /// facing left, as `(front, back, up, down)` against the origin: `front`
+    /// = the furthest pixel toward the facing (`-x`), `up` = above (`-y`).
+    fn extent(page: &[u8], sprites: &[crate::zero_data::Sprite]) -> Option<(i32, i32, i32, i32)> {
+        let mut e: Option<(i32, i32, i32, i32)> = None;
+        for s in sprites {
+            let w = if s.big { 16 } else { 8 };
+            for py in 0..w {
+                for px in 0..w {
+                    let (tx, ty) = (if s.hflip { w - 1 - px } else { px }, if s.vflip { w - 1 - py } else { py });
+                    let slot = usize::from(s.tile) + (ty / 8) * 16 + tx / 8;
+                    let Some(t) = page.get(slot * 32..slot * 32 + 32) else { continue };
+                    let (r, bit) = (ty % 8, 7 - tx % 8);
+                    let v = (t[2 * r] >> bit & 1) | (t[2 * r + 1] >> bit & 1) | (t[16 + 2 * r] >> bit & 1) | (t[17 + 2 * r] >> bit & 1);
+                    if v != 0 {
+                        let (x, y) = (i32::from(s.x) + px as i32, i32::from(s.y) + py as i32);
+                        let n = (-x, -x, -y, y);
+                        e = Some(e.map_or(n, |o| (o.0.max(n.0), o.1.min(n.1), o.2.max(n.2), o.3.max(n.3))));
+                    }
+                }
+            }
+        }
+        e
+    }
+
+    /// The damage box covers every opaque pixel of the blade (body poses)
+    /// and the slash arc while the arc is drawn, plus [`MARGIN`], ground and
+    /// air; measured from the X3 ROM's frames. Prints the extents.
+    #[test]
+    fn saber_box_covers_swing() {
+        let Some(x3) = std::env::var_os("MMX_X3_ROM") else {
+            eprintln!("MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let rom = std::fs::read(x3).unwrap();
+        let rom = if rom.len() % 0x8000 == 512 { &rom[512..] } else { &rom[..] };
+        let set = crate::zero_data::extract_x3(rom).unwrap();
+        let sl = set.slash.as_ref().unwrap();
+        for air in [false, true] {
+            let mut all: Option<(i32, i32, i32, i32)> = None;
+            let mut add = |e: Option<(i32, i32, i32, i32)>| {
+                if let Some(n) = e {
+                    all = Some(all.map_or(n, |o| (o.0.max(n.0), o.1.min(n.1), o.2.max(n.2), o.3.max(n.3))));
+                }
+            };
+            for t in 1..=40 {
+                let s = Saber { t, air, ..Saber::default() };
+                let Some(f) = slash_frame(&s) else { continue };
+                let body = frame(&s).unwrap();
+                let (eb, ea) = (extent(&set.page(body), &set.frames[body].sprites), extent(&sl.page(f, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]), &sl.frames[f].sprites));
+                eprintln!("air {air} t {t} body {body} {eb:?} arc {f} {ea:?}");
+                add(eb);
+                add(ea);
+            }
+            let (front, back, up, down) = all.unwrap();
+            eprintln!("air {air}: front {front} back {back} up {up} down {down}");
+            // `back` is negative: pixels behind the origin.
+            let b = if air { BOX_AIR } else { BOX_GROUND };
+            let (bx, by, hw, hh) = (i32::from(b.x), i32::from(b.y), i32::from(b.half_w), i32::from(b.half_h));
+            let m = i32::from(MARGIN);
+            assert!(bx + hw >= front + m && bx - hw <= back - m, "air {air}: x {}..{} vs {back}..{front} + {m}", bx - hw, bx + hw);
+            assert!(by - hh <= -(up + m) && by + hh >= down, "air {air}: y {}..{} vs -{up}..{down}", by - hh, by + hh);
+            // and not much more than that (2 px of rounding)
+            assert!(bx + hw <= front + m + 2 && bx - hw >= back - m - 2 && by - hh >= -(up + m) - 2 && by + hh <= down + 2);
+        }
+    }
+
     #[test]
     fn saber_shot_in_front() {
         let mut p2 = [0u8; 0x90];
@@ -273,16 +360,18 @@ mod tests {
         p2[OFF_POS_Y..OFF_POS_Y + 2].copy_from_slice(&367u16.to_le_bytes());
         p2[0x11] = 0x62; // facing right
         let s = shot_bytes(&p2, false);
-        assert_eq!((u16::from_le_bytes([s[5], s[6]]), u16::from_le_bytes([s[8], s[9]])), (523, 342));
+        assert_eq!((u16::from_le_bytes([s[5], s[6]]), u16::from_le_bytes([s[8], s[9]])), (514, 347));
         assert_eq!((s[0], s[0x0A], s[0x30]), (1, DAMAGE_ID, 0));
+        assert_eq!(s[BOX_AT..BOX_AT + 4], [0, 0, 43, 35]);
         p2[0x11] = 0x22;
         let s = shot_bytes(&p2, true);
-        assert_eq!((u16::from_le_bytes([s[5], s[6]]), u16::from_le_bytes([s[8], s[9]])), (472, 340));
+        assert_eq!((u16::from_le_bytes([s[5], s[6]]), u16::from_le_bytes([s[8], s[9]])), (485, 349));
+        assert_eq!(s[BOX_AT..BOX_AT + 4], [0, 0, 46, 37]);
     }
 
     /// hw-spiky (docs/coop.md): P2 walks right 20 frames, X at 22; the
-    /// Spiky (enemy slot 0, 2 HP, 1 per hit of id 2) is hit on the arc,
-    /// its centre 55 px in front of Zero (the arc tip reaches 48), once.
+    /// Spiky (enemy slot 0, 2 HP, 1 per hit of id 2) is hit on the arc's
+    /// first frame, its centre 55 px in front of Zero, once.
     /// Needs both ROMs and the state.
     #[test]
     fn saber_hits_spiky() {
@@ -301,7 +390,7 @@ mod tests {
         }
         let hit = seen.iter().position(|s| s.1 == 1).expect("hit");
         assert_eq!(seen[hit].0, 88, "on the arc: {seen:?}");
-        assert!((40..=60).contains(&seen[hit].2), "{seen:?}"); // the arc tip, 48 px out, meets its body
+        assert!((40..=60).contains(&seen[hit].2), "{seen:?}"); // the first damage frame (the box reaches 57 px out)
         assert!(seen[hit..].iter().all(|s| s.1 == 1), "one hit per swing: {seen:?}");
         assert_eq!(g.wram()[0x0BDD], 0, "P1's shot count untouched");
     }
@@ -328,21 +417,94 @@ mod tests {
         Some(g)
     }
 
-    /// hw-spiky: P2 swings where it stands, the Spiky 88 px away on the
-    /// arc's first frame: the arc does not reach it (the flying wave is gone).
-    #[test]
-    fn saber_misses_spiky_from_afar() {
-        let Some(mut g) = spiky(false) else { return };
+    /// hw-spiky, P2 swings where it stands while the Spiky walks in:
+    /// `(zero_frame, Spiky HP, Spiky x - P2 x)` per frame.
+    fn swing_at_approaching_spiky(at: usize) -> Vec<(u16, u8, i32)> {
+        let Some(mut g) = spiky(false) else { return Vec::new() };
         let mut seen = Vec::new();
         for f in 1..=45 {
-            g.step(crate::Pads { p1: 0, p2: if f == 19 { BTN_X } else { 0 } });
+            g.step(crate::Pads { p1: 0, p2: if f == at { BTN_X } else { 0 } });
             let gap = i32::from(u16::from_le_bytes([g.wram()[0x0E68 + 5], g.wram()[0x0E68 + 6]]))
                 - i32::from(u16::from_le_bytes([g.coop.p2[OFF_POS_X], g.coop.p2[OFF_POS_X + 1]]));
             seen.push((g.coop.zero_frame, g.wram()[0x0E68 + 0x27] & 0x7F, gap));
         }
-        let arc = seen.iter().position(|s| s.0 == 88).expect("arc");
-        assert!((86..=90).contains(&seen[arc].2), "{seen:?}");
+        seen
+    }
+
+    /// Swing at 2: the Spiky is 115..94 px away while the arc is drawn
+    /// (frames 9-22 of the swing): out of reach.
+    #[test]
+    fn saber_misses_spiky_from_afar() {
+        let seen = swing_at_approaching_spiky(2);
+        if seen.is_empty() {
+            return;
+        }
+        assert!(seen.iter().any(|s| s.0 == 88), "{seen:?}");
+        let last = seen.iter().rposition(|s| s.0 == 89).expect("tail");
+        assert!(seen[last].2 >= 90, "{seen:?}");
         assert!(seen.iter().all(|&(_, hp, _)| hp == 2), "{seen:?}");
+    }
+
+    /// Swing at 19: on the arc pose (88) the Spiky is 88..74 px away; it
+    /// walks into the box's front edge (57 px, plus its own half width) on
+    /// the tail pose (89), at 68 px: hit once. The old box (the crescent's
+    /// centre 23 px out, 24 half wide, arc pose only) never reached it.
+    #[test]
+    fn saber_reaches_spiky_on_the_tail() {
+        let seen = swing_at_approaching_spiky(19);
+        if seen.is_empty() {
+            return;
+        }
+        let hit = seen.iter().position(|s| s.1 == 1).expect("hit");
+        assert_eq!(seen[hit].0, 89, "{seen:?}");
+        assert!((60..=75).contains(&seen[hit].2), "{seen:?}");
+        assert!(seen[hit..].iter().all(|s| s.1 == 1), "one hit per swing: {seen:?}");
+    }
+
+    /// `hw-a`: P2 walks left into the dip under the Sky Claws, turns right,
+    /// jumps and swings at the apex. The Claw (enemy slot 0, 4 HP, box `00
+    /// F8 0F 0D`: 30 x 26 centred 8 above it) is behind him and above his
+    /// head when it dies; the old box (the crescent's centre, 28 px in
+    /// front and 19 up, 48 x 46) stopped short of it in both axes.
+    /// Needs both ROMs and `states/hw-a.state`.
+    #[test]
+    fn saber_hits_sky_claw_overhead() {
+        let (Some(x1), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
+            eprintln!("MMX_ROM / MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/hw-a.state");
+        let Ok(state) = std::fs::read(st) else {
+            eprintln!("{st} missing; skipping");
+            return;
+        };
+        let mut g = crate::Game::from_rom(std::fs::read(x1).unwrap()).unwrap();
+        g.set_x3_rom(&std::fs::read(x3).unwrap()).unwrap();
+        g.load_state(&state).unwrap();
+        g.coop.enabled = true;
+        crate::coop::register_coop_traps(&mut g).unwrap();
+        let w16 = |g: &crate::Game, a: usize| i32::from(u16::from_le_bytes([g.wram()[a], g.wram()[a + 1]]));
+        let p16 = |g: &crate::Game, o: usize| i32::from(u16::from_le_bytes([g.coop.p2[o], g.coop.p2[o + 1]]));
+        let mut seen = Vec::new();
+        for f in 1..=160 {
+            let p2 = match f {
+                1..=96 => BTN_LEFT,
+                118 => BTN_RIGHT,
+                124..=153 => crate::BTN_B | if f == 136 { BTN_X } else { 0 },
+                _ => 0,
+            };
+            g.step(crate::Pads { p1: 0, p2 });
+            // (swing frame, P2 x, drawn origin y, facing right, Claw x, Claw y, Claw HP)
+            let oy = p16(&g, OFF_POS_Y) + i32::from(crate::zero::X3_Y_OFFSET);
+            seen.push((g.coop.saber.t, p16(&g, OFF_POS_X), oy, g.coop.p2[0x11] & 0x40 != 0, w16(&g, 0x0E68 + 5), w16(&g, 0x0E68 + 8), g.wram()[0x0E68 + 0x27] & 0x7F));
+        }
+        let hit = seen.iter().position(|s| s.6 < 4).unwrap_or_else(|| panic!("no hit: {seen:?}"));
+        let (t, x, oy, right, cx, cy, _) = seen[hit];
+        assert!(t > 0 && seen[..hit].iter().all(|s| s.6 == 4), "{seen:?}");
+        assert!(right && cx + 15 < x, "behind him: {:?}", seen[hit]);
+        assert!(cy - 8 + 13 < oy - 16, "above his head: {:?}", seen[hit]);
+        // The old box: centre (x + 28, oy - 19), half 24 x 23.
+        assert!(cx + 15 < x + 28 - 24 && cy - 8 + 13 < oy - 19 - 23, "{:?}", seen[hit]);
     }
 
     /// Single player, P1 as Zero (`hw-spiky`): walk right 26 frames, X at 28;

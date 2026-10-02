@@ -455,7 +455,7 @@ sets.
 
 **Palette** `$8C:B580` (in CGRAM as sprite palette 1 while Zero plays):
 `2188 1284 728C 5100 639C 5294 318C 009C 0094 008C 2194 429C 2388 031C 0194 1084`.
-The charge flash swaps in a purple palette.
+The charge flash swaps in X's flash palette, purple at the third level (see "Charge").
 
 **Frames** (set `$4A` 0-116, then set `$4B` as 117-137), from `+02/+17` logs:
 
@@ -638,36 +638,76 @@ historical).
 
 ### Damage
 
-A shot that only the enemy loop sees. On the arc pose (88/97), after the
+A shot that only the enemy loop sees. While the slash arc is drawn (the arc
+pose 88/97 and the tail pose 89/98 after it: swing frames 9-22), after the
 shot loop (`$80:D1FF`, the instruction after `JSR $80:D3B2`; trap
 `coop_saber_shot`) a shot is written into a free `$1228` slot: `+00 = 1`,
-id `+0A = 2`, position `+05/+08` = the crescent's centre (23 px toward the
-facing; `+08 + (i8)+19 - 8 - 17`; air 28 and `- 19`), `+11` = the
-player's, box `+20 = $86:BB34` (`00 00 18 17`, 48 x 46 px against the
-drawn 50 x 40; X1's bank has no closer box), `+30 = 0`. Enemies test it in
-their AI with the ROM's enemy-vs-shot routine `$84:9B43` (shot active,
-`+30 = 0`, box test `$84:9C0E`), and `$84:9E15` applies the damage: the
-enemy's row `$86:EEDB[+28]` at the shot id. Id 2 is X's full charge
-(Highway row 3: lemon 1, half charge 2, full charge 4). The physics hook
-takes the slot out again (zeroed), after the enemy loop. The shot's update
-(`$80:F666[+0A]`) never runs, it is never drawn and never counted, so the
-`$0BDD` bookkeeping (docs/coop.md "Shots (B3)") never sees it. One hit per
-swing: the damage routine does `INC +30` on the shot, or the enemy sets
-`+01 = 6`; `take_back` counts either.
+id `+0A = 2`, position `+05/+08` = the damage box's centre, `+11` = the
+player's, its own box at `+38..+3B` and `+20` pointing at it, `+30 = 0`.
+Enemies test it in their AI with the ROM's enemy-vs-shot routine `$84:9B43`
+(shot active, `+30 = 0`, box test `$84:9C0E`), and `$84:9E15` applies the
+damage: the enemy's row `$86:EEDB[+28]` at the shot id. Id 2 is X's full
+charge (Highway row 3: lemon 1, half charge 2, full charge 4). The physics
+hook takes the slot out again (zeroed), after the enemy loop. The shot's
+update (`$80:F666[+0A]`) never runs, it is never drawn and never counted,
+so the `$0BDD` bookkeeping (docs/coop.md "Shots (B3)") never sees it. One
+hit per swing: the damage routine does `INC +30` on the shot, or the enemy
+sets `+01 = 6`; `take_back` counts either, and a swing that has hit puts
+no more shots in.
+
+**The box** (`saber::BOX_GROUND`, `BOX_AIR`). Playtesters: the blade
+visibly passed through enemies it did not hit. The old box (`$86:BB34`,
+48 x 46, centred on the crescent 23 px in front and 17 up, arc pose only)
+covered the full crescent but not the rising arc over the head, the blade
+behind him, the tail, or the 10 frames of the pose after the arc. Measured
+from the X3 ROM's frames (test `saber_box_covers_swing`: every opaque pixel
+of the body pose, blade included, and of the slash arc, on each frame the
+arc is drawn, against Zero's drawn origin `+08 + (i8)+19 - 8`; x toward his
+facing):
+
+| | pixels (front / behind / above / below) | box (`+ 8` margin; below: the feet) | centre, half size |
+|---|---|---|---|
+| ground (86-89, arc 2-5) | 48 / 21 / 39 / 23 | x -29..57, y -47..23 | (14, -12), 43 x 35 |
+| air (97-98, arc 8-11) | 53 / 23 / 39 / 27 | x -31..61, y -47..27 | (15, -10), 46 x 37 |
+
+"Behind" is the rising arc (frame 2/8 starts 21/16 px behind him) and his
+hair. No box in bank `$86` fits on every dump: the bank moves between
+releases (PAL and USA v1.1 share 8102 of its 32768 bytes; the only near
+fit, `00 00 2E 2F` at PAL `$86:BA84`, is 94 px tall and not on v1.1). The
+box test reads `x, y, half w, half h` through the 16-bit `+20` with `DB =
+$86`, and `$86:0000-$1FFF` is low WRAM, so the shot carries its own box in
+its slot. One shot, one box, one hit per swing.
 
 Checked:
 
-- `hw-spiky`, P2 walks right 20 frames, X at 22: the arc's first frame hits
-  the Spiky with its centre 55 px in front of Zero (the tip reaches 48),
-  2 -> 1, once (test `saber_hits_spiky`; P1's `$0BDD` stays 0).
-- `hw-spiky`, P2 swings where it stands, the Spiky 88 px away on the arc's
-  first frame: no hit (test `saber_misses_spiky_from_afar`; the old wave
-  took it from there).
+- `hw-spiky`, P2 walks right 20 frames, X at 22: the first damage frame
+  hits the Spiky with its centre 55 px in front of Zero, 2 -> 1, once
+  (test `saber_hits_spiky`; P1's `$0BDD` stays 0).
+- `hw-spiky`, P2 swings where it stands at frame 2: the Spiky is 115..94 px
+  away while the arc is drawn, no hit (test `saber_misses_spiky_from_afar`).
+  At frame 19 (88..74 px on the arc pose) it walks into the box on the tail
+  pose at 68 px and is hit once (test `saber_reaches_spiky_on_the_tail`;
+  the old box never reached it).
+- `hw-a`, P2 walks into the dip under the Sky Claws, turns right, jumps
+  and swings at the apex: the Claw's body (box `00 F8 0F 0D`) behind him
+  and above his head dies, 4 -> 0 (test `saber_hits_sky_claw_overhead`;
+  out of the old box in both axes).
 - `hw-bee2`, P2 jumps every 40 frames and taps X 8 frames into the jump:
-  Bee Blader (`$0E68+$27`) 29 -> 25 -> 21 -> 17 -> 13 -> 9 -> 5 -> 1, 4 per
-  swing, while it drifts from x 3435 to 3363 (P2 at 3452; its box is large).
+  Bee Blader (`$0E68+$27`) loses 4 per swing (its box is large).
 - P1 as Zero: test `saber_p1_hits_spiky`; rollback:
   `saber_frames_survive_rollback`.
+
+Box strips (4x, `target/z/`; yellow = the box while it deals damage, grey
+= swing frames without, magenta dot = the drawn origin): 
+`saber_box_ground_4x.png`, `saber_box_air_4x.png`,
+`saber_box_spiky_4x.png` (P1 `--zero`), `saber_p2_sky_claw_overhead_4x.png`:
+
+```
+x --load states/highway-start.state --frames 40 --out DIR --at 1-40/1 --wram --p1tap 0040@10:2 --zero
+x --load states/highway-start.state --frames 46 --out DIR --at 1-46/1 --wram --p1tap 8000@10:20,0040@16:2 --zero
+x --load states/hw-spiky.state --frames 60 --out DIR --at 1-60/1 --wram --p1tap 0100@1:26,0040@28:2 --zero
+x --load states/hw-a.state --frames 160 --out DIR --at 120-158/1 --p1tap 0200@1:50 --p2tap 0200@1:96,0100@118:1,8000@124:30,0040@136:2 --coop
+```
 
 Strips (4x, `target/z/`): `slash_p1_ground_4x.png`, `slash_p1_air_4x.png`
 (`--zero`), `slash_p2_ground_4x.png`, `slash_p2_air_4x.png` (`--coop`, P2
@@ -764,6 +804,80 @@ x --load states/highway-start.state --frames 44 --out target/z1/wave --at 16-44/
 x --load states/highway-start.state --frames 50 --out target/z1/wave_air --at 18-48/1 --p1tap 8000@10:20,0040@16:2 --zero
 x --load states/highway-start.state --frames 44 --out target/z/wave --at 16-44/1 --p2tap 0040@10:2 --coop
 xtask dump --rom-any X3 --load states/x3-zero-stand.state --frames 260 --out DIR --at 150-260/1 --wram --vram --p1tap 4000@10:150,4000@185:2
+```
+
+## Charge
+
+Playtest: "Zero needs charge animation". Before: a Zero P1 (`--zero`)
+showed X1's charge sparkles (8 px low against Zero's body) but no body
+flash, because the OAM build hook wrote Zero's palette over X's slot 1
+every frame. P2 (Zero, X3 loaded) showed neither, and its charge flashed
+P1's palette instead (X flashed blue while P2 charged).
+
+**What X3 does** (`x3-zero-stand`, Y held from frame 10, `dump --rom-any
+X3 --wram --vram`, OAM and CGRAM per frame; strip
+`target/z/charge_x3_own_4x.png`). The charge counter is Zero's `+57`
+(counts up from the press). From `+57 = $14` (20 frames) small particles
+converge on him: 8x8 sprites, tiles `$1D4`/`$1D5`, palette 0, 2-8 at a
+time; from `$52` (82) the particles switch to palette 2 (yellow); from
+`$8E` (142) pink crosses. The body flash starts at `$19` (25): Zero's whole
+sprite palette 1 is swapped for a flash palette for 2 frames, then back
+for 2 (4-frame period, all 16 colours), first `35AF 7FFF 239D 61BE 7BD4
+7B6A 7203 7EE0 7A40 79A4 42DF 2597 1110 7FFF 5AD6 7143` (blue: Zero turns
+X-blue), from `$8E` `35AF 7FFF 239D 61BE 7F9C 7ED9 7A33 7EB6 7E36 75D1
+42DF 2597 1110 7FFF 5AD6 6C12` (purple). The blue palette is exactly X1's
+own charge flash for X: X3 runs X's charge code on Zero.
+
+**X1's charge** (player block, `$81:97F9` in the listing): `+58` state (2
+= held, 4 = charging from `+57 = $96`, 30 frames), `+57` counts down from
+`$B4`, `+5B` level (3 first, 2 full at `+57 = $50`, 1 the arm parts'
+third), `+5A` a 2-frame timer, `+82` an index into the flash table
+`$86:BAD2`: every 2 frames the update loads `table[+82]` (the flash, or 0 =
+X's palette via `$82:8011`) into sprite palette 1 through `$82:8000` (`X =
+$10`) and flips `+82 ^= 2`, so the flash shows while `+82 & 2`. The
+sparkles are one fixed object at `$0C98` (set `$6F` palette 0, `$70`
+palette 2 at full charge, `$71` palette 3 for the third; 22 frames, one
+per frame), whose update (listing `$81:A1B5`) reads `$0BFF`, `$0C00` and
+X's position by absolute address: only P1's charge has sparkles.
+
+**What ships** (`zero.rs`; only with the X3 set, nothing else changes):
+
+- Body flash, both players: `zero::charge_palette(block, zero)` = X3's
+  flash (`CHARGE_FLASH`; `CHARGE_FLASH_3`, purple, at X1's third level)
+  while `+5B != 0` and `+82 & 2`, else Zero's palette. Written where
+  Zero's palette is written each frame (`write_palette`, the OAM build
+  hook): P1's from `$0BA8`, P2's from its block. X1's timing (2 on, 2 off,
+  from 30 frames) against X3's (from 25).
+- P2's charge no longer touches slot 1: two `Observe` traps on the palette
+  loaders `$82:8000` (`X = $10`) and `$82:8011` (`Y = $100 + weapon`,
+  X's palettes) return at once (`RTL` by hand) inside P2's slice (isolated,
+  `D = $0BA8`) when the X3 set is loaded (hooks `palette_load_at`,
+  `palette_load`; same bytes on PAL and v1.1).
+- Sparkles: X1's (smallest thing that looks right; X3's particles are the
+  same idea in other tiles). P1: the ROM's object, lifted 8 px to Zero's
+  drawn origin by writing its `+19` (which the emitter adds and the
+  sparkle update never writes) in the OAM build hook. P2: `zero::
+  sparkle_entries` draws the same sets from the ROM's layouts (`$8D:8000`)
+  at P2's position (`X3_Y_OFFSET` included), by its `+58`/`+5B`, frame =
+  main-loop counter `$0B9B` mod 22, in front of P2's slash and body in
+  P2's OAM slots (tiles from VRAM: not in the shadow-page mask), and only
+  in the slots left below the HUD's after the body and the arc. Checked
+  against the ROM's own drawing of X's sparkles (test
+  `zero_sparkles_match_rom`, both sets, both facings). Not drawn by the
+  margin pass (`margin_sprites.rs`), so a P2 in the widescreen margins
+  charges without sparkles.
+
+All state is the game's own (WRAM, the P2 block in `CoopState`), so
+netplay rollback carries it; nothing new in `CoopState`. Tests
+`zero_charge_palette`, `zero_sparkles_match_rom`. Strips (4x, `target/z/`):
+`charge_p1_zero_4x.png` (frames 30, 45-48 level 1, 80, 112-115 full, 161-166
+release and the full-charge shot), `charge_p2_zero_4x.png` (P2 beside X:
+X keeps its colours), `charge_x3_own_4x.png`:
+
+```
+x --load states/highway-start.state --frames 175 --out DIR --at 1-175/1 --wram --vram --p1tap 4000@10:150 --zero
+x --load states/highway-start.state --frames 175 --out DIR --at 1-175/1 --wram --vram --p2tap 0100@1:12,4000@20:150 --coop
+xtask dump --rom-any X3 --load states/x3-zero-stand.state --frames 200 --out DIR --at 1-200/1 --wram --vram --p1tap 4000@10:170
 ```
 
 ## Sounds
@@ -914,8 +1028,8 @@ yes at every milestone).
 - **Palette.** The OAM build hook writes Zero's palette over X's sprite
   palette 1 in the `$0300` mirror every frame (only when it changed), so
   stage loads and weapon swaps are repaired the same frame. Weapon colours
-  and X's charge flash do not show on Zero; the charge sparkles and dash
-  dust (other objects) do.
+  do not show on Zero; the charge flash does, as X3's (see "Charge"), and
+  so do the dash dust and the charge sparkles (lifted to Zero's origin).
 - **Saber.** An `Observe` trap on the input remapper `$80:E518` (outside
   `call_isolated`, i.e. P1's call) runs `saber::update` on pad 1 and writes
   the result back to `$A7` (held) and `$AB` (pressed): X starts a swing,
