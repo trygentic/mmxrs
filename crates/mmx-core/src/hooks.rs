@@ -71,6 +71,8 @@ pub enum HookId {
     GfxLoader,
     GfxDecomp,
     CollapseTrigger,
+    PaletteLoadAt,
+    PaletteLoad,
 }
 
 const fn hook(id: HookId, name: &'static str, addr_pal: u32, sig_offset: i32, sig: &'static str) -> Hook {
@@ -82,7 +84,7 @@ use HookId::*;
 /// Indexed by `HookId as usize`. Signatures extracted from the PAL dump
 /// (unique in the whole ROM with their wildcards; `hooks::tests`).
 #[rustfmt::skip]
-pub const HOOKS: [Hook; 40] = [
+pub const HOOKS: [Hook; 42] = [
     hook(P2Update, "p2_update", 0x80D1EF, -4, "22 ?? ?? ?? 9C D4 0B AE 13 1F F0 05 20 ?? ?? 80"),
     hook(P2Physics, "p2_physics", 0x80D241, -4, "22 ?? ?? ?? 9C 1C 1F AE 19 1F D0 09 20 ?? ?? 20"),
     hook(P2Display, "p2_display", 0x809A86, -3, "20 ?? ?? AD 30 1F C9 80 D0 07 9C 30 1F A9 0F 85"),
@@ -137,6 +139,10 @@ pub const HOOKS: [Hook; 40] = [
     // The collapsing road chunk's "X stands on me" test (listing `$82:E9E6`,
     // `JSR` from its update): box test vs `$0BA8`, `$0BD3` bit 2, centred.
     hook(CollapseTrigger, "collapse_trigger", 0x82E9ED, 0, "C2 10 A2 A8 0B 22 ?? ?? ?? 90 33 AD D3 0B 29 04 F0 2C"),
+    // The palette loaders (`Y` = 2 * id into `$86:8133`; `$82:8000` puts it at
+    // CGRAM slot `X`): zero.rs keeps a P2 slice's charge flash out of X's slot.
+    hook(PaletteLoadAt, "palette_load_at", 0x828000, 0, "08 0B E2 20 C2 10 8E 02 00 9C 03 00 0E 02 00 80 0C"),
+    hook(PaletteLoad, "palette_load", 0x828011, 0, "08 0B E2 20 C2 10 9C 02 00 9C 03 00 F4 00 00 2B B9 ?? ?? 85 10"),
 ];
 
 impl HookId {

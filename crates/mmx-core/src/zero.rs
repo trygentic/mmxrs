@@ -116,13 +116,129 @@ pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
         }
         e.extend(frame_entries(game, set, &p2, f, attr));
     }
-    let e = &e[..e.len().min(128 - usize::from(first))];
+    // The charge sparkles (VRAM tiles, in front), in what the co-op slice
+    // left below the HUD's slots after the body and the arc.
+    let room = (127 - crate::coop_hud::HUD_SLOTS).saturating_sub(usize::from(first) + e.len());
+    let frame = game.wram()[ix(ram::FRAME_MAIN)] % SPARKLE_FRAMES;
+    let mut sp = sparkle_entries(game, &p2, frame, X3_Y_OFFSET);
+    sp.truncate(room);
+    let n_sp = sp.len();
+    sp.extend(e);
+    let e = &sp[..sp.len().min(128 - usize::from(first))];
     let last = write_entries(game, first, e);
     let mask = |a: usize, b: usize| (a..b).fold(0u128, |m, s| m | 1 << s);
-    let (f, w) = (usize::from(first), n_fx.min(e.len()));
+    let f = usize::from(first) + n_sp.min(e.len());
+    let w = n_fx.min(e.len().saturating_sub(n_sp));
     game.add_p2_tile_slots(mask(f, f + w), 2);
     game.add_p2_tile_slots(mask(f + w, usize::from(last)), 0);
     last
+}
+
+// ------------------------------------------------------------ charge
+//
+// X1's charge (player block, `$81:97F9..`): `+58` charge state (2 = button
+// held, 4 = charging, from `+57 = $96`), `+57` counts down from `$B4`,
+// `+5B` level (3 = first, 2 = full at `+57 = $50`, 1 = the arm parts' third
+// at `+57 = 1`; 0 = none), `+5A` 2-frame timer, `+82` index into the flash
+// palette table `$86:BAD2`: every 2 frames the update loads `table[+82]`
+// (a flash palette, or 0 = X's own) into sprite palette 1 and does `+82 ^=
+// 2`, so the flash is showing while `+82 & 2`. The sparkles are one object
+// at `$0C98` (set `$6F`, palette 0; `$70`, palette 2 at full charge; `$71`,
+// palette 3 for the third), whose update reads P1's block by absolute
+// address. X3 Zero (docs/zero.md "Charge"): the same 2-on, 2-off flash with
+// X's flash palette over Zero's whole slot ([`CHARGE_FLASH`]), purple at
+// his third level ([`CHARGE_FLASH_3`]).
+
+/// X1's (and X3's) charge flash palette, the whole slot: what X3 writes
+/// over Zero's palette 1 while he charges (`x3-zero-stand`, Y held: the
+/// same 16 colours as X1's flash for X).
+pub const CHARGE_FLASH: [u16; 16] = [
+    0x35AF, 0x7FFF, 0x239D, 0x61BE, 0x7BD4, 0x7B6A, 0x7203, 0x7EE0, 0x7A40, 0x79A4, 0x42DF, 0x2597, 0x1110,
+    0x7FFF, 0x5AD6, 0x7143,
+];
+/// X3 Zero's third-level flash (purple, 142 frames into the hold).
+pub const CHARGE_FLASH_3: [u16; 16] = [
+    0x35AF, 0x7FFF, 0x239D, 0x61BE, 0x7F9C, 0x7ED9, 0x7A33, 0x7EB6, 0x7E36, 0x75D1, 0x42DF, 0x2597, 0x1110,
+    0x7FFF, 0x5AD6, 0x6C12,
+];
+
+/// The palette a charging Zero wears now: the flash on the frames X1's
+/// charge shows its own (`+5B != 0`, `+82 & 2`), else `zero`. Pure.
+pub fn charge_palette(obj: &[u8], zero: &[u16; 16]) -> [u16; 16] {
+    match obj[0x5B] {
+        0 => *zero,
+        _ if obj[0x82] & 2 == 0 => *zero,
+        1 => CHARGE_FLASH_3,
+        _ => CHARGE_FLASH,
+    }
+}
+
+/// X1's charge sparkle object (one fixed slot).
+pub const CHARGE_FX: u32 = 0x7E0C98;
+/// Frames in the sparkle sets `$6F`-`$71` (the object steps one a frame).
+pub const SPARKLE_FRAMES: u8 = 22;
+
+/// The sparkle set and palette bits for a charging player block, `None`
+/// when it shows none (the object's own rule: `+58 = 4`; set by `+5B`).
+/// Pure.
+pub fn sparkle_set(obj: &[u8]) -> Option<(u8, u8)> {
+    (obj[0x58] == 4).then(|| match obj[0x5B] {
+        2 => (0x70, 4),
+        1 => (0x71, 6),
+        _ => (0x6F, 0),
+    })
+}
+
+/// Frame `f` of X1 sprite set `set` (layout `count`, then `x, y, tile,
+/// attr` per sprite) from the ROM, with each sprite's palette bits.
+fn x1_layout(game: &Game, set: u8, f: u8) -> Vec<(Sprite, u8)> {
+    let long = |a: u32| u32::from_le_bytes([game.rom_read(a), game.rom_read(a + 1), game.rom_read(a + 2), 0]);
+    let lp = long(long(crate::zero_data::SET_TABLE + 3 * u32::from(set)) + 3 * u32::from(f));
+    (0..u32::from(game.rom_read(lp)))
+        .map(|i| {
+            let e = lp + 1 + 4 * i;
+            let la = game.rom_read(e + 3);
+            let s = Sprite {
+                x: game.rom_read(e) as i8,
+                y: game.rom_read(e + 1) as i8,
+                big: la & 0x20 != 0,
+                tile: game.rom_read(e + 2),
+                hflip: la & 0x40 != 0,
+                vflip: la & 0x80 != 0,
+            };
+            (s, la & 0x0E)
+        })
+        .collect()
+}
+
+/// The charge sparkles of `obj` (a player block) at sparkle frame `f`, as
+/// the ROM draws the `$0C98` object for X: centred on `+05/+08` (no `+19`)
+/// plus `dy`, mirrored by the facing, tiles from VRAM. Empty when not
+/// charging.
+pub fn sparkle_entries(game: &Game, obj: &[u8], f: u8, dy: i16) -> Vec<([u8; 4], u8)> {
+    let Some((set, pal)) = sparkle_set(obj) else { return Vec::new() };
+    let w = game.wram();
+    let r16 = |a: usize| u16::from_le_bytes([w[a], w[a + 1]]);
+    let o16 = |o: usize| u16::from_le_bytes([obj[o], obj[o + 1]]);
+    let ox = o16(0x05).wrapping_sub(r16(ix(ram::CAMERA_X))) as i16;
+    let oy = (o16(0x08).wrapping_sub(r16(ix(ram::CAMERA_Y))) as i16).wrapping_add(dy);
+    let right = obj[0x11] & 0x40 != 0;
+    let attr = obj[0x11] & 0x30 | pal; // the object's `+11` = the player's `& $70 | +10`
+    x1_layout(game, set, f % SPARKLE_FRAMES)
+        .into_iter()
+        .filter_map(|(s, la)| oam_entry(&s, (ox, oy), right, attr | la))
+        .collect()
+}
+
+/// A Zero P1's sparkles: the ROM's `$0C98` object draws them at X's
+/// origin; lift it to Zero's ([`X3_Y_OFFSET`]) through the object's `+19`,
+/// which the emitter adds and the sparkle update never writes.
+fn lift_p1_sparkles(game: &mut Game) {
+    let o = ix(CHARGE_FX);
+    let w = game.wram_mut();
+    if w[o] != 0 && (0x6F..=0x71).contains(&w[o + 0x16]) {
+        w[o + 0x19] = X3_Y_OFFSET as i8 as u8;
+    }
 }
 
 /// Frame `f` of `obj` (a player block) as OAM entries, `attr` = priority /
@@ -337,13 +453,39 @@ pub fn register_zero_traps(game: &mut Game) {
     game.traps.register(game.hook(crate::coop::PLAYER_OAM), "zero_p1_emitter", TrapReturn::Observe, p1_emitter);
     game.traps.register(game.hook(crate::coop::FX_OAM), "zero_p1_skip_parts", TrapReturn::Observe, skip_p1_parts);
     game.traps.register(game.hook(crate::coop::INPUT_REMAP), "zero_p1_pad", TrapReturn::Observe, p1_pad);
+    game.traps.register(game.hook(HookId::PaletteLoadAt), "zero_p2_flash", TrapReturn::Observe, p2_flash_load);
+    game.traps.register(game.hook(HookId::PaletteLoad), "zero_p2_flash_end", TrapReturn::Observe, p2_flash_end);
     crate::p2tiles::register(game);
+}
+
+/// P2's update (isolated, block at `$0BA8`) runs X's charge code, whose
+/// flash loads its palettes into sprite palette 1: P1's. With the X3 set,
+/// P2's flash is drawn from its block instead ([`charge_palette`]), so the
+/// loads are skipped (`RTL` by hand): the flash (`$82:8000`, `X = $10`) and
+/// X's own palette back (`$82:8011`, `Y = $100 + weapon`).
+fn in_p2_slice(game: &Game) -> bool {
+    game.coop.enabled && game.isolated_depth > 0 && game.zero_set.is_some() && game.regs().d == ram::X_BASE as u16
+}
+
+fn p2_flash_load(game: &mut Game) {
+    if in_p2_slice(game) && game.regs().x == 0x10 {
+        game.emulate_return(true);
+    }
+}
+
+fn p2_flash_end(game: &mut Game) {
+    if in_p2_slice(game) && (0x100..0x120).contains(&game.regs().y) {
+        game.emulate_return(true);
+    }
 }
 
 /// [`HOOK_OAM_BUILD`]: P2's palette, and a fresh P2 slot mask for this frame.
 fn oam_build(game: &mut Game) {
     crate::p2tiles::clear_slots(game);
     write_palette(game);
+    if game.coop.p1.on && game.zero_set.is_some() {
+        lift_p1_sparkles(game);
+    }
 }
 
 /// Trap body: keep P2's sprite palette = `palette_for(X's)` in the mirror
@@ -352,7 +494,8 @@ fn oam_build(game: &mut Game) {
 /// weapon swaps, so the check doubles as a repair).
 pub fn write_palette(game: &mut Game) {
     if let Some(z) = game.zero_set.as_ref().filter(|_| game.coop.p1.on) {
-        let pal = z.palette;
+        let b = ix(ram::X_BASE);
+        let pal = charge_palette(&game.wram()[b..b + ram::X_BLOCK_LEN], &z.palette);
         put_palette(game, X_SPRITE_PALETTE, &pal);
     }
     if !game.coop.enabled || game.coop.p2_hidden {
@@ -361,7 +504,7 @@ pub fn write_palette(game: &mut Game) {
     let src = sprite_palette_offset(X_SPRITE_PALETTE);
     let w = game.wram_mut();
     let x: [u16; 16] = std::array::from_fn(|i| u16::from_le_bytes([w[src + 2 * i], w[src + 2 * i + 1]]));
-    let want = game.zero_set.as_ref().map_or_else(|| palette_for(&x), |z| z.palette);
+    let want = game.zero_set.as_ref().map_or_else(|| palette_for(&x), |z| charge_palette(&game.coop.p2, &z.palette));
     put_palette(game, game.coop.zero_palette, &want);
 }
 
@@ -500,6 +643,68 @@ mod tests {
             }
         }
         assert!(checked > 20);
+    }
+
+    /// Calibration: [`sparkle_entries`] for X's own block and the `$0C98`
+    /// object's frame writes what the ROM draws for X's charge (sets `$6F`
+    /// and, from 100 frames in, `$70`), in both facings.
+    #[test]
+    fn zero_sparkles_match_rom() {
+        let Some(rom) = std::env::var_os("MMX_ROM") else {
+            eprintln!("MMX_ROM not set; skipping");
+            return;
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/highway-start.state");
+        let Ok(state) = std::fs::read(st) else {
+            eprintln!("{st} missing; skipping");
+            return;
+        };
+        let mut g = Game::from_rom(std::fs::read(rom).unwrap()).unwrap();
+        g.load_state(&state).unwrap();
+        let (mut checked, mut sets) = (0, Vec::new());
+        for f in 1..=150 {
+            let pad = crate::BTN_Y | if f > 125 { crate::BTN_LEFT } else { 0 };
+            g.step(crate::Pads { p1: pad, p2: 0 });
+            let b = ix(ram::X_BASE);
+            let obj: Vec<u8> = g.wram()[b..b + ram::X_BLOCK_LEN].to_vec();
+            let fx = ix(CHARGE_FX);
+            let Some((set, _)) = sparkle_set(&obj) else {
+                assert!(f < 45, "frame {f}: no sparkles while charging");
+                continue;
+            };
+            if set != g.wram()[fx + 0x16] {
+                // the level-up frame: the object switches set a frame late
+                sets.push(0);
+                continue;
+            }
+            let want = sparkle_entries(&g, &obj, g.wram()[fx + 0x17] & 0x7F, 0);
+            assert!(!want.is_empty() || g.wram()[fx + 0x17] & 0x7F == 0, "frame {f}");
+            let oam = &g.wram()[ix(ram::OAM_BUF)..][..512];
+            let found = (0..128 - want.len()).any(|s| want.iter().enumerate().all(|(k, (e, _))| oam[(s + k) * 4..][..4] == *e));
+            assert!(found, "frame {f}: {want:02X?} not in OAM");
+            checked += want.len();
+            sets.push(g.wram()[fx + 0x16]);
+        }
+        assert!(checked > 200, "{checked}");
+        assert!(sets.contains(&0x6F) && sets.contains(&0x70), "{sets:02X?}");
+        assert!(sets.iter().filter(|&&s| s == 0).count() <= 1, "{sets:02X?}");
+    }
+
+    #[test]
+    fn zero_charge_palette() {
+        let mut b = [0u8; 0x90];
+        let z = [1u16; 16];
+        assert_eq!(charge_palette(&b, &z), z);
+        b[0x5B] = 3;
+        assert_eq!(charge_palette(&b, &z), z); // +82 = 0: X's own showing
+        b[0x82] = 2;
+        assert_eq!(charge_palette(&b, &z), CHARGE_FLASH);
+        b[0x5B] = 2;
+        assert_eq!(charge_palette(&b, &z), CHARGE_FLASH);
+        b[0x5B] = 1;
+        assert_eq!(charge_palette(&b, &z), CHARGE_FLASH_3);
+        b[0x82] = 4;
+        assert_eq!(charge_palette(&b, &z), z);
     }
 
     #[test]

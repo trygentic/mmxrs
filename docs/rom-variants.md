@@ -1,6 +1,6 @@
 # ROM variants
 
-Every routine the co-op, Zero, display and wide gameplay traps hook or call (34 of them) is
+Every routine the co-op, Zero, display and wide gameplay traps hook or call is
 listed in `crates/mmx-core/src/hooks.rs` with its address on our dump and a
 16-byte signature (`??` over operands that point into ROM: call/jump targets,
 long addresses into banks `$80+`, words `>= $8000`). At load
