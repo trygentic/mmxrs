@@ -165,6 +165,37 @@ fn margin_pass_survives_the_vile_scroll() {
     same_state_unwidened(&mut a, &mut b);
 }
 
+/// Regression (found playing the TASVideos 100% movie, docs/widescreen-coverage.md):
+/// Launch Octopus runs HDMA. When the margin sprite pass's isolated emitter
+/// call sat on an HDMA start or reload point, the HDMA ran inside the call
+/// and the DMA unit was not put back, so the real HDMA (and its CPU stall)
+/// did not happen at its time: a few frames later the NMI interrupted the
+/// main loop at another instruction (stack `$02FD`, dead stack bytes at
+/// `$012B..$0130` differed from the unwidened game). Every WRAM byte must
+/// match, every frame, walking and jumping through the stage's start.
+#[test]
+fn margin_pass_keeps_hdma_timing() {
+    let (Some(mut a), Some(mut b)) = (game("octopus-start"), game("octopus-start")) else {
+        return eprintln!("MMX_ROM or states/octopus-start.state missing; skipping");
+    };
+    b.set_widescreen(Widescreen::W16_9);
+    for f in 0..900 {
+        let mut p1 = 0x0100;
+        if f % 45 < 20 {
+            p1 |= 0x8000;
+        }
+        if f % 40 < 3 {
+            p1 |= 0x4000;
+        }
+        a.step(Pads { p1, p2: 0 });
+        b.step(Pads { p1, p2: 0 });
+        if let Some(i) = (0..0x20000).find(|&i| a.wram()[i] != b.wram()[i]) {
+            panic!("frame {f}: WRAM $7E:{i:05X} {:02X} (off) vs {:02X} (16:9)", a.wram()[i], b.wram()[i]);
+        }
+    }
+    assert_eq!(a.oam(), b.oam());
+}
+
 /// The save state holds the PPU's last picture and its sprite evaluation,
 /// which the HUD shift changes (the HUD is not in the centre; STAT77's
 /// overflow flags, which MMX never reads): one frame with `b`'s widescreen

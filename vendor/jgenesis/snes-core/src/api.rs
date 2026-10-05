@@ -212,7 +212,7 @@ impl<C> Decode<C> for CpuOverclock {
 bincode::impl_borrow_decode!(CpuOverclock);
 
 /// mmxrs patch: see [`SnesEmulator::cpu_snapshot`].
-pub struct CpuSnapshot(Wdc65816, CpuInternalRegisters, u8);
+pub struct CpuSnapshot(Wdc65816, CpuInternalRegisters, u8, DmaUnit);
 
 #[derive(Encode, Decode, PartialClone)]
 pub struct SnesEmulator {
@@ -481,17 +481,23 @@ impl SnesEmulator {
     }
 
     /// The CPU as a whole (registers and the between-cycle temporaries a
-    /// save state holds), the 5A22 registers and the open bus, so a
-    /// display-only isolated call leaves the save state as it found it.
+    /// save state holds), the 5A22 registers, the open bus and the DMA
+    /// unit, so a display-only isolated call leaves the save state (and the
+    /// timing of what follows) as it found it. The DMA unit matters: an
+    /// isolated call that reaches an HDMA start or reload point runs that
+    /// HDMA inside the call ([`Self::run_cpu_isolated`] ticks the DMA unit);
+    /// without putting the unit back, the real HDMA (and its CPU stall)
+    /// would not happen at its real time.
     #[must_use]
     pub fn cpu_snapshot(&self) -> CpuSnapshot {
-        CpuSnapshot(self.main_cpu.clone(), self.cpu_registers.clone(), self.memory.cpu_open_bus())
+        CpuSnapshot(self.main_cpu.clone(), self.cpu_registers.clone(), self.memory.cpu_open_bus(), self.dma_unit.clone())
     }
 
     pub fn restore_cpu_snapshot(&mut self, s: CpuSnapshot) {
         self.main_cpu = s.0;
         self.cpu_registers = s.1;
         self.memory.set_cpu_open_bus(s.2);
+        self.dma_unit = s.3;
     }
 
     #[must_use]

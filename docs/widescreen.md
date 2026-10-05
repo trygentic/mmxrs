@@ -747,6 +747,17 @@ come at him from further and in larger numbers.
   ok per peer, identical to the plain run; `xtask netreplay` of its log
   (`wide 1` in the header) matches all 40 checksums; `--wide-gameplay-host`
   (host only): the handshake refuses (`mismatch: TrapSet`) in both modes.
+- HDMA timing (`margin_pass_keeps_hdma_timing`, PAL octopus-start, 900
+  frames walking/jumping/shooting at 16:9 vs off, every WRAM byte every
+  frame): the margin pass's isolated emitter call ticks the DMA unit, so a
+  call that sat on an HDMA start or reload point ran that HDMA inside the
+  call; `CpuSnapshot` did not hold the DMA unit, so the real HDMA (and its
+  CPU stall) then did not happen at its time. Launch Octopus (HDMA water)
+  showed it: the NMI interrupted the main loop at another instruction
+  (stack `$02FD` A1 vs A4, dead stack bytes `$012B-$0130`), within the
+  netplay checksum range, healed the next frame. `CpuSnapshot` now holds
+  the DMA unit too. Found playing the TASVideos 100% movie and the
+  per-stage traversals (docs/widescreen-coverage.md).
 - Cost: Launch Octopus at 21:9 (two screens + colour math) 3.9 -> 5.8 ms per
   frame on an M-series Mac, about the main renderer's own cost per pixel.
 
