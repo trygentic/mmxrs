@@ -64,6 +64,38 @@ fn status(g: &Game) -> String {
     )
 }
 
+/// One `--trace` line, the same format as `tools/oracle-mesen` writes:
+/// frame, FNV-1a 64 of WRAM, `$0B9B` main-loop counter, `$0B9E` NMI counter,
+/// RNG `$0BA6`, X's x/y, pad held `$A7`, `$D1-$D4`, level, lives, X's HP,
+/// `$02FD` (the low byte of the PC the NMI pushed: `A1`/`A4` = which idle-loop
+/// instruction it interrupted, so where in the loop the CPU was at NMI).
+fn trace_line(f: usize, g: &Game) -> String {
+    let w = g.wram();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in &w[..0x20000] {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    let w16 = |a: usize| u16::from_le_bytes([w[a], w[a + 1]]);
+    format!(
+        "{f} {h:016x} {:02x} {:02x} {:04x} {:04x} {:04x} {:04x} {:02x}{:02x}{:02x}{:02x} {:02x} {:02x} {:02x} {:02x}",
+        w[0x0B9B], w[0x0B9E], w16(0x0BA6), w16(0x0BAD), w16(0x0BB0), w16(0x00A7),
+        w[0xD1], w[0xD2], w[0xD3], w[0xD4], w[0x1F7A], w[0x1F80], w[0x0BCF] & 0x7F, w[0x02FD]
+    ) + &format!(" | pc {:06x} mclk {} at {:?}", g.regs().pbr_pc(), g.master_cycles(), g.ppu_position())
+}
+
+/// `F` or `A-B/S` (every `S` frames from `A` to `B`).
+fn dump_frames(item: &str) -> Vec<usize> {
+    let n = |v: &str| v.trim().parse::<usize>().unwrap_or_else(|_| die("--dump-wram F|A-B/S,.."));
+    match item.split_once('-') {
+        Some((a, rest)) => {
+            let (b, s) = rest.split_once('/').unwrap_or((rest, "1"));
+            (n(a)..=n(b)).step_by(n(s).max(1)).collect()
+        }
+        None => vec![n(item)],
+    }
+}
+
 /// WRAM + OAM + CGRAM + VRAM (what `--twin` compares).
 fn sim_hash(g: &Game) -> u64 {
     let c: Vec<u8> = g.cgram().iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -205,6 +237,21 @@ pub fn movie(args: &[String]) -> i32 {
     let at: Vec<usize> = flag(args, "--at").map(|s| s.split(',').map(|f| f.trim().parse().unwrap_or_else(|_| die("--at"))).collect()).unwrap_or_default();
     let save_every = num(args, "--save-every").unwrap_or(0);
     let save_dir = PathBuf::from(flag(args, "--save-dir").unwrap_or("target/movie/states"));
+    // `--trace PATH`: one line per frame for diffing against tools/oracle-mesen.
+    let mut trace = flag(args, "--trace").map(|p| {
+        std::io::BufWriter::new(std::fs::File::create(p).unwrap_or_else(|e| die(&format!("{p}: {e}"))))
+    });
+    let mut cpu_trace = args.iter().position(|a| a == "--cpu-trace").map(|i| {
+        let (r, p) = (args.get(i + 1).map(String::as_str).unwrap_or(""), args.get(i + 2).map(String::as_str).unwrap_or(""));
+        let (a, b) = r.split_once('-').unwrap_or_else(|| die("--cpu-trace A-B PATH"));
+        let n = |v: &str| v.parse::<usize>().unwrap_or_else(|_| die("--cpu-trace A-B PATH"));
+        (n(a), n(b), std::io::BufWriter::new(std::fs::File::create(p).unwrap_or_else(|e| die(&format!("{p}: {e}")))))
+    });
+    let mut spc_trace = flag(args, "--spc-trace").map(|p| {
+        std::io::BufWriter::new(std::fs::File::create(p).unwrap_or_else(|e| die(&format!("{p}: {e}"))))
+    });
+    // `--dump-wram F|A-B/S,..`: WRAM after those frames to `OUT/wram-F.bin`.
+    let dump_wram: Vec<usize> = flag(args, "--dump-wram").map(|s| s.split(',').flat_map(dump_frames).collect()).unwrap_or_default();
     if save_every > 0 {
         std::fs::create_dir_all(&save_dir).unwrap_or_else(|e| die(&format!("{}: {e}", save_dir.display())));
     }
@@ -215,6 +262,11 @@ pub fn movie(args: &[String]) -> i32 {
         t.set_widescreen(Widescreen::parse("off").unwrap());
         t
     });
+    // Movies press Left+Right (3197M at frame 14258); the console passes it through.
+    g.set_allow_opposing_directions(true);
+    if let Some(t) = twin.as_mut() {
+        t.set_allow_opposing_directions(true);
+    }
     let twin_keep = args.iter().any(|a| a == "--twin-keep");
     let wide = g.widescreen();
     if g.wide_margin() > 0 {
@@ -251,7 +303,26 @@ pub fn movie(args: &[String]) -> i32 {
             last_state = (f - 1, g.save_state());
         }
         pokes.apply(&mut g, f);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.step(pads)));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match cpu_trace.as_mut() {
+            // `--cpu-trace A-B PATH`: every opcode fetch of frames A..=B as
+            // `frame PC scanline H` (H in master clocks), like tools/oracle-mesen.
+            Some((a, b, out)) if (*a..=*b).contains(&f) => {
+                use std::io::Write as _;
+                if spc_trace.is_some() && f == *a {
+                    Game::spc_trace(true);
+                }
+                for (pc, line, h) in g.trace_frame_pos(pads) {
+                    writeln!(out, "{f} {pc:06x} {line} {h}").unwrap_or_else(|e| die(&format!("--cpu-trace: {e}")));
+                }
+                // `--spc-trace PATH` (with --cpu-trace): SPC700 instruction starts, `frame PC cycle`.
+                if let Some(st) = spc_trace.as_mut() {
+                    for (pc, cyc) in Game::spc_trace_take() {
+                        writeln!(st, "{f} {pc:04x} {cyc}").unwrap_or_else(|e| die(&format!("--spc-trace: {e}")));
+                    }
+                }
+            }
+            _ => g.step(pads),
+        }));
         if r.is_err() {
             let p = out.join(format!("panic-before-{:06}.state", last_state.0 + 1));
             let _ = std::fs::write(&p, &last_state.1);
@@ -287,6 +358,14 @@ pub fn movie(args: &[String]) -> i32 {
                     t.load_state(&s).unwrap_or_else(|e| die(&e));
                 }
             }
+        }
+        if let Some(t) = trace.as_mut() {
+            use std::io::Write as _;
+            writeln!(t, "{}", trace_line(f, &g)).unwrap_or_else(|e| die(&format!("--trace: {e}")));
+        }
+        if dump_wram.contains(&f) {
+            let p = out.join(format!("wram-{f}.bin"));
+            std::fs::write(&p, &g.wram()[..0x20000]).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
         }
         let m = mode(&g);
         let in_stage = m.d[1] == ram::D2_IN_STAGE;

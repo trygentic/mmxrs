@@ -34,6 +34,10 @@ pub struct Bus<'a> {
     pub latched_interrupts: Option<LatchedInterrupts>,
     pub access_master_cycles: u64,
     pub pending_write: Option<(u32, u8)>,
+    // mmxrs patch: the APU is ticked up to a CPU read of its ports (see the $2140 arm)
+    pub apu_sync: bool,
+    pub apu_pre_ticked: u64,
+    pub apu_sample: Option<(f64, f64)>,
 }
 
 impl Bus<'_> {
@@ -56,6 +60,17 @@ impl Bus<'_> {
                 self.access_master_cycles = FAST_MASTER_CYCLES;
 
                 // APU ports
+                // mmxrs patch: the CPU samples the bus 4 master clocks before the end of
+                // the cycle (bsnes, Mesen 2), not at its start: run the APU up to there
+                // first, so an SPC700 write in those clocks is seen in this read. The
+                // main loop ticks the APU the rest of the cycle afterwards.
+                if self.apu_sync && self.apu_pre_ticked == 0 {
+                    let pre = self.access_master_cycles - 4;
+                    if let crate::apu::ApuTickEffect::OutputSample(l, r) = self.apu.tick(pre) {
+                        self.apu_sample = Some((l, r));
+                    }
+                    self.apu_pre_ticked = pre;
+                }
                 self.apu.read_port(address)
             }
             0x2180 => {

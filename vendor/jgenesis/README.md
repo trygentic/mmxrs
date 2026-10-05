@@ -73,3 +73,28 @@ between `SnesEmulator::tick` calls (see `docs/traps.md`).
   encodes as nothing, clones empty, and survives `load_state`. Also
   `bg_map_entry`, `line_regs` / `set_line_record`, `ppu_registers_debug`
   (research), and `offset_sprite` made `pub(super)` (2026-10-01).
+
+- Timing against hardware / bsnes v0.87 / Mesen 2 (`docs/oracle.md`; found
+  by diffing the TASVideos 100% movies frame by frame against Mesen 2;
+  2026-10-05). No new state fields, so old save states still load:
+  - `snes-core/src/apu.rs`: the APU/CPU clock ratio is bsnes v0.87's,
+    24,607,104 APU clocks per 21,477,272 CPU clocks (upstream: 32040 * 768
+    per 21,477,270); `audio.rs`: the resampler's input rate is 32040.5 Hz
+    to match.
+  - `snes-core/src/ppu.rs`: H/V IRQs reach the CPU at H=18+4n (H, HV) and
+    H=14 (V only) master clocks, not 10 (`IRQ_H_OFFSET_MCLKS`,
+    `IRQ_V_OFFSET_MCLKS`).
+  - `snes-core/src/memory.rs`: the VBlank NMI (and the RDNMI flag) rises at
+    H=6 of the first VBlank line, not H=0 (`NMI_MCLK`).
+  - `snes-core/src/memory/dma.rs`, `api.rs`: a DRAM refresh during DMA does
+    not count towards the DMA length used for the end-of-DMA CPU-clock
+    alignment (`DmaUnit::exclude_refresh`); `#[must_use]` back on
+    `start_dma_if_inactive`.
+  - `snes-core/src/bus.rs`, `api.rs`: a CPU read of `$2140-$217F` ticks the
+    APU up to 4 master clocks before the end of the CPU cycle first
+    (`Bus::apu_sync` / `apu_pre_ticked` / `apu_sample`; the main loop ticks
+    the APU the rest of the cycle).
+  - `snes-core/src/api.rs`: the CPU starts 186 master clocks after power-on /
+    reset (`run_startup_delay`; PPU, APU, timers run meanwhile).
+  - Debug: `SnesEmulator::ppu_position`, `SPC_TRACE` / `SPC_CYCLES`
+    (thread-local SPC700 instruction trace, off unless enabled).

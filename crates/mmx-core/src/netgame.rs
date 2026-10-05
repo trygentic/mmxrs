@@ -26,8 +26,10 @@ use crate::{Timing, coop, Game, Overclock, Pads, RomError};
 /// 4: wide gameplay (`Game::set_wide_gameplay`) in the id. 5: the CPU
 /// overclock (`Game::set_overclock`) in the id. 6: P2's palette moved out of
 /// CGRAM (`$0300` sprite palette 3 is the game's again) into the PPU, and
-/// the save state's `P2T6` tail carries it.
-const NET_REVISION: u64 = 6;
+/// the save state's `P2T6` tail carries it. 7: emulated timing changed (APU
+/// clock ratio, IRQ/NMI edges, DMA end alignment, APU port reads, CPU start
+/// delay; docs/oracle.md).
+const NET_REVISION: u64 = 7;
 
 /// Rollback save state: [`Game::save_state`] (co-op state included).
 pub fn net_save(game: &Game) -> Vec<u8> {

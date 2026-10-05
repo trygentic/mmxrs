@@ -21,6 +21,10 @@ const MAIN_RAM_LEN: usize = 128 * 1024;
 // H=32.5
 const AUTO_JOYPAD_START_MCLK: u64 = 130;
 
+// mmxrs patch: the NMI reaches the CPU 6 master clocks into the first VBlank line
+// (Mesen 2, from the S-CPU schematics: flag at H=2, seen as if set at H=6)
+const NMI_MCLK: u64 = 6;
+
 type MainRam = [u8; MAIN_RAM_LEN];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Encode, Decode)]
@@ -827,7 +831,7 @@ impl CpuInternalRegisters {
         self.input_state.tick(master_cycles_elapsed, *inputs);
 
         // Update VBlank, HBlank, and NMI flags
-        self.update_hv_blank_flags(ppu);
+        self.update_hv_blank_flags(ppu, master_cycles_elapsed);
 
         // Check H/V IRQs
         self.update_irq_line(ppu);
@@ -883,15 +887,26 @@ impl CpuInternalRegisters {
         self.divide_cycles_remaining -= 1;
     }
 
-    fn update_hv_blank_flags(&mut self, ppu: &Ppu) {
+    fn update_hv_blank_flags(&mut self, ppu: &Ppu, master_cycles_elapsed: u64) {
         let vblank_flag = ppu.vblank_flag();
-        if !self.vblank_flag && vblank_flag {
-            // Start of VBlank
+        // mmxrs patch: the NMI (and RDNMI's flag) rises NMI_MCLK master clocks into the
+        // first VBlank line, not at H=0: a CPU cycle that starts before then does not see
+        // it (the 65816 polls at the start of an instruction's last cycle). Upstream
+        // raised it at H=0, so an instruction whose last cycle started at H=0..5 took the
+        // NMI one instruction early. docs/oracle.md.
+        let h = ppu.scanline_master_cycles();
+        let nmi_edge = vblank_flag
+            && ppu.is_first_vblank_scanline()
+            && h >= NMI_MCLK
+            && h < NMI_MCLK + master_cycles_elapsed;
+        if nmi_edge {
+            // Start of VBlank (NMI)
             if self.nmi_enabled && !self.vblank_nmi_flag {
                 self.nmi_pending = true;
             }
             self.vblank_nmi_flag = true;
-        } else if self.vblank_flag && !vblank_flag {
+        }
+        if self.vblank_flag && !vblank_flag {
             // End of VBlank
             self.vblank_nmi_flag = false;
         }

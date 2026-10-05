@@ -25,9 +25,11 @@ const USAGE: &str = "usage: cargo xtask <command>
        also bench, verify (oracle and DUT), netsim, bginfo, trace)
   movie --movie F.bk2|F.lsmv|F.smv [--movie-offset N[@F],..] [--frames N] [--wide W] [--twin] [--out DIR] [--png-every N]
        [--pict-every N] [--log-every N] [--at F,..] [--save-every N --save-dir DIR] [--wram-fill HEX] [--load STATE] [--poke ..] [--refill] [script]
+       [--trace PATH] [--dump-wram F,..]
        play a movie (lag frames included, wide gameplay refused, overclock off unless given); --twin: a widescreen-off game
        alongside, WRAM/OAM/CGRAM/VRAM compared every frame; margin residency check on when wide; picture checks; PNGs at
-       mode changes, deaths, boss bars, pauses; DIR/segments.md per stage (docs/widescreen-coverage.md)
+       mode changes, deaths, boss bars, pauses; DIR/segments.md per stage (docs/widescreen-coverage.md); --trace: one line
+       per frame in tools/oracle-mesen's format; --dump-wram: DIR/wram-F.bin
   bench --frames N [script] [--load STATE] [--x3 PATH] [--zero] [--coop] [--wide W] [--wide-gameplay] [--overclock off|1.5|2] [--warmup N] [--csv PATH]
        release wall time per step: mean / p99 / max, overall and on frames with 3+ live enemies;
        MMX_PROFILE=1 adds the per-phase breakdown (trap bodies by name, margin passes, take_audio). docs/widescreen.md \"Performance\"

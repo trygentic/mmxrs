@@ -7,7 +7,8 @@ use dsp::iir::FirstOrderIirFilter;
 use dsp::sinc::QualitySincResampler;
 use jgenesis_common::frontend::AudioOutput;
 
-const SNES_AUDIO_FREQUENCY: f64 = apu::OUTPUT_FREQUENCY as f64;
+// mmxrs patch: the APU now runs at bsnes's 24,607,104 Hz (apu.rs), 32040.5 samples/s
+const SNES_AUDIO_FREQUENCY: f64 = apu::BSNES_APU_MASTER_CLOCK_FREQUENCY as f64 / 768.0;
 
 fn new_dc_offset_filter() -> FirstOrderIirFilter {
     dsp::design::butterworth(5.0, SNES_AUDIO_FREQUENCY, FilterType::HighPass)

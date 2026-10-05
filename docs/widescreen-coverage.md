@@ -29,6 +29,15 @@ check, on the PAL v1.0 dump forced to NTSC timing: identical result).
 
 ## Sync (widescreen off)
 
+**Update 2026-10-05 (docs/oracle.md):** on the exact USA v1.0 dump and after
+the timing fixes found with the Mesen 2 oracle (bsnes's APU clock ratio, the
+H/V IRQ and NMI edges, DMA end alignment, APU port read point, CPU start
+delay; plus Left+Right passed through for movies), 3197M now syncs through
+the Intro, Chill Penguin (boss included), Boomer Kuwanger and into Sting
+Chameleon's stage to ~35,231 (X dies there); 2771M clears Intro, Penguin,
+Kuwanger and Chameleon and desyncs at the following stage select (36,436).
+The table below is the state before that work.
+
 | movie | how far it stays in sync | first sign of desync |
 |---|---|---|
 | 3197M | Power-on, title, the whole Intro highway incl. the Vile fight (stage clear `$D3=08` at frame 8648), Zero's scene, the stage select (cursor to Penguin at 9027), Penguin's intro, and Chill Penguin's stage up to the Leg Parts (dashing from 13800) and the Ride Armor (in at 14375, out with the movie's own Up+B at 14428) | ~14700: X jumps off the cliff edge at x 5208, is hit by a bird and falls into the pit (dies 14894-15085). Later the movie's inputs keep X stuck in the Ride Armor for the rest of the run |
@@ -147,7 +156,8 @@ an HDMA run inside one would happen early. Not investigated here.
 
 ## What is not covered
 
-- The 100% run past Chill Penguin's stage: it desyncs on our core.
+- The 100% run past Sting Chameleon's stage: it desyncs on our core
+  (docs/oracle.md).
 - Boss fights other than Chill Penguin's (2771M, until X dies), the Penguin
   revisit, the capsules other than the Leg Parts, Sigma stages' real unlock
   path, the ending: the traversal reaches no boss.

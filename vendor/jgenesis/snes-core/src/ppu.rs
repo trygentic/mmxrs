@@ -1597,10 +1597,16 @@ impl Ppu {
     }
 
     // There is a 10 mclk / 2.5 dot delay on raising IRQ in response to VTIME/HTIME matches
-    const IRQ_OFFSET_MCLKS: u64 = 10;
+
+    // mmxrs patch: when the CPU sees an H/V IRQ (bsnes v0.87 and Mesen 2 agree): an
+    // H (or H+V) IRQ at HTIME=n is visible to a CPU cycle starting at H=18+4n master
+    // clocks, a V-only IRQ at H=14 of line VTIME. Upstream used 10 for both, so the
+    // IRQ was taken up to an instruction early. docs/oracle.md.
+    const IRQ_H_OFFSET_MCLKS: u64 = 18;
+    const IRQ_V_OFFSET_MCLKS: u64 = 14;
 
     pub fn vtime_for_irq(&self) -> u16 {
-        if self.state.scanline_master_cycles >= Self::IRQ_OFFSET_MCLKS {
+        if self.state.scanline_master_cycles >= Self::IRQ_V_OFFSET_MCLKS {
             self.state.scanline
         } else if self.state.scanline == 0 {
             self.scanlines_per_frame() - 1
@@ -1610,11 +1616,11 @@ impl Ppu {
     }
 
     pub fn htime_for_irq(&self) -> u16 {
-        let scanline_mclks = if self.state.scanline_master_cycles >= Self::IRQ_OFFSET_MCLKS {
-            self.state.scanline_master_cycles - Self::IRQ_OFFSET_MCLKS
+        let off = Self::IRQ_H_OFFSET_MCLKS;
+        let scanline_mclks = if self.state.scanline_master_cycles >= off {
+            self.state.scanline_master_cycles - off
         } else {
-            self.state.prev_line_length.scanline_mclks()
-                - (Self::IRQ_OFFSET_MCLKS - self.state.scanline_master_cycles)
+            self.state.prev_line_length.scanline_mclks() - (off - self.state.scanline_master_cycles)
         };
 
         // CPU HTIME counter does not account for some dots being shorter/longer; assumes all dots

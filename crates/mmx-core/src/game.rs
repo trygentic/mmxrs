@@ -183,6 +183,18 @@ fn joypad(bits: u16) -> SnesController {
     })
 }
 
+fn emulator_config(timing: Timing, allow_opposing_directions: bool) -> SnesEmulatorConfig {
+    SnesEmulatorConfig {
+        forced_timing_mode: match timing {
+            Timing::Auto => None,
+            Timing::Ntsc => Some(TimingMode::Ntsc),
+            Timing::Pal => Some(TimingMode::Pal),
+        },
+        allow_opposing_joypad_directions: allow_opposing_directions,
+        ..SnesEmulatorConfig::default()
+    }
+}
+
 fn parse_header(mut rom: Vec<u8>, strict: bool) -> Result<(Vec<u8>, RomInfo), RomError> {
     let had_copier_header = rom.len() % 0x8000 == 512;
     if had_copier_header {
@@ -222,6 +234,14 @@ impl Game {
         Self::load(parse_header(rom, true)?, timing)
     }
 
+    /// Pass Left+Right / Up+Down through to the game as pressed (the
+    /// console reads whatever the pad's switches say; a d-pad rocker just
+    /// cannot press both). Off by default, as jgenesis has it: a keyboard
+    /// can press both. Input movies need it on (TASes press both).
+    pub fn set_allow_opposing_directions(&mut self, on: bool) {
+        self.emu.reload_config(&emulator_config(self.timing, on));
+    }
+
     /// The timing this game was created with (netplay rebuilds with the same).
     pub fn timing(&self) -> Timing {
         self.timing
@@ -234,14 +254,7 @@ impl Game {
     }
 
     fn load((rom, info): (Vec<u8>, RomInfo), timing: Timing) -> Result<Game, RomError> {
-        let config = SnesEmulatorConfig {
-            forced_timing_mode: match timing {
-                Timing::Auto => None,
-                Timing::Ntsc => Some(TimingMode::Ntsc),
-                Timing::Pal => Some(TimingMode::Pal),
-            },
-            ..SnesEmulatorConfig::default()
-        };
+        let config = emulator_config(timing, false);
         let emu = SnesEmulator::create(
             rom.clone(),
             config,
@@ -425,6 +438,28 @@ impl Game {
             self.dispatch_traps();
             if self.emu.at_instruction_boundary() && self.emu.next_tick_fetches_opcode() {
                 out.push((self.regs().pbr_pc(), self.emu.master_cycles()));
+            }
+            let effect = self
+                .emu
+                .tick(&mut self.video, &mut self.audio, &mut ConstantInputPoller(&inputs), &mut NoSave)
+                .expect("frontend sinks are infallible and there is no SRAM");
+            rendered |= effect == TickEffect::FrameRendered;
+        }
+        self.frame_count += 1;
+        out
+    }
+
+    /// [`Game::trace_frame`] with the PPU position (scanline, master cycles
+    /// into the line) at each fetch (oracle comparison, tools/oracle-mesen).
+    pub fn trace_frame_pos(&mut self, pads: Pads) -> Vec<(u32, u16, u64)> {
+        let inputs = SnesInputs { p1: joypad(pads.p1), p2: joypad(pads.p2) };
+        let mut out = Vec::with_capacity(120_000);
+        let mut rendered = false;
+        while !(rendered && self.emu.at_instruction_boundary()) {
+            self.dispatch_traps();
+            if self.emu.at_instruction_boundary() && self.emu.next_tick_fetches_opcode() {
+                let (line, h) = self.emu.ppu_position();
+                out.push((self.regs().pbr_pc(), line, h));
             }
             let effect = self
                 .emu
@@ -734,6 +769,27 @@ impl Game {
 
     pub fn frame_count(&self) -> u64 {
         self.frame_count
+    }
+
+    /// Master clocks since power-on (debug: oracle traces).
+    pub fn master_cycles(&self) -> u64 {
+        self.emu.master_cycles()
+    }
+
+    /// Start (`true`) or stop recording SPC700 instruction starts on this thread
+    /// (debug: oracle traces). [`Game::spc_trace_take`] drains them.
+    pub fn spc_trace(on: bool) {
+        snes_core::api::SPC_TRACE.with(|t| *t.borrow_mut() = on.then(Vec::new));
+    }
+
+    /// The SPC700 instruction starts recorded so far, `(PC, SPC cycle since thread start)`.
+    pub fn spc_trace_take() -> Vec<(u16, u64)> {
+        snes_core::api::SPC_TRACE.with(|t| t.borrow_mut().as_mut().map(std::mem::take).unwrap_or_default())
+    }
+
+    /// PPU position `(scanline, master clocks into the line)` (debug: oracle traces).
+    pub fn ppu_position(&self) -> (u16, u64) {
+        self.emu.ppu_position()
     }
 
     /// [`Game::call_isolated_ret`] for a routine entered by `JSL` (ends in `RTL`).

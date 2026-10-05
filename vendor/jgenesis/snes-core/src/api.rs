@@ -1,6 +1,7 @@
 //! SNES public interface and main loop
 
 use crate::apu::{Apu, ApuTickEffect};
+pub use crate::apu::{SPC_CYCLES, SPC_TRACE}; // mmxrs patch: SPC700 trace (debug)
 use crate::audio::AudioResampler;
 use crate::bus::Bus;
 use crate::input::SnesInputs;
@@ -29,6 +30,9 @@ use wdc65816_emu::traits::BusInterface;
 
 const MEMORY_REFRESH_MCLK: u64 = 536;
 const MEMORY_REFRESH_CYCLES: u64 = 40;
+
+// mmxrs patch: master clocks between power-on/reset and the CPU's first cycle
+const CPU_STARTUP_MCLK: u64 = 186;
 
 const CRC: Crc<u32> = Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
 
@@ -138,6 +142,9 @@ macro_rules! new_bus {
             latched_interrupts: $self.latched_interrupts,
             access_master_cycles: 0,
             pending_write: None,
+            apu_sync: false,
+            apu_pre_ticked: 0,
+            apu_sample: None,
         }
     };
 }
@@ -292,8 +299,29 @@ impl SnesEmulator {
 
         // Reset CPU so that execution starts from the right place
         emulator.main_cpu.reset(&mut new_bus!(emulator));
+        emulator.run_startup_delay(); // mmxrs patch
 
         Ok(emulator)
+    }
+
+    /// mmxrs patch: the CPU leaves reset `CPU_STARTUP_MCLK` master clocks after the
+    /// PPU, APU and timers start (as Mesen 2 has it): run everything but the CPU for
+    /// that long. Without it the game's whole frame timing is shifted by those clocks
+    /// against hardware from power-on. docs/oracle.md.
+    fn run_startup_delay(&mut self) {
+        let n = CPU_STARTUP_MCLK;
+        let mut done = 0;
+        while done < n {
+            let step = 2.min(n - done);
+            if let ApuTickEffect::OutputSample(l, r) = self.apu.tick(step) {
+                self.audio_resampler.collect_sample(l, r);
+            }
+            self.memory.tick(step);
+            let _ = self.ppu.tick(step);
+            self.cpu_registers.tick(step, &self.ppu, &SnesInputs::default());
+            self.total_master_cycles += step;
+            done += step;
+        }
     }
 
     // mmxrs patch begin: hooks for mmx-core (routine traps, co-op, inspection)
@@ -365,6 +393,12 @@ impl SnesEmulator {
     #[must_use]
     pub fn master_cycles(&self) -> u64 {
         self.total_master_cycles
+    }
+
+    /// mmxrs patch: PPU position `(scanline, master cycles into the line)` (debug: oracle traces).
+    #[must_use]
+    pub fn ppu_position(&self) -> (u16, u64) {
+        (self.ppu.scanline(), self.ppu.scanline_master_cycles())
     }
 
     #[must_use]
@@ -628,13 +662,16 @@ impl EmulatorTrait for SnesEmulator {
         I: InputPoller<Self::Inputs>,
         S: SaveWriter,
     {
+        let mut apu_pre: (u64, Option<(f64, f64)>) = (0, None); // mmxrs patch
         let (master_cycles_elapsed, pending_write) = if self.memory_refresh_pending {
             // The CPU (including DMA) halts for 40 cycles partway through every scanline so that
             // the system can refresh DRAM (used for work RAM)
             self.memory_refresh_pending = false;
+            self.dma_unit.exclude_refresh(MEMORY_REFRESH_CYCLES); // mmxrs patch
             (MEMORY_REFRESH_CYCLES, None)
         } else {
             let mut bus = new_bus!(self);
+            bus.apu_sync = true; // mmxrs patch
             // mmxrs patch: overclock; DMA aligns its end to the scaled CPU cycle
             let oc = self.cpu_overclock;
             let next_mclk = bus::next_cpu_cycle_mclk(&self.main_cpu);
@@ -650,6 +687,7 @@ impl EmulatorTrait for SnesEmulator {
                     self.latched_interrupts = None;
 
                     bus.cpu_registers.tick_cpu_cycle();
+                    apu_pre = (bus.apu_pre_ticked, bus.apu_sample); // mmxrs patch
 
                     (oc.scale(bus.access_master_cycles), bus.pending_write)
                 }
@@ -676,8 +714,12 @@ impl EmulatorTrait for SnesEmulator {
             self.ppu.update_controller_hv_latch(h, v, master_cycles_elapsed);
         }
 
+        // mmxrs patch: minus the part of the cycle a CPU read of the APU ports already ran
+        if let Some((l, r)) = apu_pre.1 {
+            self.audio_resampler.collect_sample(l, r);
+        }
         if let ApuTickEffect::OutputSample(sample_l, sample_r) =
-            self.apu.tick(master_cycles_elapsed)
+            self.apu.tick(master_cycles_elapsed - apu_pre.0.min(master_cycles_elapsed))
         {
             self.audio_resampler.collect_sample(sample_l, sample_r);
         }
@@ -772,6 +814,7 @@ impl EmulatorTrait for SnesEmulator {
         self.cpu_registers.reset();
         self.ppu.reset();
         self.apu.reset();
+        self.run_startup_delay(); // mmxrs patch
     }
 
     fn hard_reset<S: SaveWriter>(&mut self, save_writer: &mut S) {

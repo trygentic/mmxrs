@@ -93,11 +93,13 @@ mod tests {
                     arc = Some(f - 1);
                 }
             }
-            (pcm, starts, arc.expect("arc pose"), g.zero_set().and_then(|z| z.sounds.clone()))
+            (pcm, starts, arc.expect("arc pose"), g.zero_set().and_then(|z| z.sounds.clone()), g.fps())
         };
-        let (with, starts, arc, snd) = run(true);
-        let (without, _, _, _) = run(false);
-        let w: Vec<f32> = snd.unwrap().swing.pcm.iter().map(|&x| f32::from(x) / 32768.0).collect();
+        let (with, starts, arc, snd, fps) = run(true);
+        let (without, _, _, _, _) = run(false);
+        let snd = snd.unwrap();
+        let snd_ref = &snd.swing;
+        let w: Vec<f32> = snd.swing.pcm.iter().map(|&x| f32::from(x) / 32768.0).collect();
         let w = &w[..8000]; // the first quarter second: the sweep up
         let corr = |x: &[f32]| {
             let (d, n) = (x.iter().zip(w).map(|(a, b)| a * b).sum::<f32>(), x.iter().map(|a| a * a).sum::<f32>());
@@ -109,7 +111,22 @@ mod tests {
         assert_eq!(frame, arc, "whoosh found at sample {lag}");
         let diff: Vec<f32> = with.iter().zip(&without).map(|(a, b)| a - b).collect();
         assert!(diff[..starts[arc]].iter().all(|&d| d == 0.0), "nothing before the arc");
-        // Not 1.0: the mixer resamples 639.9 sample frames (PAL) onto 640.
-        assert!(corr(&diff[starts[arc]..starts[arc] + w.len()]) > 0.95);
+        // The whoosh as the mixer lays it onto those frames (639.9 source samples
+        // per PAL frame stretched onto each frame's 639-641 output samples): the
+        // difference must be exactly that. (Was: corr with the raw sample > 0.95,
+        // which depends on where the resampler's 639/641-sample frames fall.)
+        let mut expect = vec![(0.0f32, 0.0f32); with.len() - starts[arc]];
+        let (mut ages, mut at) = ([1u16, 0], 0);
+        for f in arc..starts.len() {
+            let end = starts.get(f + 1).copied().unwrap_or(with.len()) - starts[arc];
+            mix(&mut ages, snd_ref, fps, &mut expect[at..end]);
+            at = end;
+        }
+        let expect: Vec<f32> = expect.iter().map(|&(l, r)| (l + r) / 2.0).collect();
+        let d = &diff[starts[arc]..];
+        let err = d.iter().zip(&expect).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(err < 1e-4, "difference is not the mixed whoosh: max error {err}");
+        // And it is the sample itself, to within the per-frame stretch.
+        assert!(corr(&diff[starts[arc]..starts[arc] + w.len()]) > 0.9);
     }
 }

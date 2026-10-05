@@ -8,6 +8,7 @@ use wdc65816_emu::traits::BusInterface;
 
 const CHANNELS: usize = 8;
 
+
 // Bus B (8-bit) is mapped to $2100-$21FF in Bus A (24-bit)
 const BUS_B_BASE_ADDRESS: u32 = 0x002100;
 
@@ -385,6 +386,14 @@ impl DmaUnit {
         self.gpdma = GpDmaState::Idle;
         let cycles = self.end_dma_if_done(bus, total_master_cycles, next_cpu_cycle_mclk);
         DmaStatus::InProgress { master_cycles_elapsed: cycles }
+    }
+
+    /// mmxrs patch: a DRAM refresh during DMA does not count towards the DMA's
+    /// length for the end alignment (bsnes and Mesen 2 count DMA clocks only).
+    pub fn exclude_refresh(&mut self, mclk: u64) {
+        if self.dma_active {
+            self.dma_start_mclk += mclk;
+        }
     }
 
     #[must_use]
