@@ -33,7 +33,8 @@ DIVERGENCE frame=812 region=WRAM addr=$7E:0BAD expected=$34 actual=$35 last_trap
 export MMX_ROM=~/roms/mmx.sfc              # your own dump; never committed
 cargo xtask rominfo                        # title / version / sha256 / crc32
 cargo xtask verify --frames 3600           # zero input
-cargo xtask verify --movie run.bk2         # BizHawk; .lsmv (lsnes) also works
+cargo xtask verify --movie run.bk2         # BizHawk; .lsmv (lsnes) and .smv (Snes9x 1.43) also work
+cargo xtask movie --movie run.bk2 --wide 16:9 --twin   # play a movie, check widescreen (docs/widescreen-coverage.md)
 cargo xtask dump --frames 600 --out shots/ --at 60,300,600
 cargo xtask ledger                         # ports.toml progress
 ```

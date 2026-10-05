@@ -1,6 +1,7 @@
 //! `cargo xtask <verify|dump|ledger|rominfo|stateinfo|..>`. Plain `std::env::args`.
 //! All fs lives here, never in the libs.
 
+mod movie;
 mod net;
 
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use mmx_core::{ram, Game, Pads};
 use mmx_verify::{movie_bk2, CompareOpts, Lockstep};
 
 const USAGE: &str = "usage: cargo xtask <command>
-  verify [--movie F.bk2|F.lsmv] [--frames N] [--no-frame] [--coop-off] [--tap F,..] [--hold HEX] [--p2-hold HEX]
+  verify [--movie F.bk2|F.lsmv|F.smv] [--frames N] [--no-frame] [--coop-off] [--tap F,..] [--hold HEX] [--p2-hold HEX]
   trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..] [--calls] [--pcs FILE]   bank histogram of frame N's opcode fetches (--pcs: every PC to FILE)
   cooptrace --frame F [script] [--phase 2] [--dump PREFIX]   P1 vs P2 player update (phase 2: terrain phase $81:9D67); --dump: PREFIX.p1/.p2 PCs
   lagdiff --frames N [script] [--refill] [--untrap HEX,..] [--dump A-B]   solo vs co-op (P2 idle): first real-time
@@ -22,6 +23,11 @@ const USAGE: &str = "usage: cargo xtask <command>
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
        --wide off|16:10|16:9|21:9|N: widescreen PNGs (docs/widescreen.md); --overclock off|1.5|2: CPU overclock (default off;
        also bench, verify (oracle and DUT), netsim, bginfo, trace)
+  movie --movie F.bk2|F.lsmv|F.smv [--movie-offset N[@F],..] [--frames N] [--wide W] [--twin] [--out DIR] [--png-every N]
+       [--pict-every N] [--log-every N] [--at F,..] [--save-every N --save-dir DIR] [--wram-fill HEX] [--load STATE] [--poke ..] [--refill] [script]
+       play a movie (lag frames included, wide gameplay refused, overclock off unless given); --twin: a widescreen-off game
+       alongside, WRAM/OAM/CGRAM/VRAM compared every frame; margin residency check on when wide; picture checks; PNGs at
+       mode changes, deaths, boss bars, pauses; DIR/segments.md per stage (docs/widescreen-coverage.md)
   bench --frames N [script] [--load STATE] [--x3 PATH] [--zero] [--coop] [--wide W] [--wide-gameplay] [--overclock off|1.5|2] [--warmup N] [--csv PATH]
        release wall time per step: mean / p99 / max, overall and on frames with 3+ live enemies;
        MMX_PROFILE=1 adds the per-phase breakdown (trap bodies by name, margin passes, take_audio). docs/widescreen.md \"Performance\"
@@ -45,6 +51,7 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("verify") => verify(&args[1..]),
         Some("dump") => dump(&args[1..]),
+        Some("movie") => movie::movie(&args[1..]),
         Some("bench") => bench(&args[1..]),
         Some("trace") => trace(&args[1..]),
         Some("cooptrace") => cooptrace(&args[1..]),
@@ -164,13 +171,54 @@ fn game(rom: Vec<u8>) -> Game {
     Game::from_rom_timing(rom, timing).unwrap_or_else(|e| die(&format!("ROM rejected: {e}")))
 }
 
+/// `--movie F.bk2|F.lsmv|F.smv` (one entry per video frame, lag frames
+/// included), shifted by `--movie-offset N` (N > 0: N idle frames first;
+/// N < 0: drop the movie's first -N frames). Movies with resets or that
+/// start from a save state are refused (no reset in `Game`).
 fn movie(args: &[String]) -> Vec<Pads> {
     let Some(path) = flag(args, "--movie") else { return Vec::new() };
     let bytes = std::fs::read(path).unwrap_or_else(|e| die(&format!("{path}: {e}")));
-    let m = if path.ends_with(".lsmv") { movie_bk2::parse_lsmv(&bytes) } else { movie_bk2::parse_bk2(&bytes) };
+    let m = if path.ends_with(".lsmv") {
+        movie_bk2::parse_lsmv(&bytes)
+    } else if path.ends_with(".smv") {
+        movie_bk2::parse_smv(&bytes)
+    } else {
+        movie_bk2::parse_bk2(&bytes)
+    };
     let m = m.unwrap_or_else(|e| die(&format!("{path}: {e}")));
-    eprintln!("movie: {path}: {} frames, platform {:?}, rerecords {}", m.pads.len(), m.platform, m.rerecords);
-    m.pads
+    let rom = m.rom_crc32.map(|c| format!(", ROM {:?} crc32 {c:08x}", m.rom_name)).unwrap_or_default();
+    let sha = if m.sha1.is_empty() { String::new() } else { format!(", ROM sha1 {}", m.sha1.to_lowercase()) };
+    eprintln!("movie: {path}: {} frames, platform {:?}, rerecords {}{rom}{sha}", m.pads.len(), m.platform, m.rerecords);
+    if m.from_snapshot {
+        die("movie starts from a save state, not power-on: cannot play it");
+    }
+    if let Some(r) = m.resets.first() {
+        die(&format!("movie presses Reset at frame {r} ({} resets): not supported", m.resets.len()));
+    }
+    let mut pads = m.pads;
+    // `--movie-offset N[@F],..`: at movie frame F (default 0) insert N idle
+    // frames (N > 0) or drop -N frames (N < 0); applied from the last F down.
+    let mut shifts: Vec<(usize, i64)> = flag(args, "--movie-offset")
+        .map(|s| {
+            s.split(',')
+                .map(|t| {
+                    let (n, f) = t.split_once('@').unwrap_or((t, "0"));
+                    let bad = || -> ! { die(&format!("--movie-offset: want N[@FRAME], got {t}")) };
+                    (f.trim().parse().unwrap_or_else(|_| bad()), n.trim().parse().unwrap_or_else(|_| bad()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    shifts.sort_unstable();
+    for &(f, n) in shifts.iter().rev() {
+        let f = f.min(pads.len());
+        if n > 0 {
+            pads.splice(f..f, std::iter::repeat_n(Pads::default(), n as usize));
+        } else {
+            pads.drain(f..(f + n.unsigned_abs() as usize).min(pads.len()));
+        }
+    }
+    pads
 }
 
 /// `--tap F,..` (Start on pad 1 for 4 frames at each), `--hold HEX`, `--p2-hold HEX`,
@@ -367,6 +415,50 @@ fn bench(args: &[String]) -> i32 {
     0
 }
 
+/// `--poke ADDR=VAL@A[-B],..` (write WRAM byte ADDR, hex e.g. 7E1FAE, before
+/// frames A..=B) and `--refill` (QA cheat: a living X kept at max HP; pits
+/// still kill), applied before each step.
+struct Pokes {
+    pokes: Vec<(usize, u8, usize, usize)>,
+    refill: bool,
+}
+
+impl Pokes {
+    fn parse(args: &[String]) -> Pokes {
+        let pokes = flag(args, "--poke")
+            .map(|s| {
+                s.split(',')
+                    .map(|t| {
+                        let bad = || -> ! { die(&format!("--poke: want ADDR=VAL@A[-B], got {t}")) };
+                        let (av, fr) = t.split_once('@').unwrap_or_else(|| bad());
+                        let (a, v) = av.split_once('=').unwrap_or_else(|| bad());
+                        let (fa, fb) = fr.split_once('-').unwrap_or((fr, fr));
+                        let h = |x: &str| u32::from_str_radix(x.trim(), 16).unwrap_or_else(|_| bad());
+                        let d = |x: &str| x.trim().parse::<usize>().unwrap_or_else(|_| bad());
+                        (ram::wram_index(h(a)), h(v) as u8, d(fa), d(fb))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Pokes { pokes, refill: args.iter().any(|a| a == "--refill") }
+    }
+
+    fn apply(&self, g: &mut Game, f: usize) {
+        for &(a, v, fa, fb) in &self.pokes {
+            if (fa..=fb).contains(&f) {
+                g.wram_mut()[a] = v;
+            }
+        }
+        if self.refill {
+            let w = g.wram_mut();
+            let (hp, max) = (ram::wram_index(ram::X_HP), w[ram::wram_index(ram::MAX_HP)] & 0x7F);
+            if (1..max).contains(&(w[hp] & 0x7F)) {
+                w[hp] = max;
+            }
+        }
+    }
+}
+
 fn dump(args: &[String]) -> i32 {
     let frames = num(args, "--frames").unwrap_or_else(|| die("dump needs --frames N"));
     let out = PathBuf::from(flag(args, "--out").unwrap_or_else(|| die("dump needs --out DIR")));
@@ -398,23 +490,7 @@ fn dump(args: &[String]) -> i32 {
         g.set_p1_zero(true).unwrap_or_else(|e| die(&format!("--zero: {e}")));
     }
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("{}: {e}", out.display())));
-    let refill = args.iter().any(|a| a == "--refill");
-    // `--poke ADDR=VAL@A[-B],..`: write WRAM byte ADDR (hex, e.g. 7E1FAE) before frames A..=B.
-    let pokes: Vec<(usize, u8, usize, usize)> = flag(args, "--poke")
-        .map(|s| {
-            s.split(',')
-                .map(|t| {
-                    let bad = || -> ! { die(&format!("--poke: want ADDR=VAL@A[-B], got {t}")) };
-                    let (av, fr) = t.split_once('@').unwrap_or_else(|| bad());
-                    let (a, v) = av.split_once('=').unwrap_or_else(|| bad());
-                    let (fa, fb) = fr.split_once('-').unwrap_or((fr, fr));
-                    let h = |x: &str| u32::from_str_radix(x.trim(), 16).unwrap_or_else(|_| bad());
-                    let d = |x: &str| x.trim().parse::<usize>().unwrap_or_else(|_| bad());
-                    (ram::wram_index(h(a)), h(v) as u8, d(fa), d(fb))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let pokes = Pokes::parse(args);
     // `--wav PATH`: the run's audio (`take_audio`, 32 kHz) as 16-bit stereo WAV.
     // `--apu`: per frame, the DSP's sounding voices; SPC RAM at each `--at` frame (`.spc`).
     let apu = args.iter().any(|a| a == "--apu");
@@ -425,19 +501,7 @@ fn dump(args: &[String]) -> i32 {
     let mut wav = Vec::new();
     g.set_audio_rate(32_000);
     for f in 1..=frames {
-        for &(a, v, fa, fb) in &pokes {
-            if (fa..=fb).contains(&f) {
-                g.wram_mut()[a] = v;
-            }
-        }
-        if refill {
-            // QA cheat: keep a living X at max HP (pits still kill).
-            let w = g.wram_mut();
-            let (hp, max) = (ram::wram_index(ram::X_HP), w[ram::wram_index(ram::MAX_HP)] & 0x7F);
-            if (1..max).contains(&(w[hp] & 0x7F)) {
-                w[hp] = max;
-            }
-        }
+        pokes.apply(&mut g, f);
         g.step(script(f, inputs.get(f - 1).copied().unwrap_or_default()));
         wav.extend(g.take_audio());
         if apu {

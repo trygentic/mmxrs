@@ -1,5 +1,6 @@
-//! Movie parsers: BizHawk `.bk2` and lsnes `.lsmv`, both zips. Bytes in,
-//! `Vec<Pads>` out (mmx-core auto-read layout).
+//! Movie parsers: BizHawk `.bk2` and lsnes `.lsmv` (both zips) and Snes9x
+//! `.smv` (binary). Bytes in, `Vec<Pads>` out (mmx-core auto-read layout),
+//! one entry per emulated video frame, lag frames included.
 //!
 //! `.bk2` `Input Log.txt`:
 //! ```text
@@ -11,6 +12,14 @@
 //! Columns follow `LogKey` (each `#` opens a `|cell|`); a cell char other
 //! than `.`/space means pressed. `.lsmv` `input`: `F.|BYsSudlrAXLR|...`,
 //! whose 12 pad chars are already in auto-read bit order 15..4.
+//!
+//! `.smv` (Snes9x 1.43 "version 1"; snes9x-rr adds ROM info): 32-byte header
+//! (`SMV\x1A`, version 1, uid, rerecords, frames, controller mask, options
+//! bit 0 = from power-on / bit 1 = PAL, sync flags, savestate offset, input
+//! offset), then per frame one little-endian `u16` per controller in the
+//! mask, already in auto-read layout (`B` = bit 15). The block holds the
+//! header's frame count plus one (the power-on frame). A frame whose words
+//! are all `$FFFF` is a reset.
 
 use std::io::{Cursor, Read};
 
@@ -26,6 +35,16 @@ pub struct Movie {
     /// bk2 `SyncSettings.json`, raw.
     pub sync_settings: String,
     pub pads: Vec<Pads>,
+    /// Frames (0-based) at which the movie presses Reset (bk2 `Reset`
+    /// column, smv all-`$FFFF` frames). Callers must honour or refuse them.
+    pub resets: Vec<usize>,
+    /// smv: the ROM's CRC32 and internal name when the movie records them.
+    pub rom_crc32: Option<u32>,
+    pub rom_name: String,
+    /// smv: recorded on a PAL console / starts from a save state instead of
+    /// power-on (a snapshot movie cannot be played from power-on).
+    pub pal: bool,
+    pub from_snapshot: bool,
 }
 
 fn button_bit(name: &str) -> u16 {
@@ -58,6 +77,7 @@ fn parse_logkey(key: &str) -> Vec<Vec<(u8, u16)>> {
                 .map(|b| match b.split_once(' ') {
                     Some(("P1", n)) => (1, button_bit(n)),
                     Some(("P2", n)) => (2, button_bit(n)),
+                    _ if b == "Reset" => (3, 0),
                     _ => (0, 0),
                 })
                 .collect()
@@ -77,8 +97,14 @@ fn open(bytes: &[u8]) -> Result<zip::ZipArchive<Cursor<&[u8]>>, String> {
 
 /// Parse `Input Log.txt` text (exposed for tests and for loose logs).
 pub fn parse_bk2_input_log(text: &str) -> Result<Vec<Pads>, String> {
+    parse_bk2_log(text).map(|(p, _)| p)
+}
+
+/// `Input Log.txt` -> (pads, frames with Reset pressed).
+fn parse_bk2_log(text: &str) -> Result<(Vec<Pads>, Vec<usize>), String> {
     let mut cells = parse_logkey(DEFAULT_LOGKEY);
     let mut pads = Vec::new();
+    let mut resets = Vec::new();
     for (n, line) in text.lines().enumerate() {
         let line = line.trim_start_matches('\u{feff}').trim_end();
         if let Some(key) = line.strip_prefix("LogKey:") {
@@ -101,21 +127,24 @@ pub fn parse_bk2_input_log(text: &str) -> Result<Vec<Pads>, String> {
                     match player {
                         1 => p.p1 |= bit,
                         2 => p.p2 |= bit,
-                        _ => {} // ponytail: Reset/Power ignored
+                        3 => resets.push(pads.len()),
+                        _ => {} // ponytail: Power ignored
                     }
                 }
             }
         }
         pads.push(p);
     }
-    Ok(pads)
+    resets.dedup();
+    Ok((pads, resets))
 }
 
 /// Parse a BizHawk `.bk2` archive.
 pub fn parse_bk2(bytes: &[u8]) -> Result<Movie, String> {
     let mut zip = open(bytes)?;
     let log = read_member(&mut zip, "Input Log.txt").ok_or("bk2: no `Input Log.txt`")?;
-    let mut m = Movie { pads: parse_bk2_input_log(&log)?, ..Movie::default() };
+    let (pads, resets) = parse_bk2_log(&log)?;
+    let mut m = Movie { pads, resets, ..Movie::default() };
     for line in read_member(&mut zip, "Header.txt").unwrap_or_default().lines() {
         let (k, v) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
         match k {
@@ -155,6 +184,50 @@ pub fn parse_lsmv(bytes: &[u8]) -> Result<Movie, String> {
         pads: parse_lsmv_input(&input),
         ..Movie::default()
     })
+}
+
+/// Parse a Snes9x `.smv` (version 1, as written by Snes9x 1.43 and
+/// snes9x-rr 1.43 v15+; later versions use other layouts and are refused).
+pub fn parse_smv(bytes: &[u8]) -> Result<Movie, String> {
+    let u32_at = |o: usize| bytes.get(o..o + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    if bytes.len() < 0x20 || &bytes[..4] != b"SMV\x1a" {
+        return Err("smv: no `SMV\\x1A` signature".into());
+    }
+    let version = u32_at(4);
+    if version != 1 {
+        return Err(format!("smv: version {version} (only Snes9x 1.43's version 1 is supported)"));
+    }
+    let (mask, options, sync) = (bytes[0x14], bytes[0x15], bytes[0x17]);
+    let input = u32_at(0x1C) as usize;
+    let ports: Vec<u8> = (0..5).filter(|k| mask >> k & 1 != 0).collect();
+    if ports.is_empty() || input < 0x20 || input > bytes.len() {
+        return Err(format!("smv: controller mask {mask:#04x}, input offset {input:#x}"));
+    }
+    let mut m = Movie {
+        platform: "SNES (Snes9x 1.43 smv)".into(),
+        rerecords: u64::from(u32_at(0x0C)),
+        pal: options & 2 != 0,
+        from_snapshot: options & 1 == 0,
+        ..Movie::default()
+    };
+    // snes9x-rr: sync flag $40 = 30 bytes of ROM info (3 zero bytes, CRC32,
+    // 23-byte name) right before the input block.
+    if sync & 0x40 != 0 && input >= 0x20 + 30 {
+        let r = &bytes[input - 30..input];
+        m.rom_crc32 = Some(u32::from_le_bytes([r[3], r[4], r[5], r[6]]));
+        m.rom_name = String::from_utf8_lossy(&r[7..]).trim_end_matches(['\0', ' ']).to_string();
+    }
+    for (f, chunk) in bytes[input..].chunks_exact(2 * ports.len()).enumerate() {
+        let words: Vec<u16> = chunk.chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]])).collect();
+        if words.iter().all(|&w| w == 0xFFFF) {
+            m.resets.push(f);
+            m.pads.push(Pads::default());
+            continue;
+        }
+        let pad = |port: u8| ports.iter().position(|&p| p == port).map_or(0, |i| words[i] & 0xFFF0);
+        m.pads.push(Pads { p1: pad(0), p2: pad(1) });
+    }
+    Ok(m)
 }
 
 #[cfg(test)]
@@ -214,6 +287,47 @@ LogKey:#Reset|Power|#P1 Up|P1 Down|P1 Left|P1 Right|P1 Select|P1 Start|P1 Y|P1 B
     fn bk2_missing_log_is_an_error() {
         assert!(parse_bk2(&make_zip(&[("Header.txt", "")])).is_err());
         assert!(parse_bk2(b"not a zip").is_err());
+    }
+
+    fn smv(mask: u8, options: u8, words: &[u16]) -> Vec<u8> {
+        let mut v = b"SMV\x1a".to_vec();
+        v.extend(1u32.to_le_bytes());
+        v.extend(0x1234u32.to_le_bytes()); // uid
+        v.extend(99u32.to_le_bytes()); // rerecords
+        v.extend((words.len() as u32).to_le_bytes());
+        v.extend([mask, options, 0, 0x41]); // sync: data exists + ROM info
+        v.extend(0u32.to_le_bytes()); // savestate offset
+        v.extend(((0x20 + 30) as u32).to_le_bytes());
+        v.extend([0, 0, 0]);
+        v.extend(0xDED5_3C64u32.to_le_bytes());
+        let mut name = b"MEGAMAN X".to_vec();
+        name.resize(23, 0);
+        v.extend(name);
+        for w in words {
+            v.extend(w.to_le_bytes());
+        }
+        v
+    }
+
+    #[test]
+    fn smv_input() {
+        // one controller: Start, B+Right, a reset frame, nothing
+        let m = parse_smv(&smv(1, 1, &[0x1000, 0x8100, 0xFFFF, 0])).unwrap();
+        assert_eq!(m.pads.iter().map(|p| p.p1).collect::<Vec<_>>(), vec![BTN_START, BTN_B | BTN_RIGHT, 0, 0]);
+        assert_eq!((m.resets.clone(), m.rerecords, m.rom_crc32, m.rom_name.as_str()), (vec![2], 99, Some(0xDED5_3C64), "MEGAMAN X"));
+        assert!(!m.pal && !m.from_snapshot);
+        // two controllers interleaved per frame; the low nibble (not buttons) dropped
+        let m = parse_smv(&smv(3, 3, &[BTN_A, BTN_Y | 0x000F, 0, BTN_L])).unwrap();
+        assert_eq!(m.pads, vec![Pads { p1: BTN_A, p2: BTN_Y }, Pads { p1: 0, p2: BTN_L }]);
+        assert!(m.pal && !m.from_snapshot);
+        assert!(parse_smv(b"SMV\x1a\x04\0\0\0").is_err());
+        assert!(parse_smv(b"not a movie at all, not at all, no").is_err());
+    }
+
+    #[test]
+    fn bk2_reset_column() {
+        let log = "LogKey:#Reset|Power|#P1 B|\n|..|.|\n|r.|B|\n|..|.|\n";
+        assert_eq!(parse_bk2_log(log).unwrap(), (vec![Pads::default(), Pads { p1: BTN_B, p2: 0 }, Pads::default()], vec![1]));
     }
 
     #[test]
