@@ -16,7 +16,7 @@ Bring your own ROM: nothing from the cartridge is in this repository. See
 | path | what |
 |---|---|
 | `docs/PLAN.md` | the plan and the `mmx-core` contract; read first |
-| `vendor/jgenesis/` | forked SNES core crates, every change marked `mmxrs patch` |
+| shared Trygentic jgenesis | pinned GPL-3.0-only SNES core, including MMX and LTTP host hooks; see [shared-core development](docs/shared-core.md) |
 | `crates/mmx-core` | `Game`: emulator wrapper, trap table, RAM map, co-op |
 | `crates/mmx-verify` | lockstep oracle-vs-DUT compare, `.bk2` movies |
 | `crates/mmx-net` | rollback / lockstep netplay protocol (from z2rs), WebRTC via matchbox |
