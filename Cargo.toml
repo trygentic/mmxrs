@@ -11,7 +11,7 @@ members = [
     "crates/mmx-launcher",
 ]
 # Vendored matchbox_socket is a path dependency, not a workspace member.
-# jgenesis is now an immutable Git dependency from RecompArch.
+# jgenesis is now an immutable Git dependency from the Trygentic jgenesis fork.
 exclude = ["vendor"]
 
 # matchbox_socket 0.14.0 (MIT OR Apache-2.0) with three small patches, each

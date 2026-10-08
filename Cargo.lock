@@ -196,7 +196,7 @@ dependencies = [
 [[package]]
 name = "arm7tdmi-emu"
 version = "0.14.1"
-source = "git+ssh://git@github.com/trygentic/RecompArch.git?rev=dd7efd1cbd5a246a72a64e6bfed225292741c42a#dd7efd1cbd5a246a72a64e6bfed225292741c42a"
+source = "git+https://github.com/trygentic/jgenesis.git?rev=f39748c2e704b1d27b00f5e0aaac1f133fc14c19#f39748c2e704b1d27b00f5e0aaac1f133fc14c19"
 dependencies = [
  "bincode",
  "jgenesis-common",
@@ -1495,7 +1495,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 [[package]]
 name = "dsp"
 version = "0.14.1"
-source = "git+ssh://git@github.com/trygentic/RecompArch.git?rev=dd7efd1cbd5a246a72a64e6bfed225292741c42a#dd7efd1cbd5a246a72a64e6bfed225292741c42a"
+source = "git+https://github.com/trygentic/jgenesis.git?rev=f39748c2e704b1d27b00f5e0aaac1f133fc14c19#f39748c2e704b1d27b00f5e0aaac1f133fc14c19"
 dependencies = [
  "bincode",
  "log",
@@ -2787,7 +2787,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "jgenesis-common"
 version = "0.14.1"
-source = "git+ssh://git@github.com/trygentic/RecompArch.git?rev=dd7efd1cbd5a246a72a64e6bfed225292741c42a#dd7efd1cbd5a246a72a64e6bfed225292741c42a"
+source = "git+https://github.com/trygentic/jgenesis.git?rev=f39748c2e704b1d27b00f5e0aaac1f133fc14c19#f39748c2e704b1d27b00f5e0aaac1f133fc14c19"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -2804,7 +2804,7 @@ dependencies = [
 [[package]]
 name = "jgenesis-proc-macros"
 version = "0.14.1"
-source = "git+ssh://git@github.com/trygentic/RecompArch.git?rev=dd7efd1cbd5a246a72a64e6bfed225292741c42a#dd7efd1cbd5a246a72a64e6bfed225292741c42a"
+source = "git+https://github.com/trygentic/jgenesis.git?rev=f39748c2e704b1d27b00f5e0aaac1f133fc14c19#f39748c2e704b1d27b00f5e0aaac1f133fc14c19"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5234,7 +5234,7 @@ dependencies = [
 [[package]]
 name = "snes-config"
 version = "0.14.1"
-source = "git+ssh://git@github.com/trygentic/RecompArch.git?rev=dd7efd1cbd5a246a72a64e6bfed225292741c42a#dd7efd1cbd5a246a72a64e6bfed225292741c42a"
+source = "git+https://github.com/trygentic/jgenesis.git?rev=f39748c2e704b1d27b00f5e0aaac1f133fc14c19#f39748c2e704b1d27b00f5e0aaac1f133fc14c19"
 dependencies = [
  "bincode",
  "jgenesis-common",
@@ -5244,7 +5244,7 @@ dependencies = [
 [[package]]
 name = "snes-coprocessors"
 version = "0.14.1"
-source = "git+ssh://git@github.com/trygentic/RecompArch.git?rev=dd7efd1cbd5a246a72a64e6bfed225292741c42a#dd7efd1cbd5a246a72a64e6bfed225292741c42a"
+source = "git+https://github.com/trygentic/jgenesis.git?rev=f39748c2e704b1d27b00f5e0aaac1f133fc14c19#f39748c2e704b1d27b00f5e0aaac1f133fc14c19"
 dependencies = [
  "arm7tdmi-emu",
  "bincode",
@@ -5260,7 +5260,7 @@ dependencies = [
 [[package]]
 name = "snes-core"
 version = "0.14.1"
-source = "git+ssh://git@github.com/trygentic/RecompArch.git?rev=dd7efd1cbd5a246a72a64e6bfed225292741c42a#dd7efd1cbd5a246a72a64e6bfed225292741c42a"
+source = "git+https://github.com/trygentic/jgenesis.git?rev=f39748c2e704b1d27b00f5e0aaac1f133fc14c19#f39748c2e704b1d27b00f5e0aaac1f133fc14c19"
 dependencies = [
  "bincode",
  "crc",
@@ -5299,7 +5299,7 @@ dependencies = [
 [[package]]
 name = "spc700-emu"
 version = "0.14.1"
-source = "git+ssh://git@github.com/trygentic/RecompArch.git?rev=dd7efd1cbd5a246a72a64e6bfed225292741c42a#dd7efd1cbd5a246a72a64e6bfed225292741c42a"
+source = "git+https://github.com/trygentic/jgenesis.git?rev=f39748c2e704b1d27b00f5e0aaac1f133fc14c19#f39748c2e704b1d27b00f5e0aaac1f133fc14c19"
 dependencies = [
  "bincode",
  "jgenesis-common",
@@ -6243,7 +6243,7 @@ dependencies = [
 [[package]]
 name = "wdc65816-emu"
 version = "0.14.1"
-source = "git+ssh://git@github.com/trygentic/RecompArch.git?rev=dd7efd1cbd5a246a72a64e6bfed225292741c42a#dd7efd1cbd5a246a72a64e6bfed225292741c42a"
+source = "git+https://github.com/trygentic/jgenesis.git?rev=f39748c2e704b1d27b00f5e0aaac1f133fc14c19#f39748c2e704b1d27b00f5e0aaac1f133fc14c19"
 dependencies = [
  "bincode",
  "jgenesis-common",

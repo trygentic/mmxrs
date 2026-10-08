@@ -1,7 +1,7 @@
 # Legal posture
 
 - mmxrs is licensed GPL-3.0-only (see LICENSE) because it links the shared jgenesis
-  emulator core (GPL-3.0-only) from trygentic/RecompArch, pinned in Cargo.lock.
+  emulator core (GPL-3.0-only) from trygentic/jgenesis, pinned in Cargo.lock.
   Its full license, provenance and modifications live under `cores/jgenesis/`
   in that repository. Binary distributions must include or offer the exact
   corresponding core and MMX source, not just a private Git dependency URL.
