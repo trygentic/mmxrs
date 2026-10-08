@@ -1,7 +1,10 @@
 # Legal posture
 
-- mmxrs is licensed GPL-3.0-only (see LICENSE) because it forks the jgenesis
-  emulator core (GPL-3.0) into `vendor/jgenesis`.
+- mmxrs is licensed GPL-3.0-only (see LICENSE) because it links the shared jgenesis
+  emulator core (GPL-3.0-only) from trygentic/RecompArch, pinned in Cargo.lock.
+  Its full license, provenance and modifications live under `cores/jgenesis/`
+  in that repository. Binary distributions must include or offer the exact
+  corresponding core and MMX source, not just a private Git dependency URL.
 - No Capcom-owned bytes are in this repository: no ROM, no graphics, no music,
   no text, no test fixtures derived from them. Bring your own Mega Man X (USA)
   cartridge dump and point `MMX_ROM` at it. Tools refuse to copy it into the tree.

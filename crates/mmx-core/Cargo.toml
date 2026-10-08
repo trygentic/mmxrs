@@ -6,10 +6,10 @@ license.workspace = true
 description = "Mega Man X game core: jgenesis SNES emulator wrapper, routine traps, RAM map, co-op"
 
 [dependencies]
-snes-core = { path = "../../vendor/jgenesis/snes-core" }
-wdc65816-emu = { path = "../../vendor/jgenesis/wdc65816-emu" }
-jgenesis-common = { path = "../../vendor/jgenesis/jgenesis-common" }
-snes-config = { path = "../../vendor/jgenesis/snes-config" }
+snes-core = { git = "ssh://git@github.com/trygentic/RecompArch.git", rev = "dd7efd1cbd5a246a72a64e6bfed225292741c42a" }
+wdc65816-emu = { git = "ssh://git@github.com/trygentic/RecompArch.git", rev = "dd7efd1cbd5a246a72a64e6bfed225292741c42a" }
+jgenesis-common = { git = "ssh://git@github.com/trygentic/RecompArch.git", rev = "dd7efd1cbd5a246a72a64e6bfed225292741c42a" }
+snes-config = { git = "ssh://git@github.com/trygentic/RecompArch.git", rev = "dd7efd1cbd5a246a72a64e6bfed225292741c42a" }
 bincode = "2"
 # RollbackGame trait for netgame.rs; mmx-net has no dependencies by default.
 mmx-net = { path = "../mmx-net" }
