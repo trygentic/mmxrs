@@ -41,9 +41,10 @@ pub struct Movie {
     /// smv: the ROM's CRC32 and internal name when the movie records them.
     pub rom_crc32: Option<u32>,
     pub rom_name: String,
-    /// smv: recorded on a PAL console / starts from a save state instead of
-    /// power-on (a snapshot movie cannot be played from power-on).
+    /// smv: recorded on a PAL console.
     pub pal: bool,
+    /// Starts from a save state instead of power-on (a snapshot movie
+    /// cannot be played from power-on).
     pub from_snapshot: bool,
 }
 
@@ -151,6 +152,13 @@ pub fn parse_bk2(bytes: &[u8]) -> Result<Movie, String> {
             "Platform" => m.platform = v.to_string(),
             "rerecordCount" => m.rerecords = v.trim().parse().unwrap_or(0),
             "SHA1" => m.sha1 = v.to_string(),
+            "StartsFromSavestate" => {
+                m.from_snapshot = match v.trim().to_ascii_lowercase().as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err("bk2: invalid StartsFromSavestate flag".into()),
+                };
+            }
             _ => {}
         }
     }
@@ -178,10 +186,14 @@ pub fn parse_lsmv_input(text: &str) -> Vec<Pads> {
 pub fn parse_lsmv(bytes: &[u8]) -> Result<Movie, String> {
     let mut zip = open(bytes)?;
     let input = read_member(&mut zip, "input").ok_or("lsmv: no `input` member")?;
+    let from_snapshot = zip.file_names().any(|name| name == "savestate");
     Ok(Movie {
         platform: read_member(&mut zip, "gametype").unwrap_or_default().trim().to_string(),
         rerecords: read_member(&mut zip, "rerecords").and_then(|s| s.trim().parse().ok()).unwrap_or(0),
         pads: parse_lsmv_input(&input),
+        // lsnes's archive format identifies saved-state playback by this
+        // member, independently of the frame input log.
+        from_snapshot,
         ..Movie::default()
     })
 }
@@ -287,6 +299,22 @@ LogKey:#Reset|Power|#P1 Up|P1 Down|P1 Left|P1 Right|P1 Select|P1 Start|P1 Y|P1 B
     fn bk2_missing_log_is_an_error() {
         assert!(parse_bk2(&make_zip(&[("Header.txt", "")])).is_err());
         assert!(parse_bk2(b"not a zip").is_err());
+    }
+
+    #[test]
+    fn snapshot_archives_are_identified() {
+        for (value, expected) in [("True", true), ("False", false)] {
+            let header = format!("StartsFromSavestate {value}\n");
+            let bytes = make_zip(&[("Header.txt", &header), ("Input Log.txt", LOG)]);
+            assert_eq!(parse_bk2(&bytes).unwrap().from_snapshot, expected);
+        }
+        let bytes = make_zip(&[("Header.txt", "StartsFromSavestate unknown\n"), ("Input Log.txt", LOG)]);
+        assert!(parse_bk2(&bytes).is_err());
+        let input = "F.|............|\n";
+        let bytes = make_zip(&[("input", input), ("savestate", "binary state")]);
+        assert!(parse_lsmv(&bytes).unwrap().from_snapshot);
+        let bytes = make_zip(&[("input", input)]);
+        assert!(!parse_lsmv(&bytes).unwrap().from_snapshot);
     }
 
     fn smv(mask: u8, options: u8, words: &[u16]) -> Vec<u8> {

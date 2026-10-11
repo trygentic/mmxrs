@@ -86,18 +86,42 @@ fn page_path(sheet_dir: &Path, name: &str) -> Result<PathBuf, String> {
 pub fn load_sheet(path: &Path) -> Result<BoneSheet, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let json: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let render_scale = match json.get("render_scale") {
+        Some(value) => u8::try_from(number(value, "render_scale")?).map_err(|_| "bad render_scale")?,
+        None => 1,
+    };
+    let source_faces_right = match json.get("source_facing") {
+        None => None,
+        Some(value) => Some(match value.as_str() {
+            Some("right") => true,
+            Some("left") => false,
+            _ => return Err("source_facing must be right or left".into()),
+        }),
+    };
     let sheet_dir = path.parent().ok_or("sheet has no parent folder")?;
     let page_values = field(&json, "pages")?.as_array().ok_or("pages must be an array")?;
     let mut pages = Vec::new();
     for page in page_values {
         let name = field(page, "file")?.as_str().ok_or("page.file must be a path")?;
-        pages.push(png_page(&page_path(sheet_dir, name)?)?);
+        let decoded = png_page(&page_path(sheet_dir, name)?)?;
+        if let Some(size) = page.get("size") {
+            let size = size.as_array().ok_or("page.size must be [width,height]")?;
+            if size.len() != 2 || number(&size[0], "page.size")? != decoded.width
+                || number(&size[1], "page.size")? != decoded.height {
+                return Err(format!("{name}: page.size does not match PNG dimensions"));
+            }
+        }
+        pages.push(decoded);
     }
     let animations = field(&json, "animations")?.as_array().ok_or("animations must be an array")?;
     let mut clips = Vec::new();
     for animation in animations {
         let name = field(animation, "name")?.as_str().ok_or("animation.name must be text")?;
         let fps = field(animation, "fps")?.as_f64().ok_or("animation.fps must be a number")? as f32;
+        let looped = match animation.get("looped") {
+            Some(value) => value.as_bool().ok_or("animation.looped must be true or false")?,
+            None => true,
+        };
         let frame_values = field(animation, "frames")?.as_array().ok_or("animation.frames must be an array")?;
         let mut frames = Vec::new();
         for frame in frame_values {
@@ -126,11 +150,42 @@ pub fn load_sheet(path: &Path) -> Result<BoneSheet, String> {
             }
             frames.push(BoneFrame { width, height, pivot, rgba });
         }
-        clips.push(BoneClip { name: name.to_string(), fps, frames });
+        clips.push(BoneClip { name: name.to_string(), fps, looped, frames });
     }
-    let sheet = BoneSheet { clips };
+    let sheet = BoneSheet { clips, render_scale, source_faces_right };
     sheet.validate()?;
     Ok(sheet)
+}
+
+fn saber_contacts(json: &Value, character: Character, sheet_sha256: &str) -> Result<(f32, Vec<Option<mmx_core::saber::HitBox>>), String> {
+    if json.get("format").and_then(Value::as_str) != Some("mmxrs-saber-contacts-v1")
+        || json.get("character").and_then(Value::as_str) != Some(character.id())
+        || json.get("clip").and_then(Value::as_str) != Some("attack")
+        || json.get("coordinate_origin").and_then(Value::as_str) != Some("foot_pivot")
+    { return Err("invalid saber contact metadata format or coordinate space".into()); }
+    if !json.get("sheet_sha256").and_then(Value::as_str).is_some_and(|s| s.eq_ignore_ascii_case(sheet_sha256)) {
+        return Err("saber contacts do not match the loaded sheet hash".into());
+    }
+    let fps = field(json, "fps")?.as_f64().ok_or("bad saber contact fps")?;
+    if !fps.is_finite() || fps <= 0.0 || fps > 240.0 { return Err("bad saber contact fps".into()); }
+    let values = field(json, "frames")?.as_array().ok_or("saber contact frames must be an array")?;
+    let mut boxes = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        if value.get("index").and_then(Value::as_u64) != Some(index as u64) {
+            return Err("saber contact frames must be contiguous and ordered".into());
+        }
+        let bounds = field(value, "bounds")?;
+        if bounds.is_null() { boxes.push(None); continue; }
+        let a = bounds.as_array().filter(|a| a.len() == 4).ok_or("bad saber contact bounds")?;
+        let mut b = [0_i16; 4];
+        for (i, v) in a.iter().enumerate() {
+            b[i] = i16::try_from(v.as_i64().ok_or("saber bounds must be integer game pixels")?)
+                .map_err(|_| "saber bounds outside i16 range")?;
+            if i == 1 || i == 3 { b[i] = b[i].checked_add(16).ok_or("saber bounds overflow after pivot conversion")?; }
+        }
+        boxes.push(Some(mmx_core::saber::HitBox::from_bounds(b).ok_or("invalid saber contact rectangle")?));
+    }
+    Ok((fps as f32, boxes))
 }
 
 pub fn install(game: &mut Game, root: &Path, characters: &[Character]) -> Result<usize, String> {
@@ -150,6 +205,18 @@ pub fn install(game: &mut Game, root: &Path, characters: &[Character]) -> Result
         }
         let sheet = load_sheet(&path)?;
         game.set_bone_sheet(character, sheet).map_err(|e| format!("{}: {e}", path.display()))?;
+        let contacts = root.join(id).join(format!("{id}.saber_contacts.json"));
+        if contacts.is_file() {
+            use sha2::{Digest, Sha256};
+            let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let sheet_hash = crate::headless::hex(&Sha256::digest(bytes));
+            let metadata: Value = serde_json::from_str(&std::fs::read_to_string(&contacts).map_err(|e| format!("{}: {e}", contacts.display()))?)
+                .map_err(|e| format!("{}: {e}", contacts.display()))?;
+            let (fps, boxes) = saber_contacts(&metadata, character, &sheet_hash)
+                .map_err(|e| format!("{}: {e}", contacts.display()))?;
+            game.set_saber_contact_boxes(character, fps, boxes)
+                .map_err(|e| format!("{}: {e}", contacts.display()))?;
+        }
         loaded += 1;
     }
     if loaded == 0 { return Err(format!("no selected character sheets found in {}", root.display())); }
@@ -175,6 +242,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn saber_contacts_convert_foot_pivot_and_reject_stale_or_invalid_metadata() {
+        let mut json = serde_json::json!({
+            "format":"mmxrs-saber-contacts-v1", "character":"zero", "clip":"attack",
+            "coordinate_origin":"foot_pivot", "sheet_sha256":"abcd", "fps":60,
+            "frames":[{"index":0,"bounds":[5,-20,29,-2]},{"index":1,"bounds":null}]
+        });
+        let (fps, boxes) = saber_contacts(&json, Character::Zero, "abcd").unwrap();
+        assert_eq!(fps, 60.0);
+        assert_eq!(boxes, vec![mmx_core::saber::HitBox::from_bounds([5,-4,29,14]), None]);
+        assert!(saber_contacts(&json, Character::Zero, "stale").is_err());
+        assert!(saber_contacts(&json, Character::Sigma, "abcd").is_err());
+        json["frames"][1]["index"] = serde_json::json!(0);
+        assert!(saber_contacts(&json, Character::Zero, "abcd").is_err());
+        json["frames"][1]["index"] = serde_json::json!(1);
+        json["frames"][0]["bounds"] = serde_json::json!([0,32760,10,32767]);
+        assert!(saber_contacts(&json, Character::Zero, "abcd").is_err());
+    }
+
+    #[test]
     fn decodes_cropped_rgba_and_local_pivot() {
         let dir = std::env::temp_dir().join(format!("mmx-bone-sheet-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -192,6 +278,43 @@ mod tests {
         let sheet = load_sheet(&json_path).unwrap();
         assert_eq!(sheet.clips[0].frames[0].rgba, [4,5,6,128]);
         assert_eq!(sheet.clips[0].frames[0].pivot, [-1,3]);
+        assert_eq!(sheet.render_scale, 1);
+        assert_eq!(sheet.source_faces_right, None);
+        assert!(sheet.clips[0].looped);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn high_resolution_sheet_keeps_pixels_pivots_direction_and_one_shot_timing() {
+        let dir = std::env::temp_dir().join(format!("mmx-hd-sheet-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pixels: Vec<u8> = (0..16).flat_map(|n| [n, 10, 20, 255]).collect();
+        let file = std::fs::File::create(dir.join("page.png")).unwrap();
+        let mut encoder = png::Encoder::new(file, 4, 4);
+        encoder.set_color(png::ColorType::Rgba); encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+        let mut json = serde_json::json!({
+            "format":"bae-sheet", "version":1, "render_scale":4, "source_facing":"right",
+            "pages":[{"file":"page.png", "size":[4,4]}],
+            "animations":[{"name":"idle", "fps":60, "looped":false,
+                "frames":[{"page":0,"rect":[0,0,4,4],"pivot":[2,4]}]}]
+        });
+        let path = dir.join("test.sheet.json");
+        std::fs::write(&path, json.to_string()).unwrap();
+        let sheet = load_sheet(&path).unwrap();
+        assert_eq!(sheet.render_scale, 4);
+        assert_eq!(sheet.source_faces_right, Some(true));
+        assert_eq!(sheet.clips[0].fps, 60.0);
+        assert!(!sheet.clips[0].looped);
+        assert_eq!(sheet.clips[0].frames[0].pivot, [2,4]);
+        assert_eq!(sheet.clips[0].frames[0].rgba, pixels, "loader must not reduce source detail");
+        json["render_scale"] = serde_json::json!(3);
+        std::fs::write(&path, json.to_string()).unwrap();
+        assert!(load_sheet(&path).unwrap_err().contains("render_scale"));
+        json["render_scale"] = serde_json::json!(4);
+        json["source_facing"] = serde_json::json!("up");
+        std::fs::write(&path, json.to_string()).unwrap();
+        assert!(load_sheet(&path).unwrap_err().contains("source_facing"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

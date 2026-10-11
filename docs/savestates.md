@@ -9,6 +9,12 @@ writes, in order:
 3. `COOP` + `u32` LE length + bincode `CoopState`: P2's shadow block
    (`$0BA8..`), scratch, hidden/down/revive, saber, shots/effects/pickup
    bookkeeping, P1-as-Zero swing.
+4. Optional `XTRA` + bincode `[CoopState; 2]` for players 3 and 4.
+5. Optional `VS01` + bincode `VsState` for local versus mode.
+6. `SHP1` + bincode `(bool, Option<u8>)`: whether the current shot was
+   initializing and which extra player owns its pending callback. A frame
+   can end between the ROM shot update and its completion hook; these fields
+   keep shoulder launches and owner-block restoration deterministic after load.
 
 Loading keeps the frontend's settings in `CoopState` (co-op on/off, P1 as
 Zero, P2's palette) and takes everything else from the state. Not saved: the
@@ -20,7 +26,8 @@ it) loads with a default `CoopState`: P2 is hidden and re-anchors beside P1
 when it next shows. Older tile markers still load: `P2T6` (four pages and one
 extra palette), `P2T5` (no P2 palette: none until the next
 OAM build fills it), `P2T4`..`P2T2`, none.
-A truncated `COOP` tail is an error. Rollback states (`net_save`) are the
+States without `SHP1` reset pending shot callbacks to `(false, None)`.
+A truncated `COOP` or `SHP1` tail is an error. Rollback states (`net_save`) are the
 same bytes; `NET_REVISION` 3 marks the change (6 the P2 palette).
 
 ## Sending a slot with a bug report

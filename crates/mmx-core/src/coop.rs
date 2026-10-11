@@ -228,7 +228,7 @@ pub struct CoopState {
     /// X3 Zero frame whose tiles are in the PPU's P2 page (`u16::MAX`: none
     /// yet). Only used with `Game::set_zero_set`.
     pub zero_frame: u16,
-    /// P2's saber swing (X3 set only), see `saber.rs`.
+    /// This shadow player's saber swing (Zero or Sigma), see `saber.rs`.
     pub saber: crate::saber::Saber,
     /// Wave frame in shadow page 2 per player (`[P2, P1]`; `u16::MAX`: none).
     pub wave_frames: [u16; 2],
@@ -395,6 +395,7 @@ fn local_update(game: &mut Game) {
 }
 
 fn local_physics(game: &mut Game) {
+    if !game.local_slice { crate::saber::take_back(game); }
     p2_physics(game);
     if game.local_slice { return; }
     for index in 0..game.local_players.saturating_sub(2).min(2) {
@@ -482,9 +483,10 @@ fn p2_update(game: &mut Game) {
     // actions then resolve as with no input: it stops, lands and stands.
     let locked = coop_stages::p1_scripted(game.wram());
     let mut pad = if locked { 0 } else { word(game.wram(), PAD2_HELD) & !(BTN_START | BTN_SELECT) };
-    if game.current_shadow_is_zero() {
+    if crate::saber::uses_saber(game.player_characters[game.local_player_index]) {
         // X swings the saber; during a swing the ROM gets a masked pad.
-        pad = crate::saber::update(&mut game.coop.saber, &game.coop.p2, pad);
+        let duration = crate::saber::duration(game, game.local_player_index);
+        pad = crate::saber::update_timed(&mut game.coop.saber, &game.coop.p2, pad, duration);
         if crate::saber::whoosh(&game.coop.saber) {
             game.coop.sfx[crate::sfx::P2] = 1;
         }
@@ -553,6 +555,9 @@ pub const HOOK_SHOT_SLOT_DONE: HookId = HookId::ShotSlotDone;
 /// P1's block, P2's shots came out of X, flew X's way, and took from P1's
 /// count (B3 had patched only the count).
 fn local_shot_slot(game: &mut Game) {
+    let at = usize::from(game.regs().d);
+    game.active_shot_initial = (ix(X_SHOTS)..ix(X_SHOTS) + 8 * 0x40).contains(&at)
+        && game.wram()[at] != 0 && game.wram()[at + 1] == 0;
     game.active_shot_extra = None;
     if !p2_shot_slot(game) {
         let k = game.regs().d.wrapping_sub(X_SHOTS as u16) / 0x40;
@@ -569,7 +574,7 @@ fn local_shot_slot(game: &mut Game) {
     shot_slot(game);
 }
 
-fn local_shot_slot_done(game: &mut Game) {
+pub(crate) fn local_shot_slot_done(game: &mut Game) {
     if let Some(index) = game.active_shot_extra.take() {
         with_extra_player(game, index, shot_slot_done);
     } else {
@@ -583,6 +588,10 @@ fn shot_slot(game: &mut Game) {
         swap_block(game.wram_mut(), &mut p2);
         game.coop.p2 = p2;
     }
+    let player = if game.coop.enabled && p2_shot_slot(game) { game.local_player_index } else { 0 };
+    if game.player_characters[player] == crate::Character::Vile {
+        crate::character_combat::prepare_shoulder_blast(game);
+    }
 }
 
 /// The slot's update is done (or it was inactive): Zero's muzzle, then P1's
@@ -592,6 +601,8 @@ fn shot_slot_done(game: &mut Game) {
     if (p2 && game.current_shadow_is_zero()) || (!p2 && game.p1_zero()) {
         zero_muzzle(game);
     }
+    let character = game.player_characters[if p2 { game.local_player_index } else { 0 }];
+    if character == crate::Character::Vile { crate::character_combat::shoulder_muzzle(game); }
     if p2 {
         let mut p2 = game.coop.p2;
         swap_block(game.wram_mut(), &mut p2);
@@ -649,7 +660,6 @@ fn shot_books(game: &mut Game) {
 /// enemy loops. Without it P2 kept a stale ground flag (`$0BD3` bit 2) and
 /// "landed" at the apex of every jump. Then [`follow`].
 fn p2_physics(game: &mut Game) {
-    crate::saber::take_back(game); // both players' swings
     if !game.coop.enabled {
         return;
     }

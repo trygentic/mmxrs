@@ -29,19 +29,22 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Returns the WRAM sha256 hex after `args.frames` frames.
 pub fn run(game: &mut Game, args: &Args) -> Result<String, String> {
-    if args.movie.is_some() {
-        // ponytail: TODO wire mmx-verify's bk2 parser here once it exists.
-        return Err("--movie is not implemented yet (needs mmx-verify's bk2 parser)".into());
-    }
+    let mut movie = if args.movie_route { None } else { crate::movie::Playback::load(args)? };
+    let mut route = if args.movie_route { Some(crate::movie_route::RoutePlayback::load(args)?) } else { None };
     let mut bots = args.demo_bots.then(DemoBots::default);
     for f in 1..=args.frames {
+        if args.demo_survival { game.maintain_demo_survival(); }
         if let Some(bots) = bots.as_ref() {
             bots.maintain_party(game);
         }
-        let inputs = match bots.as_mut() {
+        let inputs = if let Some(route) = route.as_mut() {
+            route.next(game)
+        } else if let Some(movie) = movie.as_mut() {
+            movie.next(game)
+        } else { match bots.as_mut() {
             Some(bots) => bots.pads(game),
             None => [args.hold, args.p2_hold, args.p3_hold, args.p4_hold],
-        };
+        }};
         if args.showcase_characters {
             if let Some((group, characters)) = bots.as_ref().and_then(DemoBots::showcase_selection) {
                 for (slot, character) in characters.into_iter().enumerate() {
@@ -57,17 +60,16 @@ pub fn run(game: &mut Game, args: &Args) -> Result<String, String> {
         let _ = game.take_audio(); // drain so it doesn't pile up
         for (_, path) in args.dump_at.iter().filter(|(at, _)| *at == f) {
             let (px, w, h) = game.frame();
-            if args.dynamic_lighting || args.charge_effects {
+            {
                 let mut rgba: Vec<u8> = px.iter().take(w * h).flat_map(|p| [
                     (p >> 16) as u8, (p >> 8) as u8, *p as u8, 255,
                 ]).collect();
                 crate::effects::apply(&mut rgba, w, h, game, args.dynamic_lighting, args.charge_effects);
+                game.draw_ui_rgba(&mut rgba, w, h);
                 let effected: Vec<u32> = rgba.chunks_exact(4).map(|p| {
                     (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2])
                 }).collect();
                 write_png(path, &effected, w, h)?;
-            } else {
-                write_png(path, px, w, h)?;
             }
             eprintln!("frame {f}: wrote {path} ({w}x{h})");
         }

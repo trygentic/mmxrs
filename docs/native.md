@@ -193,8 +193,57 @@ mmxrs --headless --frames 600 [--rom mmx.sfc] [--dump-at 300=a.png,600=b.png]
 
 Holds the pad masks (SNES auto-read layout, `0x8000` B ... `0x0010` R; hex or
 decimal) every frame, writes RGB PNGs of `Game::frame()` after the listed
-frames, and prints `frames N wram_sha256 <hex>`. `--movie F.bk2` is parsed but
-rejected until `mmx-verify`'s bk2 parser exists (TODO).
+frames, and prints `frames N wram_sha256 <hex>`.
+
+`--movie F.bk2|F.lsmv|F.smv` replays recorded inputs in both desktop and
+headless runners. Movies must start from power-on and contain no resets.
+Playback passes opposing directions through and defaults to CPU overclock
+off. Wide gameplay, netplay, VS and scripted bots cannot be combined with
+movies. Match the movie's ROM revision and region for reliable replay.
+
+For experimental four-player replay, add `--movie-coop-delay 8` and select
+the characters. X follows P1's original track; the other players copy it
+8, 16 and 24 video frames later during gameplay. Menu and pause buttons stay
+on P1. Followers release controls outside gameplay and at movie end. This
+uses real co-op physics: damage, enemy interactions, spawn positions and
+extra CPU load can make a single-player movie diverge.
+
+`--movie-smart` (`--movie-route` is an alias) enables the Highway replay harness. It
+precomputes the movie's first-stage solo route, then steers the live players
+toward delayed waypoints and retries jumps when they get stuck. Knockback
+freezes the affected player's route cursor; after recovery, the harness
+reacquires a nearby normal waypoint and resets jump and attack timing. Bots
+also aim at live enemies rather than assuming the movie has killed them. It uses
+ordinary controller inputs, so collisions and damage remain live. It stops
+at the end of the first stage; later stages are not supported by this mode.
+The default spacing is 8, 16 and 24 source frames. During movie co-op, Zero
+and Sigma replace buster fire with saber swings. Vile fires one maximum-charge X
+blast from his shoulder, with at least 120 video frames between shots, with its native animation tinted yellow and its
+full-charge collision, speed and damage. Weapon collision uses logical game
+pixels even when the sprites are rendered at HD scale.
+Save/load hotkeys are disabled while replaying because game states do not
+include the playback cursor.
+
+Example with [Hetfield90's tool-assisted input movie](https://tasvideos.org/3197M)
+(download the emulator replay from that page into the ignored `movies/` directory):
+
+```sh
+cargo run -p mmx-native --release -- \
+  --rom "roms/Mega Man X (USA) (Rev 1).sfc" \
+  --movie movies/hetfield90v3-megamanx-100p.bk2 --movie-smart --demo-survival \
+  --p1-character x --p2-character zero --p3-character sigma --p4-character vile \
+  --bone-sheets roms/derived/bone_sheets --widescreen 16:9 \
+  --dynamic-lighting --charge-effects
+```
+
+The movie was authored on USA v1.0. The local Rev 1 dump can provide the
+Highway route but should not be treated as a fully synchronized TAS replay.
+Credit the original player and identify footage driven by their inputs as
+tool-assisted when sharing it.
+
+The desktop and headless renderers composite health, weapon and boss meters
+after dynamic lighting and charge particles. UI remains at full brightness
+at both the native and HD render scales.
 
 ## Timing (PAL dumps)
 
@@ -203,3 +252,8 @@ at 50.007 fps like a PAL console, with slower music. `--timing ntsc` forces
 60.0988 fps (the code is the same as USA v1.0); `--timing pal` forces 50. The
 choice is part of the netplay handshake, so both players must use the same.
 `cargo xtask rominfo` prints the region.
+
+For assisted footage, `--demo-survival` restores low health on living players
+and shortens downed followers' ordinary revive wait to 30 frames. Pit deaths
+still use the ROM and co-op respawn logic. Scripted scenes and versus mode
+are not changed by the assist. Omit this flag for normal damage and revive timing.

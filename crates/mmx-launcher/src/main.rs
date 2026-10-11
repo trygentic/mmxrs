@@ -209,7 +209,7 @@ impl App {
             .on_hover_text("enemies spawn, act and leave 136-160 px further out on both sides, whatever the widescreen setting; online, both players must tick it");
         ui.checkbox(&mut s.dynamic_lighting, "Multiply style dynamic lighting");
         ui.checkbox(&mut s.charge_effects, "Buster charge lighting and particles");
-        ui.checkbox(&mut s.bone_sheets, "60 FPS bone animation sheets");
+        ui.checkbox(&mut s.bone_sheets, "60 FPS generated character sprites");
         if s.bone_sheets {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut s.bone_sheets_path).desired_width(ui.available_width() - 92.0));
@@ -219,7 +219,7 @@ impl App {
                     }
                 }
             });
-            ui.weak("Bone Animation Editor sheet pack; missing clips use the game's sprites.");
+            ui.weak("Blender or bone animation sheet pack. Other characters keep their existing art; missing clips use the pack's idle pose.");
         }
         ui.separator();
 

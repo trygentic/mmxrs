@@ -234,6 +234,26 @@ pub fn draw_result(rgba: &mut [u8], width: usize, height: usize, status: mmx_cor
     c.text(ox + 74, 145, "START  NEXT ROUND", 1, 0x9DE5FF);
 }
 
+/// Result UI keeps its original game-pixel size above high-resolution art.
+pub fn draw_result_scaled(rgba: &mut [u8], width: usize, height: usize,
+                          status: mmx_core::vs::VsStatus, scale: u8) {
+    let scale = usize::from(scale.max(1));
+    if scale == 1 { return draw_result(rgba, width, height, status); }
+    if rgba.len() < width * height * 4 { return; }
+    let (w, h) = (width / scale, height / scale);
+    let mut overlay = vec![0; w * h * 4];
+    draw_result(&mut overlay, w, h, status);
+    for (i, pixel) in overlay.chunks_exact(4).enumerate() {
+        if pixel[3] == 0 { continue; }
+        let (x, y) = (i % w, i / w);
+        for yy in y * scale..(y + 1) * scale {
+            for xx in x * scale..(x + 1) * scale {
+                rgba[(yy * width + xx) * 4..][..4].copy_from_slice(pixel);
+            }
+        }
+    }
+}
+
 struct Canvas<'a> { rgba: &'a mut [u8], width: i32, height: i32 }
 
 impl Canvas<'_> {
@@ -357,5 +377,17 @@ mod tests {
         assert_eq!(select.cursors[0], 1);
         select.step([BTN_RIGHT, 0, 0, 0]);
         assert_eq!(select.cursors[0], 2);
+    }
+
+    #[test]
+    fn high_resolution_result_overlay_keeps_game_size() {
+        let status = mmx_core::vs::VsStatus { winner: Some(1), round_over: true,
+            scores: [0, 2, 1, 0], round: 3, players: 4 };
+        let (mut native, mut hd) = (vec![0; 256 * 224 * 4], vec![0; 1024 * 896 * 4]);
+        draw_result(&mut native, 256, 224, status);
+        draw_result_scaled(&mut hd, 1024, 896, status, 4);
+        for y in 0..896 { for x in 0..1024 {
+            assert_eq!(&hd[(y * 1024 + x) * 4..][..4], &native[(y / 4 * 256 + x / 4) * 4..][..4]);
+        } }
     }
 }

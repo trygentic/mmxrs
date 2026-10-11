@@ -18,6 +18,7 @@ netplay = ["mmx-net/matchbox"]
 [dependencies]
 mmx-core = { path = "../mmx-core" }
 mmx-net = { path = "../mmx-net" }
+mmx-verify = { path = "../mmx-verify" }
 winit = { version = "0.30", features = ["rwh_06"] }
 pixels = "0.15"
 cpal = "0.15"

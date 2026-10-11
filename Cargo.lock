@@ -3278,6 +3278,7 @@ dependencies = [
  "mmx-core",
  "mmx-net",
  "mmx-signal",
+ "mmx-verify",
  "objc2-foundation 0.3.2",
  "objc2-game-controller",
  "pixels",

@@ -1,4 +1,4 @@
-//! P2's Z-saber (only with the X3 Zero set loaded). See docs/zero.md
+//! Zero and Sigma's saber combat, independent of the selected sprite pack. See docs/zero.md
 //! "Playing as Zero".
 //!
 //! Swing: pad 2's X (`BTN_X`, unused by X1's default config) starts it when
@@ -33,8 +33,8 @@ use crate::{Game, BTN_LEFT, BTN_RIGHT, BTN_X};
 pub const HOOK_SHOTS_DONE: crate::hooks::HookId = crate::hooks::HookId::ShotsDone;
 const SHOTS: u32 = 0x7E1228;
 const SHOT_LEN: usize = 0x40;
-/// Shot id `+0A` whose damage the saber deals: 2 = X's fully charged buster
-/// shot (`$86:EEDB` row 3, the Highway enemies and Bee Blader: lemon 1,
+/// Shot id `+0A` whose damage the saber deals: X's charged-buster table
+/// entry 2 (`$86:EEDB` row 3, the Highway enemies and Bee Blader: lemon 1,
 /// half charge 2, full charge 4).
 pub const DAMAGE_ID: u8 = 2;
 /// The damage box, against Zero's drawn origin (`+05`, `+08 + (i8)+19 +
@@ -52,6 +52,21 @@ pub struct HitBox {
     pub half_w: u8,
     pub half_h: u8,
 }
+impl HitBox {
+    /// Logical game-pixel rectangle relative to the actor object origin when
+    /// facing right. Bounds are inclusive left/top, exclusive right/bottom.
+    pub fn from_bounds([left, top, right, bottom]: [i16; 4]) -> Option<Self> {
+        if right <= left || bottom <= top { return None; }
+        let width = i32::from(right) - i32::from(left);
+        let height = i32::from(bottom) - i32::from(top);
+        let half_w = (width + 1) / 2;
+        let half_h = (height + 1) / 2;
+        if half_w > 255 || half_h > 255 { return None; }
+        Some(Self { x: (i32::from(left) + half_w) as i16, y: (i32::from(top) + half_h) as i16,
+            half_w: half_w as u8, half_h: half_h as u8 })
+    }
+}
+
 pub const MARGIN: i16 = 8;
 pub const BOX_GROUND: HitBox = HitBox { x: 14, y: -12, half_w: 43, half_h: 35 };
 pub const BOX_AIR: HitBox = HitBox { x: 15, y: -10, half_w: 46, half_h: 37 };
@@ -144,17 +159,111 @@ pub fn frame(s: &Saber) -> Option<usize> {
     })
 }
 
+/// Per-frame contacts derived from the loaded green saber pixels, cached
+/// alongside the static art (never serialized into runtime save states).
+#[derive(Debug, Clone)]
+pub(crate) struct Profile {
+    pub fps: f32,
+    pub boxes: Vec<Option<HitBox>>,
+}
+
+impl Profile {
+    pub fn duration(&self, game_fps: f64) -> u8 {
+        (self.boxes.len() as f64 * game_fps / f64::from(self.fps)).ceil().clamp(1.0, 254.0) as u8
+    }
+    fn contact(&self, t: u8, game_fps: f64) -> Option<HitBox> {
+        if t == 0 { return None; }
+        let frame = (f64::from(t - 1) * f64::from(self.fps) / game_fps) as usize;
+        self.boxes.get(frame).copied().flatten()
+    }
+}
+
+pub(crate) fn profile(sheet: &crate::bone_animation::BoneSheet) -> Option<Profile> {
+    let clip = sheet.clips.iter().find(|c| c.name == "attack")?;
+    let right = sheet.source_faces_right.unwrap_or(false);
+    Some(Profile { fps: clip.fps, boxes: clip.frames.iter().map(|f| blade_box(f, sheet.render_scale, right)).collect() })
+}
+
+/// A connected emerald blade is much longer than the green chest details.
+/// Only that component contributes contact; cape, boots and the actor body
+/// never expand the damage rectangle. No detected blade means no HD contact.
+fn blade_box(frame: &crate::bone_animation::BoneFrame, scale: u8, source_right: bool) -> Option<HitBox> {
+    let width = usize::from(frame.width);
+    let height = usize::from(frame.height);
+    let green = |at: usize| {
+        let p = &frame.rgba[at * 4..at * 4 + 4];
+        p[3] >= 128 && p[1] >= 90 && u16::from(p[0]) * 2 < u16::from(p[1])
+            && u16::from(p[2]) * 5 < u16::from(p[1]) * 4
+    };
+    let mut visited = vec![false; width * height];
+    let mut best = None;
+    let mut best_count = 0;
+    for at in 0..width * height {
+        if visited[at] || !green(at) { continue; }
+        visited[at] = true;
+        let mut queue = vec![at];
+        let (mut minx, mut maxx, mut miny, mut maxy, mut count) = (width, 0, height, 0, 0);
+        while let Some(at) = queue.pop() {
+            let (x, y) = (at % width, at / width);
+            minx = minx.min(x); maxx = maxx.max(x); miny = miny.min(y); maxy = maxy.max(y); count += 1;
+            for next in [x.checked_sub(1).map(|x| y * width + x), (x + 1 < width).then_some(at + 1),
+                         y.checked_sub(1).map(|y| y * width + x), (y + 1 < height).then_some(at + width)].into_iter().flatten() {
+                if !visited[next] && green(next) { visited[next] = true; queue.push(next); }
+            }
+        }
+        if count > best_count && (maxx - minx).max(maxy - miny) >= usize::from(scale) * 20 {
+            best_count = count; best = Some((minx, maxx, miny, maxy));
+        }
+    }
+    let (minx, maxx, miny, maxy) = best?;
+    let scale = i32::from(scale);
+    let mut left = (minx as i32 - i32::from(frame.pivot[0])).div_euclid(scale);
+    let mut right = (maxx as i32 + 1 - i32::from(frame.pivot[0]) + scale - 1).div_euclid(scale);
+    if !source_right { (left, right) = (-right, -left); }
+    let top = (miny as i32 - i32::from(frame.pivot[1])).div_euclid(scale) + 16;
+    let bottom = (maxy as i32 + 1 - i32::from(frame.pivot[1]) + scale - 1).div_euclid(scale) + 16;
+    let half_w = ((right - left + 1) / 2).clamp(1, 255) as u8;
+    let half_h = ((bottom - top + 1) / 2).clamp(1, 255) as u8;
+    Some(HitBox { x: ((left + right) / 2) as i16, y: ((top + bottom) / 2) as i16, half_w, half_h })
+}
+
+pub(crate) fn contact(game: &Game, player: usize, s: &Saber) -> Option<HitBox> {
+    if s.hit { return None; }
+    let character = game.player_characters[player];
+    if let Some(profile) = game.saber_profiles.get(&character) { return profile.contact(s.t, game.fps()); }
+    arc(s).then_some(if s.air { BOX_AIR } else { BOX_GROUND })
+}
+
+pub(crate) fn duration(game: &Game, player: usize) -> Option<u8> {
+    game.saber_profiles.get(&game.player_characters[player]).map(|p| p.duration(game.fps()))
+}
+
+/// These characters use the same melee lifecycle and ROM enemy collision.
+pub const fn uses_saber(character: crate::Character) -> bool {
+    matches!(character, crate::Character::Zero | crate::Character::Sigma)
+}
+
 /// Called with the player's block and pad before its update: start /
 /// advance / end the swing, return the pad the ROM gets. Pure but for `s`.
 pub fn update(s: &mut Saber, obj: &[u8], pad: u16) -> u16 {
+    update_timed(s, obj, pad, None)
+}
+
+pub(crate) fn update_timed(s: &mut Saber, obj: &[u8], pad: u16, duration: Option<u8>) -> u16 {
     let action = obj[0x02];
     let x = pad & BTN_X != 0;
     let pressed = x && !s.btn;
     s.btn = x;
     let pad = pad & !BTN_X;
+    if s.t > 0 && (!s.air || matches!(action, 0x00 | 0x02 | 0x04 | 0x0A | 0x14)) && pad & crate::BTN_B != 0 {
+        // Jump has priority over a grounded attack. Let the original player
+        // routine perform the jump and terrain collision normally.
+        s.t = 0;
+        return pad;
+    }
     if s.t > 0 {
         s.t += 1;
-        if action == 0x0E || action == 0x0C || pose_index(s.t, s.air).is_none() {
+        if action == 0x0E || action == 0x0C || duration.map_or_else(|| pose_index(s.t, s.air).is_none(), |length| s.t > length) {
             s.t = 0; // hurt / dead / done
         }
     } else if pressed {
@@ -186,11 +295,15 @@ fn arc(s: &Saber) -> bool {
 /// The shot the swing puts into the table (`+05/+08` = the box centre, the
 /// box itself at [`BOX_AT`]; `+20` is set by the slot it goes to). Pure.
 pub fn shot_bytes(p2: &[u8], air: bool) -> [u8; SHOT_LEN] {
+    let b = if air { BOX_AIR } else { BOX_GROUND };
+    shot_with_box(p2, b, crate::zero::X3_Y_OFFSET)
+}
+
+fn shot_with_box(p2: &[u8], b: HitBox, y_offset: i16) -> [u8; SHOT_LEN] {
     let w = |o: usize| i16::from_le_bytes([p2[o], p2[o + 1]]);
     let right = p2[0x11] & 0x40 != 0;
-    let b = if air { BOX_AIR } else { BOX_GROUND };
     let x = w(OFF_POS_X).wrapping_add(if right { b.x } else { -b.x });
-    let y = w(OFF_POS_Y).wrapping_add(i16::from(p2[0x19] as i8)).wrapping_add(crate::zero::X3_Y_OFFSET).wrapping_add(b.y);
+    let y = w(OFF_POS_Y).wrapping_add(i16::from(p2[0x19] as i8)).wrapping_add(y_offset).wrapping_add(b.y);
     let mut s = [0u8; SHOT_LEN];
     s[0x00] = 1;
     s[0x0A] = DAMAGE_ID;
@@ -201,21 +314,37 @@ pub fn shot_bytes(p2: &[u8], air: bool) -> [u8; SHOT_LEN] {
     s
 }
 
+pub(crate) fn player_shot(game: &Game, player: usize, obj: &[u8], s: &Saber) -> Option<[u8; SHOT_LEN]> {
+    let box_ = contact(game, player, s)?;
+    let offset = if game.saber_profiles.contains_key(&game.player_characters[player]) { 0 } else { crate::zero::X3_Y_OFFSET };
+    Some(shot_with_box(obj, box_, offset))
+}
+
 /// [`HOOK_SHOTS_DONE`]: put each swing's arc shot (a Zero P1's, P2's) into
 /// a free slot for the enemy loop.
 pub fn shots_done(game: &mut Game) {
-    if game.zero_set.is_none() {
-        return;
-    }
-    if game.coop.p1.on && arc(&game.coop.p1.saber) {
+    if uses_saber(game.player_characters[0]) && contact(game, 0, &game.coop.p1.saber).is_some() {
         let b = ix(crate::ram::X_BASE);
-        let shot = shot_bytes(&game.wram()[b..b + crate::ram::X_BLOCK_LEN], game.coop.p1.saber.air);
+        let box_ = contact(game, 0, &game.coop.p1.saber).unwrap();
+        let offset = if game.saber_profiles.contains_key(&game.player_characters[0]) { 0 } else { crate::zero::X3_Y_OFFSET };
+        let shot = shot_with_box(&game.wram()[b..b + crate::ram::X_BLOCK_LEN], box_, offset);
         game.coop.p1.saber.slot = put_shot(game, &shot);
     }
     let c = &game.coop;
-    if c.enabled && !c.p2_hidden && arc(&c.saber) {
-        let shot = shot_bytes(&c.p2, c.saber.air);
+    if c.enabled && !c.p2_hidden && uses_saber(game.player_characters[1]) && contact(game, 1, &c.saber).is_some() {
+        let box_ = contact(game, 1, &c.saber).unwrap();
+        let offset = if game.saber_profiles.contains_key(&game.player_characters[1]) { 0 } else { crate::zero::X3_Y_OFFSET };
+        let shot = shot_with_box(&c.p2, box_, offset);
         game.coop.saber.slot = put_shot(game, &shot);
+    }
+    for index in 0..game.local_players.saturating_sub(2).min(2) {
+        let c = &game.extra_coop[index];
+        if c.enabled && !c.p2_hidden && uses_saber(game.player_characters[index + 2]) && contact(game, index + 2, &c.saber).is_some() {
+            let box_ = contact(game, index + 2, &c.saber).unwrap();
+            let offset = if game.saber_profiles.contains_key(&game.player_characters[index + 2]) { 0 } else { crate::zero::X3_Y_OFFSET };
+            let shot = shot_with_box(&c.p2, box_, offset);
+            game.extra_coop[index].saber.slot = put_shot(game, &shot);
+        }
     }
 }
 
@@ -236,7 +365,9 @@ fn put_shot(game: &mut Game, shot: &[u8; SHOT_LEN]) -> u8 {
 pub fn take_back(game: &mut Game) {
     let mut p1 = game.coop.p1.saber;
     let mut p2 = game.coop.saber;
-    for s in [&mut p1, &mut p2] {
+    let mut p3 = game.extra_coop[0].saber;
+    let mut p4 = game.extra_coop[1].saber;
+    for s in [&mut p1, &mut p2, &mut p3, &mut p4] {
         let k = std::mem::replace(&mut s.slot, 0xFF);
         if k != 0xFF {
             let o = ix(SHOTS) + usize::from(k) * SHOT_LEN;
@@ -247,11 +378,69 @@ pub fn take_back(game: &mut Game) {
     }
     game.coop.p1.saber = p1;
     game.coop.saber = p2;
+    game.extra_coop[0].saber = p3;
+    game.extra_coop[1].saber = p4;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ground_saber_jump_cancel_preserves_jump_direction_and_air_rules() {
+        let mut obj = [0; 0x90];
+        obj[2] = 0;
+        let mut ground = Saber { t: 20, air: false, ..Saber::default() };
+        let jump = crate::BTN_B | BTN_RIGHT;
+        assert_eq!(update_timed(&mut ground, &obj, jump, Some(49)), jump);
+        assert_eq!(ground.t, 0);
+        let mut air = Saber { t: 20, air: true, ..Saber::default() };
+        obj[2] = 0x06;
+        assert_eq!(update_timed(&mut air, &obj, jump, Some(49)), BTN_RIGHT);
+        assert_eq!(air.t, 21, "air swing should retain its existing input mask");
+        obj[2] = 0; // A landed air swing is grounded again.
+        assert_eq!(update_timed(&mut air, &obj, jump, Some(49)), jump);
+        assert_eq!(air.t, 0);
+    }
+
+    #[test]
+    fn hd_blade_contact_excludes_body_and_tracks_direction_and_pixel_scale() {
+        use crate::bone_animation::BoneFrame;
+        let mut rgba = vec![0; 100 * 64 * 4];
+        for y in 5..60 { for x in 20..46 {
+            let at = (y * 100 + x) * 4;
+            rgba[at..at + 4].copy_from_slice(&[110, 110, 110, 255]);
+        }}
+        // Short green chest details must not become an attack rectangle.
+        for y in 10..18 { for x in 25..30 {
+            let at = (y * 100 + x) * 4;
+            rgba[at..at + 4].copy_from_slice(&[0, 240, 80, 255]);
+        }}
+        let neutral = BoneFrame { width: 100, height: 64, pivot: [40, 60], rgba: rgba.clone() };
+        assert_eq!(blade_box(&neutral, 1, true), None);
+        for y in 20..24 { for x in 50..82 {
+            let at = (y * 100 + x) * 4;
+            rgba[at..at + 4].copy_from_slice(&[0, 240, 80, 255]);
+        }}
+        let blade = BoneFrame { rgba, ..neutral.clone() };
+        let box_ = blade_box(&blade, 1, true).unwrap();
+        assert!(box_.x - i16::from(box_.half_w) > 0, "cape/body enabled a rear hit");
+        assert!(box_.y + i16::from(box_.half_h) < 0, "legs enlarged the sword contact");
+        let mirrored = blade_box(&blade, 1, false).unwrap();
+        assert_eq!(mirrored.x, -box_.x);
+        assert_eq!((mirrored.y, mirrored.half_w, mirrored.half_h), (box_.y, box_.half_w, box_.half_h));
+        let mut hd = BoneFrame { width: 400, height: 256, pivot: [160, 240], rgba: vec![0; 400 * 256 * 4] };
+        for y in 0..256 { for x in 0..400 {
+            let src = (y / 4 * 100 + x / 4) * 4;
+            let dst = (y * 400 + x) * 4;
+            hd.rgba[dst..dst + 4].copy_from_slice(&blade.rgba[src..src + 4]);
+        }}
+        assert_eq!(blade_box(&hd, 4, true), Some(box_));
+        let profile = Profile { fps: 60.0, boxes: vec![None, Some(box_), None] };
+        assert_eq!(profile.contact(1, 60.0), None);
+        assert_eq!(profile.contact(2, 60.0), Some(box_));
+        assert_eq!(profile.contact(3, 60.0), None);
+    }
 
     #[test]
     fn saber_swing_ground_and_air() {

@@ -6,7 +6,8 @@ pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local|--players 1..4] [--vs] [--vs-stage ID] [--pads]
              [--p1-character ID] [--p2-character ID] [--p3-character ID] [--p4-character ID]
              [--dynamic-lighting] [--charge-effects] [--bone-sheets DIR] [--vile-sprite PNG]
-             [--demo-bots] [--showcase-characters]
+             [--demo-bots] [--showcase-characters] [--demo-survival]
+             [--movie PATH.bk2|PATH.lsmv|PATH.smv] [--movie-coop-delay N] [--movie-smart]
              [--widescreen off|16:10|16:9|21:9|auto|N] [--wide-gameplay] [--overclock off|1.5|2]
        mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
              [--ice 'stun:.. turn:.. username=U credential=C' | none]
@@ -24,9 +25,13 @@ past the original ones whatever the preset; changes the game, online both player
 many enemies (changes the game: online both players need the same); default 2, off restores
 the original slowdown. --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
 --demo-bots enables four local players, drives a repeatable Highway run, and restores critically low health for recording.
+--movie replays recorded inputs from power-on (overclock off by default).
+--movie-coop-delay N enables four players copying P1 at 0/N/2N/3N frame delays during gameplay.
+--movie-smart follows the movie's Highway route and resynchronizes inputs after hits (--movie-route is an alias).
 --showcase-characters cycles all playable characters during that four-player demo (requires --bone-sheets).
+--bone-sheets loads private Blender or bone animation sprites; high-resolution packs preserve game size.
 Vile uses the private on-foot PNG at roms/derived/bone_sheets/user_sources/vile_idle.png
-even when bone sheets are off; --vile-sprite overrides its location.
+when no animated Vile sheet is loaded; --vile-sprite overrides its location.
 Online: both players pass the same --mode (default rollback). --delay is the input delay
 in frames, host's wins: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
 same-region link --mode lockstep --delay 3 plays smoothest; across continents use
@@ -60,6 +65,8 @@ pub struct Args {
     pub vile_sprite: Option<String>,
     /// Drive all four local players with a deterministic Highway demo script.
     pub demo_bots: bool,
+    /// Keep living players healthy during an explicitly assisted recording.
+    pub demo_survival: bool,
     /// Cycle the full character roster in the four-player demo.
     pub showcase_characters: bool,
     /// `--pads`: log gamepads and pad bit changes to stderr.
@@ -72,8 +79,10 @@ pub struct Args {
     pub p2_hold: u16,
     pub p3_hold: u16,
     pub p4_hold: u16,
-    // ponytail: --movie is parsed but unused until mmx-verify's bk2 parser lands.
     pub movie: Option<String>,
+    /// Copy P1's movie inputs to the other three slots, N frames apart.
+    pub movie_coop_delay: Option<u16>,
+    pub movie_route: bool,
     /// Online co-op: (host?, room).
     pub net: Option<(bool, String)>,
     pub signal: String,
@@ -140,7 +149,7 @@ impl Args {
     /// CPU overclock: `--overclock`, else 2x (no reason to keep the SNES's
     /// slowdown; `--overclock off` is for purists and slow hosts).
     pub fn overclock(&self) -> mmx_core::Overclock {
-        self.overclock.unwrap_or(mmx_core::Overclock::X2)
+        self.overclock.unwrap_or(if self.movie.is_some() { mmx_core::Overclock::Off } else { mmx_core::Overclock::X2 })
     }
 }
 
@@ -162,6 +171,7 @@ impl Default for Args {
             bone_sheets: None,
             vile_sprite: None,
             demo_bots: false,
+            demo_survival: false,
             showcase_characters: false,
             pads: false,
             headless: false,
@@ -172,6 +182,8 @@ impl Default for Args {
             p3_hold: 0,
             p4_hold: 0,
             movie: None,
+            movie_coop_delay: None,
+            movie_route: false,
             net: None,
             signal: mmx_net::DEFAULT_SIGNAL_URL.into(),
             ice: None,
@@ -236,6 +248,7 @@ pub fn parse<I: IntoIterator<Item = String>>(
             "--bone-sheets" => a.bone_sheets = Some(val("--bone-sheets")?),
             "--vile-sprite" => a.vile_sprite = Some(val("--vile-sprite")?),
             "--demo-bots" => a.demo_bots = true,
+            "--demo-survival" => a.demo_survival = true,
             "--showcase-characters" => a.showcase_characters = true,
             "--pads" => a.pads = true,
             "--headless" => a.headless = true,
@@ -259,6 +272,13 @@ pub fn parse<I: IntoIterator<Item = String>>(
             "--p3-hold" => a.p3_hold = parse_u16(&val("--p3-hold")?)?,
             "--p4-hold" => a.p4_hold = parse_u16(&val("--p4-hold")?)?,
             "--movie" => a.movie = Some(val("--movie")?),
+            "--movie-route" | "--movie-smart" => a.movie_route = true,
+            "--movie-coop-delay" => {
+                let v = val("--movie-coop-delay")?;
+                let n: u16 = v.parse().map_err(|_| "--movie-coop-delay needs 0-120 frames".to_string())?;
+                if n > 120 { return Err("--movie-coop-delay needs 0-120 frames".into()); }
+                a.movie_coop_delay = Some(n);
+            }
             "--coop-host" | "--coop-join" => {
                 let room = val(&flag)?;
                 if !mmx_net::room_name_valid(&room) {
@@ -304,6 +324,21 @@ pub fn parse<I: IntoIterator<Item = String>>(
         a.rom = env_rom.filter(|s| !s.is_empty());
     }
     if a.zero { a.characters[0] = Character::Zero; }
+    if a.movie_route {
+        if a.movie.is_none() { return Err("--movie-route requires --movie PATH".into()); }
+        a.movie_coop_delay.get_or_insert(8);
+    }
+    if a.demo_survival && !a.movie_route && !a.demo_bots && !a.showcase_characters {
+        return Err("--demo-survival requires --movie-smart, --demo-bots or --showcase-characters".into());
+    }
+    if a.movie_coop_delay.is_some() {
+        if a.movie.is_none() { return Err("--movie-coop-delay requires --movie PATH".into()); }
+        a.players = 4;
+        a.coop_local = true;
+    }
+    if a.movie.is_some() && (a.demo_bots || a.showcase_characters || a.vs_mode || a.net.is_some() || a.wide_gameplay) {
+        return Err("--movie cannot combine with bots, showcase, VS, netplay, or wide gameplay".into());
+    }
     if a.showcase_characters {
         if a.bone_sheets.is_none() {
             return Err("--showcase-characters requires --bone-sheets DIR".into());
@@ -363,6 +398,22 @@ mod tests {
         let a = p("").unwrap();
         assert_eq!(a, Args::default());
         assert_eq!(a.scale, 3);
+    }
+
+    #[test]
+    fn movie_coop_options() {
+        let a = p("--movie run.bk2 --movie-coop-delay 8").unwrap();
+        assert_eq!(a.players, 4);
+        assert!(a.coop_local);
+        assert_eq!(a.movie_coop_delay, Some(8));
+        assert_eq!(a.overclock(), mmx_core::Overclock::Off);
+        let route = p("--movie run.bk2 --movie-route").unwrap();
+        assert!(route.movie_route && route.coop_local);
+        assert_eq!(route.movie_coop_delay, Some(8));
+        assert!(p("--movie run.bk2 --movie-smart").unwrap().movie_route);
+        for bad in ["--movie-route", "--movie-coop-delay 8", "--movie a.bk2 --demo-bots", "--movie a.bk2 --wide-gameplay", "--movie a.bk2 --coop-host room", "--movie a.bk2 --movie-coop-delay 121"] {
+            assert!(p(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

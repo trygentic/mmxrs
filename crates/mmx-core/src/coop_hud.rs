@@ -220,7 +220,7 @@ fn put_icon(game: &mut Game) -> bool {
 /// slots past P2's.
 fn hud(game: &mut Game) {
     let shown = game.wram()[ix(BAR_STATE)] == BAR_SHOWN;
-    if game.local_players >= 4 {
+    if game.local_players >= 3 {
         // Four-player HUD is composed after PPU rendering. The seven ROM bar
         // sprites would consume scarce OAM and duplicate its P1 display.
         let o = ix(ram::OAM_BUF);
@@ -302,14 +302,110 @@ fn hud(game: &mut Game) {
     game.coop.p2_oam_count = start + HUD_SLOTS - base;
 }
 
+/// Redraw only opaque UI pixels after host effects. ROM HUD sprites retain
+/// their artwork, palettes, flips and widescreen placement; transparent
+/// pixels leave the lit world visible.
+pub(crate) fn draw_ui_rgba(game: &Game, frame: &mut [u8], width: usize, height: usize) {
+    if frame.len() < width.saturating_mul(height).saturating_mul(4)
+        || game.wram()[ix(ram::MODE_D2)] != ram::D2_IN_STAGE { return; }
+    let scale = usize::from(game.frame_scale().max(1));
+    const CLEAR: u32 = 0xFF000000;
+    let mut layer = vec![CLEAR; width * height];
+    let (mut left, right) = crate::widescreen::hud_slots(game.wram(), 0);
+    let oam = game.oam();
+    let shadow = game.emu.p2_tiles();
+    // P2 HUD entries are recognizable independently of the next frame's
+    // changing player OAM ranges: their bar column and reserved ROM tiles.
+    if game.coop.enabled && game.local_players < 3 {
+        for slot in 24..128 {
+            let e = &oam[slot * 4..slot * 4 + 4];
+            if e[2] == 0x86 && (shadow.slots & shadow.page1 & shadow.page2) >> slot & 1 != 0 {
+                if e[0] == BAR_X && e[1] == 0x68 {
+                    left |= crate::display::slots(slot, slot + BAR_SLOTS);
+                } else {
+                    left |= 1 << slot; // Revive marker, also part of the UI.
+                }
+            }
+        }
+    }
+    let cgram = game.cgram();
+    let (base, gap) = game.obsel();
+    let margin = usize::from(game.wide_margin());
+    let (shift_left, shift_right) = game.emu.hud_shift();
+    for slot in (0..128).rev().filter(|&s| (left | right) >> s & 1 != 0) {
+        let e = &oam[slot * 4..slot * 4 + 4];
+        if e[1] == OAM_HIDDEN_Y { continue; }
+        let high = oam[512 + slot / 4] >> ((slot % 4) * 2);
+        let size = if high & 2 != 0 { 16 } else { 8 };
+        let mut x = i32::from(e[0]) - if high & 1 != 0 { 256 } else { 0 } + margin as i32;
+        if shift_left >> slot & 1 != 0 { x -= margin as i32; }
+        if shift_right >> slot & 1 != 0 { x += margin as i32; }
+        let y = usize::from(e[1]);
+        for dy in 0..size { for dx in 0..size {
+            let sx = if e[3] & 0x40 != 0 { size - 1 - dx } else { dx };
+            let sy = if e[3] & 0x80 != 0 { size - 1 - dy } else { dy };
+            let tile = (u16::from(e[2]) & 0xF0).wrapping_add((sy / 8 * 16) as u16) & 0xF0
+                | (u16::from(e[2]) + (sx / 8) as u16) & 0xF;
+            let words: &[u16] = if shadow.slots >> slot & 1 != 0 {
+                let page = ((shadow.page1 >> slot & 1) | (shadow.page2 >> slot & 1) << 1) as usize;
+                let at = page * crate::p2tiles::SHADOW_WORDS + usize::from((tile & 0x3F) % 48) * 16;
+                &shadow.page[at..at + 16]
+            } else {
+                let at = (usize::from(base) + usize::from(e[3] & 1) * (4096 + usize::from(gap)) + usize::from(tile) * 16) & 0x7FFF;
+                &game.vram()[at..at + 16]
+            };
+            let row = words[sy % 8];
+            let row_hi = words[8 + sy % 8];
+            let bit = 7 - sx % 8;
+            let colour = ((row >> bit) & 1) | ((row >> (bit + 8)) & 1) << 1
+                | ((row_hi >> bit) & 1) << 2 | ((row_hi >> (bit + 8)) & 1) << 3;
+            if colour == 0 { continue; }
+            let c = if shadow.pal >> slot & 1 != 0 { shadow.palette[usize::from(colour)] }
+                else { cgram[128 + usize::from((e[3] >> 1) & 7) * 16 + usize::from(colour)] };
+            let channel = |shift: u32| -> u32 { (((u32::from(c) >> shift) & 31_u32) * 255 + 15) / 31 };
+            let rgb = channel(0) << 16 | channel(5) << 8 | channel(10);
+            let px = x + dx as i32;
+            if px < 0 { continue; }
+            for yy in (y + dy) * scale..((y + dy + 1) * scale).min(height) {
+                for xx in px as usize * scale..((px as usize + 1) * scale).min(width) {
+                    layer[yy * width + xx] = rgb;
+                }
+            }
+        }}
+    }
+    if game.local_players >= 3 && game.coop.enabled && four_hud_shown(game) {
+        let hp = [game.wram()[ix(ram::X_HP)] & 0x7F,
+            if game.coop.p2_hidden { 0 } else { game.coop.p2[OFF_HP] & 0x7F },
+            if game.extra_coop[0].p2_hidden { 0 } else { game.extra_coop[0].p2[OFF_HP] & 0x7F },
+            if game.extra_coop[1].p2_hidden { 0 } else { game.extra_coop[1].p2[OFF_HP] & 0x7F }];
+        let initials = game.player_characters.map(|c| c.label().chars().next().unwrap_or('?').to_ascii_uppercase());
+        draw_four_health_bars_scaled(&mut layer, width, height, hp,
+            game.wram()[ix(ram::MAX_HP)] & 0x7F, initials, scale as u8);
+    }
+    for (dst, colour) in frame.chunks_exact_mut(4).zip(layer) {
+        if colour != CLEAR { dst.copy_from_slice(&[(colour >> 16) as u8, (colour >> 8) as u8, colour as u8, 255]); }
+    }
+}
+
 /// Four vertical HP meters at the screen edges, styled like the original
 /// seven-sprite X bar. Pixel composition avoids consuming scarce SNES OAM
 /// slots in a four-player game. Each player's meter has its own live HP.
 pub fn draw_four_health_bars(pixels: &mut [u32], width: usize, height: usize, hp: [u8; 4], max_hp: u8, initials: [char; 4]) {
-    if width < 256 || height < 144 || pixels.len() < width * height { return }
+    draw_four_health_bars_scaled(pixels, width, height, hp, max_hp, initials, 1);
+}
+
+/// Keep HUD geometry on the ROM grid when high-resolution actors enlarge
+/// the presentation buffer; every original HUD pixel remains a solid block.
+pub fn draw_four_health_bars_scaled(pixels: &mut [u32], width: usize, height: usize,
+                                  hp: [u8; 4], max_hp: u8, initials: [char; 4], scale: u8) {
+    let scale = usize::from(scale.max(1));
+    if width / scale < 256 || height / scale < 144 || pixels.len() < width * height { return }
+    let physical_width = width;
+    let width = width / scale;
+    let height = height / scale;
     let fill = |pixels: &mut [u32], x: usize, y: usize, w: usize, h: usize, colour: u32| {
-        for row in y..(y + h).min(height) {
-            for col in x..(x + w).min(width) { pixels[row * width + col] = colour; }
+        for row in y * scale..(y + h).min(height) * scale {
+            for col in x * scale..(x + w).min(width) * scale { pixels[row * physical_width + col] = colour; }
         }
     };
     let glyph = |c: char| -> [u8; 5] {
@@ -394,5 +490,13 @@ mod tests {
         assert_eq!(at(224, 122), 0xFF675F); // low P3 uses the warning colour
         assert_eq!(at(224, 80), 0x17243A);
         assert_eq!(at(242, 122), 0x17243A); // empty P4
+    }
+
+    #[test]
+    fn high_resolution_health_bars_keep_original_game_size() {
+        let (mut native, mut hd) = (vec![0; 256 * 224], vec![0; 1024 * 896]);
+        draw_four_health_bars(&mut native, 256, 224, [32, 16, 8, 0], 32, ['X', 'Z', 'S', 'V']);
+        draw_four_health_bars_scaled(&mut hd, 1024, 896, [32, 16, 8, 0], 32, ['X', 'Z', 'S', 'V'], 4);
+        for y in 0..896 { for x in 0..1024 { assert_eq!(hd[y * 1024 + x], native[y / 4 * 256 + x / 4]); } }
     }
 }

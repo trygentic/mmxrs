@@ -5,12 +5,15 @@ mod app;
 mod audio;
 mod bone_sheets;
 mod cli;
+mod character_attacks;
 mod demo_bots;
 mod effects;
 #[cfg(target_os = "macos")]
 mod gc_pad;
 mod headless;
 mod keys;
+mod movie;
+mod movie_route;
 mod netplay;
 mod video;
 mod vs_select;
@@ -97,13 +100,6 @@ fn main() {
         game.set_player_character(index, character);
     }
     let active_count = if args.net.is_some() { 2 } else { usize::from(args.players) };
-    if args.showcase_characters || args.vs_mode || args.characters[..active_count].contains(&mmx_core::Character::Vile) {
-        let sprite = bone_sheets::vile_sprite_path(args.vile_sprite.as_deref(), std::path::Path::new(&rom_path));
-        bone_sheets::install_static_vile(&mut game, &sprite).unwrap_or_else(|e| {
-            eprintln!("Vile's on-foot sprite is required at {}: {e}", sprite.display());
-            std::process::exit(2);
-        });
-    }
     if args.characters[..active_count].iter().any(|character|
         matches!(character, mmx_core::Character::Bass | mmx_core::Character::ProtoMan))
         && args.bone_sheets.is_none()
@@ -119,6 +115,15 @@ fn main() {
         };
         bone_sheets::install(&mut game, std::path::Path::new(path), &selected)
             .unwrap_or_else(|e| { eprintln!("bone sheets: {e}"); std::process::exit(2); });
+
+    }
+    if (args.showcase_characters || args.vs_mode || args.characters[..active_count].contains(&mmx_core::Character::Vile))
+        && !game.has_bone_sheet(mmx_core::Character::Vile) {
+        let sprite = bone_sheets::vile_sprite_path(args.vile_sprite.as_deref(), std::path::Path::new(&rom_path));
+        bone_sheets::install_static_vile(&mut game, &sprite).unwrap_or_else(|e| {
+            eprintln!("Vile's on-foot sprite is required at {}: {e}", sprite.display());
+            std::process::exit(2);
+        });
     }
     game.coop.enabled = args.coop_local || args.players > 1 || net.is_some();
     game.set_local_players(usize::from(args.players.max(if args.coop_local { 2 } else { 1 })));
@@ -136,6 +141,7 @@ fn main() {
     });
 
     game.set_widescreen(args.widescreen.initial());
+    if args.movie.is_some() { game.set_allow_opposing_directions(true); }
     game.set_wide_gameplay(args.wide_gameplay);
     game.set_overclock(args.overclock());
     if args.headless {

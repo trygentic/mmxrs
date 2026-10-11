@@ -40,6 +40,9 @@ struct App {
     coop: bool,
     players: usize,
     demo_bots: Option<DemoBots>,
+    demo_survival: bool,
+    movie: Option<crate::movie::Playback>,
+    movie_route: Option<crate::movie_route::RoutePlayback>,
     showcase_characters: bool,
     window: Option<Arc<Window>>,
     pixels: Option<pixels::Pixels<'static>>,
@@ -126,6 +129,9 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         coop: args.vs_mode || args.players > 1 || args.coop_local,
         players: usize::from(args.players.max(if args.coop_local { 2 } else { 1 })),
         demo_bots: args.demo_bots.then(DemoBots::default),
+        demo_survival: args.demo_survival,
+        movie: if args.movie_route { None } else { crate::movie::Playback::load(args)? },
+        movie_route: if args.movie_route { Some(crate::movie_route::RoutePlayback::load(args)?) } else { None },
         showcase_characters: args.showcase_characters,
         window: None,
         pixels: None,
@@ -348,10 +354,15 @@ impl App {
             self.fps_frames += 1;
             return;
         }
+        if self.demo_survival { self.game.maintain_demo_survival(); }
         if let Some(bots) = self.demo_bots.as_ref() {
             bots.maintain_party(&mut self.game);
         }
-        let inputs = match self.demo_bots.as_mut() {
+        let inputs = if let Some(route) = self.movie_route.as_mut() {
+            route.next(&self.game)
+        } else if let Some(movie) = self.movie.as_mut() {
+            movie.next(&self.game)
+        } else { match self.demo_bots.as_mut() {
             Some(bots) => bots.pads(&self.game),
             None => [
                 self.kb[0] | self.pad_bits(self.pads[0]),
@@ -359,7 +370,7 @@ impl App {
                 self.pad_bits(self.pads[2]),
                 self.pad_bits(self.pads[3]),
             ],
-        };
+        }};
         if self.game.vs_status().is_some_and(|status| status.round_over) {
             let start_pressed = (0..self.players).any(|i|
                 inputs[i] & mmx_core::BTN_START != 0
@@ -434,6 +445,12 @@ impl App {
         }
         // Pause, fast-forward and save states would desync an online session.
         if self.net.is_some() && !matches!(h, Hotkey::Quit | Hotkey::Fullscreen | Hotkey::Widescreen) {
+            return;
+        }
+        // Game states do not contain the movie cursor. Loading one would
+        // resume the wrong inputs, and saving one implies it can be resumed.
+        if (self.movie.is_some() || self.movie_route.is_some()) && matches!(h, Hotkey::SaveState | Hotkey::LoadState) {
+            if pressed { eprintln!("movie: save/load states are disabled during playback"); }
             return;
         }
         if h == Hotkey::FastForward {
@@ -518,6 +535,8 @@ impl App {
         if self.demo_bots.is_some() {
             t += " [DEMO BOTS]";
         }
+        if self.movie.is_some() { t += " [MOVIE]"; }
+        if self.movie_route.is_some() { t += " [MOVIE ROUTE]"; }
         t += &format!(" [SLOT {}]", self.slot);
         if self.paused {
             t += " [PAUSED]";
@@ -545,8 +564,9 @@ impl App {
         let Some(w) = &self.window else { return };
         let size = w.inner_size();
         self.surface = (size.width, size.height);
+        let logical_height = self.game.frame().2 as u32 / u32::from(self.game.frame_scale());
         if self.wide == WideSetting::Auto && size.width > 0 && size.height > 0 {
-            let ws = video::auto_margin(self.surface, self.tex.1 as u32);
+            let ws = video::auto_margin(self.surface, logical_height);
             if ws != self.game.widescreen() {
                 self.game.set_widescreen(ws);
             }
@@ -554,7 +574,7 @@ impl App {
         if self.video_debug {
             let ws = self.game.widescreen();
             // The frame takes the new width with the next frame drawn.
-            let frame = (ws.width() as u32, self.tex.1 as u32);
+            let frame = (ws.width() as u32, logical_height);
             let tol = if self.wide == WideSetting::Auto { video::AUTO_FILL_TOLERANCE } else { 0.0 };
             let d = video::fit_rect(self.surface, frame, tol);
             let mode = if self.wide == WideSetting::Auto { "auto" } else { "fixed" };
@@ -603,8 +623,9 @@ impl App {
                 dst.copy_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8, 0xFF]);
             }
             crate::effects::apply(p.frame_mut(), w, h, &self.game, self.dynamic_lighting, self.charge_effects);
+            self.game.draw_ui_rgba(p.frame_mut(), w, h);
             if let Some(status) = self.game.vs_status().filter(|status| status.round_over) {
-                crate::vs_select::draw_result(p.frame_mut(), w, h, status);
+                crate::vs_select::draw_result_scaled(p.frame_mut(), w, h, status, self.game.frame_scale());
             }
         }
         let dest = self.dest();

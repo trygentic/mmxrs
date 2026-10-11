@@ -212,14 +212,13 @@ fn saber_mut(game: &mut Game, player: usize) -> &mut crate::saber::Saber {
 }
 
 fn saber_hits(game: &mut Game, players: usize) {
-    if game.zero_set.is_none() { return; }
     for shooter in 0..players {
         if player_eliminated(game, shooter)
-            || game.player_character(shooter) != Some(crate::Character::Zero)
+            || !game.player_character(shooter).is_some_and(crate::saber::uses_saber)
             || saber(game, shooter).hit
-            || crate::saber::slash_frame(saber(game, shooter)).is_none() { continue; }
+            || crate::saber::contact(game, shooter, saber(game, shooter)).is_none() { continue; }
         let Some(b) = block(game, shooter) else { continue };
-        let attack = crate::saber::shot_bytes(b, saber(game, shooter).air);
+        let Some(attack) = crate::saber::player_shot(game, shooter, b, saber(game, shooter)) else { continue };
         let sx = i32::from(u16::from_le_bytes([attack[5], attack[6]]));
         let sy = i32::from(u16::from_le_bytes([attack[8], attack[9]]));
         let half_w = i32::from(attack[crate::saber::BOX_AT + 2]);

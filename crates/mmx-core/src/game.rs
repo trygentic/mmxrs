@@ -65,6 +65,8 @@ const P2_TILES_MAGIC_V2: &[u8; 4] = b"P2T2";
 const COOP_MAGIC: &[u8; 4] = b"COOP";
 const EXTRA_COOP_MAGIC: &[u8; 4] = b"XTRA";
 const VS_MAGIC: &[u8; 4] = b"VS01";
+// Pending shot callbacks can cross a rendered frame boundary. Optional v1 tail.
+const SHOT_PENDING_MAGIC: &[u8; 4] = b"SHP1";
 
 /// What a save state holds, without loading it ([`Game::state_info`]).
 #[derive(Debug, Clone)]
@@ -89,6 +91,7 @@ pub struct Game {
     pub(crate) local_slice: bool,
     pub(crate) local_player_index: usize,
     pub(crate) active_shot_extra: Option<usize>,
+    pub(crate) active_shot_initial: bool,
     pub(crate) player_characters: [crate::character::Character; 4],
     pub(crate) vs_state: Option<crate::vs::VsState>,
     pub(crate) vs_arena: Option<crate::vs_stages::Arena>,
@@ -104,6 +107,7 @@ pub struct Game {
     pub(crate) zero_set: Option<std::sync::Arc<crate::zero_data::ZeroSet>>,
     /// Native X1 boss art, keyed by the selected playable character.
     pub(crate) boss_sets: std::collections::HashMap<crate::character::Character, std::sync::Arc<crate::boss_data::BossSet>>,
+    pub(crate) saber_profiles: std::collections::HashMap<crate::Character, crate::saber::Profile>,
     pub(crate) bone_sheets: std::collections::HashMap<crate::character::Character, std::sync::Arc<crate::bone_animation::BoneSheet>>,
     /// User-supplied static art, displayed even when 60 fps sheets are off.
     pub(crate) static_sprites: std::collections::HashMap<crate::character::Character, std::sync::Arc<crate::bone_animation::BoneFrame>>,
@@ -135,6 +139,28 @@ pub(crate) struct Video {
     pub(crate) pixels: Vec<u32>,
     pub(crate) width: usize,
     pub(crate) height: usize,
+    pub(crate) scale: u8,
+    scratch: Vec<u32>,
+}
+
+impl Video {
+    pub(crate) fn upscale(&mut self, scale: u8) {
+        if scale <= self.scale { return; }
+        let factor = usize::from(scale / self.scale);
+        let width = self.width * factor;
+        let height = self.height * factor;
+        self.scratch.resize(width * height, 0);
+        for (y, row) in self.scratch.chunks_exact_mut(width).enumerate() {
+            let source = &self.pixels[(y / factor) * self.width..][..self.width];
+            for (pixel, block) in source.iter().zip(row.chunks_exact_mut(factor)) {
+                block.fill(*pixel);
+            }
+        }
+        std::mem::swap(&mut self.pixels, &mut self.scratch);
+        self.width = width;
+        self.height = height;
+        self.scale = scale;
+    }
 }
 
 impl Renderer for Video {
@@ -148,6 +174,7 @@ impl Renderer for Video {
     ) -> Result<(), Infallible> {
         self.width = size.width as usize;
         self.height = size.height as usize;
+        self.scale = 1;
         self.pixels.clear();
         self.pixels.extend(
             frame_buffer[..self.width * self.height]
@@ -296,6 +323,7 @@ impl Game {
             local_slice: false,
             local_player_index: 1,
             active_shot_extra: None,
+            active_shot_initial: false,
             player_characters: [
                 crate::character::Character::X,
                 crate::character::Character::Zero,
@@ -313,6 +341,8 @@ impl Game {
                 pixels: vec![0; 256 * 224],
                 width: 256,
                 height: 224,
+                scale: 1,
+                scratch: Vec::new(),
             },
             audio: Audio::default(),
             frame_count: 0,
@@ -323,6 +353,7 @@ impl Game {
             zero_set: None,
             boss_sets: std::collections::HashMap::new(),
             bone_sheets: std::collections::HashMap::new(),
+            saber_profiles: std::collections::HashMap::new(),
             static_sprites: std::collections::HashMap::new(),
             bone_states: [crate::bone_animation::State::default(); 4],
             bone_draws: [None; 4],
@@ -376,6 +407,22 @@ impl Game {
         }
     }
 
+    /// Recording-demo assist: heal living actors and shorten the ordinary
+    /// follower revive wait. Never resurrect HP0 directly or invent positions;
+    /// the existing safe-ground respawn anchor and half-HP revive still run.
+    /// Scripted scenes (including Vile's capture) and versus mode stay native.
+    pub fn maintain_demo_survival(&mut self) {
+        if self.vs_state.is_some() || !crate::coop_stages::p2_should_exist(self.wram())
+            || crate::coop_stages::p1_scripted(self.wram()) { return; }
+        self.restore_local_player_health(12);
+        if !self.coop.enabled { return; }
+        let shorten = |state: &mut crate::coop::CoopState| {
+            if state.p2_hidden && state.down_frames > 30 { state.down_frames = 30; }
+        };
+        if self.local_players > 1 { shorten(&mut self.coop); }
+        for i in 0..self.local_players.saturating_sub(2).min(2) { shorten(&mut self.extra_coop[i]); }
+    }
+
     pub fn set_extra_pads(&mut self, pads: [u16; 2]) {
         self.extra_pads = pads;
     }
@@ -383,6 +430,7 @@ impl Game {
     pub fn set_player_character(&mut self, player_index: usize, character: crate::character::Character) {
         if let Some(slot) = self.player_characters.get_mut(player_index) {
             *slot = character;
+            if character == crate::Character::Vile { self.emu.set_obj_coverage(true); }
             self.bone_states[player_index] = crate::bone_animation::State::default();
             self.bone_draws[player_index] = None;
             if player_index == 0 {
@@ -412,9 +460,36 @@ impl Game {
         sheet.validate()?;
         coop::register_coop_traps(self)?;
         crate::display::register(self);
+        if crate::saber::uses_saber(character) {
+            if let Some(profile) = crate::saber::profile(&sheet) { self.saber_profiles.insert(character, profile); }
+            else { self.saber_profiles.remove(&character); }
+        }
         self.bone_sheets.insert(character, std::sync::Arc::new(sheet));
         self.bone_states = [crate::bone_animation::State::default(); 4];
         Ok(())
+    }
+
+    /// Override automatically detected saber contacts with authored blade-only
+    /// rectangles. One entry per attack frame; None disables contact that frame.
+    /// The rectangles are game pixels relative to the actor origin, facing right.
+    /// These immutable pack data stay beside the sheet, outside save states.
+    pub fn set_saber_contact_boxes(&mut self, character: crate::Character, fps: f32,
+        boxes: Vec<Option<crate::saber::HitBox>>) -> Result<(), String> {
+        if !crate::saber::uses_saber(character) || !fps.is_finite() || fps <= 0.0 || boxes.is_empty() {
+            return Err("saber contacts need Zero or Sigma, positive fps and attack frames".into());
+        }
+        let sheet = self.bone_sheets.get(&character).ok_or("saber contacts need a loaded sheet")?;
+        let clip = sheet.clips.iter().find(|c| c.name == "attack").ok_or("saber contacts need an attack clip")?;
+        if boxes.len() != clip.frames.len() || (fps - clip.fps).abs() > 0.001 {
+            return Err("saber contacts must match the attack clip frame count and fps".into());
+        }
+        self.saber_profiles.insert(character, crate::saber::Profile { fps, boxes });
+        Ok(())
+    }
+
+    /// Whether an animated pack supplies this character's presentation.
+    pub fn has_bone_sheet(&self, character: crate::character::Character) -> bool {
+        self.bone_sheets.contains_key(&character)
     }
 
     /// Supply a private, cropped RGBA sprite for normal (non-bone) play.
@@ -618,6 +693,12 @@ impl Game {
         out
     }
 
+    /// Composite HUD pixels above host lighting, particles and character art.
+    /// This only writes the supplied presentation buffer.
+    pub fn draw_ui_rgba(&self, frame: &mut [u8], width: usize, height: usize) {
+        crate::coop_hud::draw_ui_rgba(self, frame, width, height);
+    }
+
     fn draw_local_health(&mut self) {
         if self.local_players < 3 || !self.coop.enabled || !crate::coop_hud::four_hud_shown(self) { return }
         let hp = [
@@ -628,7 +709,8 @@ impl Game {
         ];
         let max_hp = self.wram()[crate::ram::wram_index(crate::ram::MAX_HP)] & 0x7F;
         let initials = self.player_characters.map(|c| c.label().chars().next().unwrap_or('?').to_ascii_uppercase());
-        crate::coop_hud::draw_four_health_bars(&mut self.video.pixels, self.video.width, self.video.height, hp, max_hp, initials);
+        crate::coop_hud::draw_four_health_bars_scaled(&mut self.video.pixels, self.video.width,
+            self.video.height, hp, max_hp, initials, self.video.scale);
     }
 
     /// Fire the trap at `PBR:PC` once per boundary visit. Loops because an
@@ -693,6 +775,12 @@ impl Game {
 
     pub fn frame(&self) -> (&[u32], usize, usize) {
         (&self.video.pixels, self.video.width, self.video.height)
+    }
+
+    /// Presentation pixels per ROM/game pixel in the most recent frame.
+    /// High-resolution sheets enlarge the buffer, never the game world.
+    pub fn frame_scale(&self) -> u8 {
+        self.video.scale
     }
 
     /// Visible second player's object block for presentation effects.
@@ -1100,6 +1188,16 @@ impl Game {
         self.rom[off % self.rom.len()]
     }
 
+    #[cfg(test)]
+    pub(crate) fn save_before_current_trap(&mut self) -> Vec<u8> {
+        // A test callback runs after dispatch marks the trap fired. Model the
+        // instruction boundary just before dispatch so replay runs it once.
+        let fired = self.fired_at.take();
+        let state = self.save_state();
+        self.fired_at = fired;
+        state
+    }
+
     /// `(emulator, frame_count, fired_at)`, then [`P2_TILES_MAGIC`] and the
     /// PPU's P2 tile page (appended, so states from before the page, or with
     /// the old 512-word page and no magic, load with an empty one), then
@@ -1123,6 +1221,9 @@ impl Game {
             v.extend(VS_MAGIC);
             v.extend(bincode::encode_to_vec(vs, cfg).expect("VS state encodes"));
         }
+        v.extend(SHOT_PENDING_MAGIC);
+        v.extend(bincode::encode_to_vec((self.active_shot_initial, self.active_shot_extra.map(|i| i as u8)), cfg)
+            .expect("pending shot state encodes"));
         v
     }
 
@@ -1160,6 +1261,28 @@ impl Game {
         Ok(Some(vs))
     }
 
+    fn pending_shot_tail(t: &[u8]) -> Result<(bool, Option<usize>), String> {
+        let Some(t) = t.strip_prefix(COOP_MAGIC.as_slice()) else { return Ok((false, None)) };
+        let n = t.get(..4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+            .ok_or("co-op state truncated")?;
+        let Some(mut t) = t.get(4 + n..) else { return Err("co-op state truncated".into()) };
+        if let Some(rest) = t.strip_prefix(EXTRA_COOP_MAGIC.as_slice()) {
+            let (_, used): ([coop::CoopState; 2], usize) = bincode::decode_from_slice(rest, bincode::config::standard())
+                .map_err(|e| format!("extra co-op states: {e}"))?;
+            t = &rest[used..];
+        }
+        if let Some(rest) = t.strip_prefix(VS_MAGIC.as_slice()) {
+            let (_, used): (crate::vs::VsState, usize) = bincode::decode_from_slice(rest, bincode::config::standard())
+                .map_err(|e| format!("VS state: {e}"))?;
+            t = &rest[used..];
+        }
+        let Some(t) = t.strip_prefix(SHOT_PENDING_MAGIC.as_slice()) else { return Ok((false, None)) };
+        let ((initial, extra), _): ((bool, Option<u8>), usize) = bincode::decode_from_slice(t, bincode::config::standard())
+            .map_err(|e| format!("pending shot state: {e}"))?;
+        if extra.is_some_and(|i| i >= 2) { return Err("pending shot player out of range".into()); }
+        Ok((initial, extra.map(usize::from)))
+    }
+
     /// Frame count, tile-page marker and co-op state of a save state.
     pub fn state_info(s: &[u8]) -> Result<StateInfo, String> {
         let cfg = bincode::config::standard();
@@ -1192,6 +1315,7 @@ impl Game {
         let mut coop = None;
         let mut extra_coop = None;
         let mut vs_state = None;
+        let mut pending_shot = (false, None);
         let ((state, frame_count, fired_at), n): ((LegacyMmxSaveState, u64, Option<u32>), _) =
             bincode::decode_from_slice(s, cfg).map_err(|e| e.to_string())?;
         self.emu.load_state(state.into());
@@ -1201,6 +1325,7 @@ impl Game {
             coop = Self::coop_tail(&tail[m..])?;
             extra_coop = Self::extra_coop_tail(&tail[m..])?;
             vs_state = Self::vs_tail(&tail[m..])?;
+            pending_shot = Self::pending_shot_tail(&tail[m..])?;
         } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V6.as_slice()) {
             let ((page, slots, next, next_slots, pending, page1, next_page1, page2, next_page2, pal, next_pal, palette, next_palette), m): (P2TilesV6, _) =
                 bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
@@ -1211,6 +1336,7 @@ impl Game {
             coop = Self::coop_tail(&tail[m..])?;
             extra_coop = Self::extra_coop_tail(&tail[m..])?;
             vs_state = Self::vs_tail(&tail[m..])?;
+            pending_shot = Self::pending_shot_tail(&tail[m..])?;
         } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V5.as_slice()) {
             let ((page, slots, next_page, next_slots, pending, page1, next_page1, page2, next_page2), m): (P2TilesV5, _) =
                 bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
@@ -1221,6 +1347,7 @@ impl Game {
             coop = Self::coop_tail(&tail[m..])?;
             extra_coop = Self::extra_coop_tail(&tail[m..])?;
             vs_state = Self::vs_tail(&tail[m..])?;
+            pending_shot = Self::pending_shot_tail(&tail[m..])?;
         } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V4.as_slice()) {
             const W3: usize = P2_PAGE_WORDS * 3;
             type V4 = (Box<[u16; W3]>, u128, Box<[u16; W3]>, u128, bool, u128, u128, u128, u128);
@@ -1252,6 +1379,7 @@ impl Game {
         }
         self.frame_count = frame_count;
         self.fired_at = fired_at;
+        (self.active_shot_initial, self.active_shot_extra) = pending_shot;
         self.bone_states = [crate::bone_animation::State::default(); 4];
         self.bone_draws = [None; 4];
         let (enabled, p1_on, palette) = (self.coop.enabled, self.coop.p1.on, self.coop.zero_palette);

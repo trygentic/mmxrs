@@ -20,6 +20,7 @@ pub mod p2tiles;
 pub mod profile;
 pub mod ram;
 pub mod saber;
+mod character_combat;
 pub mod sfx;
 pub mod traps;
 pub mod vs;

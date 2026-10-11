@@ -437,8 +437,7 @@ fn emit_p1_boss(game: &mut Game, set: &BossSet) {
 /// X starts a swing; during one the pad is masked as for P2 (Start and
 /// Select pass). `$A7` (held) and `$AB` (pressed) are edited in place.
 fn p1_pad(game: &mut Game) {
-    if !game.coop.p1.on || game.isolated_depth > 0 || game.zero_set.is_none()
-        || game.boss_sets.contains_key(&crate::Character::Zero) {
+    if !crate::saber::uses_saber(game.player_characters[0]) || game.isolated_depth > 0 {
         return;
     }
     let w = game.wram();
@@ -446,7 +445,8 @@ fn p1_pad(game: &mut Game) {
     let b = ix(ram::X_BASE);
     let obj: [u8; ram::X_BLOCK_LEN] = w[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
     let keep = held & (crate::BTN_START | crate::BTN_SELECT);
-    let pad = crate::saber::update(&mut game.coop.p1.saber, &obj, held) | keep;
+    let duration = crate::saber::duration(game, 0);
+    let pad = crate::saber::update_timed(&mut game.coop.p1.saber, &obj, held, duration) | keep;
     if crate::saber::whoosh(&game.coop.p1.saber) {
         game.coop.sfx[crate::sfx::P1] = 1;
     }

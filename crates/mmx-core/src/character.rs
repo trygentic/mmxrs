@@ -1,8 +1,8 @@
 //! Character choices shared by the launcher, native frontend and game core.
 //!
-//! The ROM's player routines still provide movement and combat. A character's
-//! art is selected separately, so an animation absent from a boss sprite set
-//! can fall back to its idle frame without changing those routines.
+//! The ROM player routines provide movement and projectile collision. Zero
+//! and Sigma add saber combat; Vile launches charged shoulder blasts. Character art
+//! is selected separately, so absent poses can still fall back to idle.
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Character {
