@@ -3,7 +3,7 @@
 use mmx_core::{netgame::Mode, Character};
 
 pub const USAGE: &str = "\
-usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local|--players 1..4] [--pads]
+usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local|--players 1..4] [--vs] [--vs-stage ID] [--pads]
              [--p1-character ID] [--p2-character ID] [--p3-character ID] [--p4-character ID]
              [--dynamic-lighting] [--charge-effects] [--bone-sheets DIR] [--vile-sprite PNG]
              [--demo-bots] [--showcase-characters]
@@ -44,6 +44,10 @@ pub struct Args {
     pub scale: u32,
     pub fullscreen: bool,
     pub coop_local: bool,
+    /// Local arena match with character and stage selection (2-4 players).
+    pub vs_mode: bool,
+    /// Initial arena choice, selected from `vs_stages::ARENAS`.
+    pub vs_stage: Option<String>,
     /// Total local players (1-4); online sessions still use two peers.
     pub players: u8,
     /// Per-player art, while movement and attacks follow the X/Zero player code.
@@ -149,6 +153,8 @@ impl Default for Args {
             scale: 3,
             fullscreen: false,
             coop_local: false,
+            vs_mode: false,
+            vs_stage: None,
             players: 1,
             characters: [Character::X, Character::Zero, Character::X, Character::X],
             dynamic_lighting: false,
@@ -212,6 +218,8 @@ pub fn parse<I: IntoIterator<Item = String>>(
             "--fullscreen" => a.fullscreen = true,
             "--zero" => a.zero = true,
             "--coop-local" => { a.coop_local = true; a.players = a.players.max(2); }
+            "--vs" => a.vs_mode = true,
+            "--vs-stage" => a.vs_stage = Some(val("--vs-stage")?),
             "--players" => {
                 let v = val("--players")?;
                 a.players = v.parse().map_err(|_| format!("bad --players {v:?}: use 1-4"))?;
@@ -306,6 +314,26 @@ pub fn parse<I: IntoIterator<Item = String>>(
         a.players = 4;
         a.coop_local = true;
     }
+    if a.vs_mode {
+        if a.net.is_some() || a.demo_bots || a.headless {
+            return Err("--vs requires an interactive local game".into());
+        }
+        if a.players < 2 {
+            return Err("--vs needs --players 2..4 (or --coop-local)".into());
+        }
+        if a.bone_sheets.is_none() {
+            return Err("--vs needs --bone-sheets DIR for the full fighter roster".into());
+        }
+        a.coop_local = true;
+    }
+    if a.vs_stage.is_some() && !a.vs_mode {
+        return Err("--vs-stage requires --vs".into());
+    }
+    if let Some(id) = a.vs_stage.as_deref() {
+        if mmx_core::vs_stages::arena(id).is_none() {
+            return Err(format!("unknown VS stage {id:?}"));
+        }
+    }
     a.zero = a.characters[0] == Character::Zero;
     if a.net.is_some() && (a.headless || a.coop_local) {
         return Err("--coop-host/--coop-join cannot be combined with --headless or --coop-local".into());
@@ -347,6 +375,15 @@ mod tests {
         assert!(a.dynamic_lighting && a.charge_effects);
         assert!(p("--players 5").is_err());
         assert!(p("--p1-character unknown").is_err());
+    }
+
+    #[test]
+    fn vs_is_local_and_needs_opponents() {
+        let a = p("--vs --players 4 --bone-sheets sheets").unwrap();
+        assert!(a.vs_mode && a.coop_local);
+        assert_eq!(a.players, 4);
+        assert!(p("--vs").is_err());
+        assert!(p("--vs --players 2 --bone-sheets sheets --coop-host room").is_err());
     }
 
     #[test]

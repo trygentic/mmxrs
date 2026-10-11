@@ -13,6 +13,7 @@ mod headless;
 mod keys;
 mod netplay;
 mod video;
+mod vs_select;
 
 use mmx_core::Game;
 
@@ -57,7 +58,7 @@ fn main() {
     // same character; a failed extraction must be visible to the player.
     let art_rom = if rom.len() % 0x8000 == 512 { &rom[512..] } else { &rom[..] };
     let mut boss_sets = Vec::new();
-    let art_roster: Vec<_> = if args.showcase_characters {
+    let art_roster: Vec<_> = if args.showcase_characters || args.vs_mode {
         mmx_core::Character::ALL.to_vec()
     } else {
         args.characters.to_vec()
@@ -96,7 +97,7 @@ fn main() {
         game.set_player_character(index, character);
     }
     let active_count = if args.net.is_some() { 2 } else { usize::from(args.players) };
-    if args.showcase_characters || args.characters[..active_count].contains(&mmx_core::Character::Vile) {
+    if args.showcase_characters || args.vs_mode || args.characters[..active_count].contains(&mmx_core::Character::Vile) {
         let sprite = bone_sheets::vile_sprite_path(args.vile_sprite.as_deref(), std::path::Path::new(&rom_path));
         bone_sheets::install_static_vile(&mut game, &sprite).unwrap_or_else(|e| {
             eprintln!("Vile's on-foot sprite is required at {}: {e}", sprite.display());
@@ -111,7 +112,7 @@ fn main() {
         std::process::exit(2);
     }
     if let Some(path) = args.bone_sheets.as_deref() {
-        let selected: Vec<_> = if args.showcase_characters {
+        let selected: Vec<_> = if args.showcase_characters || args.vs_mode {
             mmx_core::Character::ALL.to_vec()
         } else {
             args.characters[..active_count].to_vec()

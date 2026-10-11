@@ -232,6 +232,13 @@ impl App {
         if !s.online {
             ui.add(egui::Slider::new(&mut s.local_players, 1..=4).text("local players"));
             s.coop_local = s.local_players > 1;
+            ui.checkbox(&mut s.vs_mode, "VS arena match")
+                .on_hover_text("Choose 2-4 fighters and an arena in a Street Fighter style selection screen.");
+            if s.vs_mode && s.local_players < 2 {
+                s.local_players = 2;
+                s.coop_local = true;
+            }
+            if s.vs_mode { s.bone_sheets = true; }
         }
         let player_count = if s.online { 2 } else { s.local_players };
         for i in 0..usize::from(player_count) {

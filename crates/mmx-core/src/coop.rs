@@ -424,6 +424,7 @@ fn p2_update(game: &mut Game) {
     if !game.coop.enabled {
         return;
     }
+    if crate::vs::player_eliminated(game, game.local_player_index) { return; }
     let w = game.wram();
     if !coop_stages::p2_should_exist(w) {
         // Pause: freeze P2 where it is (its slots are hidden by the OAM

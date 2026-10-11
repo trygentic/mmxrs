@@ -22,8 +22,10 @@ pub mod ram;
 pub mod saber;
 pub mod sfx;
 pub mod traps;
+pub mod vs;
 pub mod widescreen;
 pub mod wide_gameplay;
+pub mod vs_stages;
 pub mod zero;
 pub mod zero_data;
 

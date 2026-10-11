@@ -9,6 +9,7 @@ use crate::demo_bots::DemoBots;
 use crate::keys::{self, Hotkey, KeyAction};
 use crate::netplay::Net;
 use crate::video::{self, FitRenderer};
+use crate::vs_select::VsSelect;
 use mmx_core::{Game, Pads};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,6 +78,9 @@ struct App {
     audio_stats: bool,
     /// Online co-op session (`--coop-host/--coop-join`).
     net: Option<Net>,
+    /// Local fighter and arena selection, shown before the first ROM frame.
+    vs_select: Option<VsSelect>,
+    vs_prev_inputs: [u16; 4],
 }
 
 pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), String> {
@@ -103,11 +107,23 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
             eprintln!("gamepad connected (gilrs): {}", gp.name());
         }
     }
+    let vs_select = args.vs_mode.then(|| {
+        let mut select = VsSelect::new(
+            usize::from(args.players),
+            args.characters,
+            mmx_core::vs_stages::ARENAS.iter().map(|arena| arena.name.to_string()).collect(),
+            args.vs_stage.as_deref().and_then(|id|
+                mmx_core::vs_stages::ARENAS.iter().position(|arena| arena.id == id)).unwrap_or(0),
+        );
+        select.set_portraits(mmx_core::Character::ALL.iter().map(|&character|
+            mmx_core::bone_animation::selection_portrait(&game, character)).collect());
+        select
+    });
     let mut app = App {
         game,
         scale: args.scale,
         start_fullscreen: args.fullscreen,
-        coop: args.players > 1 || args.coop_local,
+        coop: args.vs_mode || args.players > 1 || args.coop_local,
         players: usize::from(args.players.max(if args.coop_local { 2 } else { 1 })),
         demo_bots: args.demo_bots.then(DemoBots::default),
         showcase_characters: args.showcase_characters,
@@ -140,6 +156,8 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         title: String::new(),
         audio_stats: std::env::var_os("MMX_AUDIO_STATS").is_some_and(|v| v == "1"),
         net,
+        vs_select,
+        vs_prev_inputs: [0; 4],
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
@@ -289,6 +307,47 @@ impl App {
     }
 
     fn step(&mut self) {
+        if self.vs_select.is_some() {
+            let inputs = [
+                self.kb[0] | self.pad_bits(self.pads[0]),
+                self.kb[1] | self.pad_bits(self.pads[1]),
+                self.pad_bits(self.pads[2]),
+                self.pad_bits(self.pads[3]),
+            ];
+            let choice = self.vs_select.as_mut().and_then(|select| select.step(inputs));
+            if let Some(choice) = choice {
+                for (slot, character) in choice.characters.into_iter().enumerate() {
+                    self.game.set_player_character(slot, character);
+                }
+                if let Err(e) = self.game.set_p1_zero(
+                    choice.characters[0] == mmx_core::Character::Zero && self.game.zero_set().is_some()
+                ) {
+                    eprintln!("VS fighter: {e}");
+                    if let Some(select) = &mut self.vs_select { select.retry_arena(e); }
+                    return;
+                }
+                let arena = &mmx_core::vs_stages::ARENAS[choice.stage_index];
+                if let Err(e) = self.game.enable_vs(self.players) {
+                    eprintln!("VS arena: {e}");
+                    if let Some(select) = &mut self.vs_select { select.retry_arena(e); }
+                    return;
+                }
+                self.game.set_vs_arena(*arena);
+                if let Err(e) = mmx_core::vs_stages::start_stage(&mut self.game, arena) {
+                    eprintln!("VS arena: {e}");
+                    if let Some(select) = &mut self.vs_select { select.retry_arena(e); }
+                    return;
+                }
+                // The ROM boot is fast-forwarded with no audio output. Discard
+                // its title and loading music before live arena pacing starts.
+                let _ = self.game.take_audio();
+                self.vs_select = None;
+                self.acc = 0.0;
+                eprintln!("VS: {} players, {}", self.players, arena.name);
+            }
+            self.fps_frames += 1;
+            return;
+        }
         if let Some(bots) = self.demo_bots.as_ref() {
             bots.maintain_party(&mut self.game);
         }
@@ -301,6 +360,16 @@ impl App {
                 self.pad_bits(self.pads[3]),
             ],
         };
+        if self.game.vs_status().is_some_and(|status| status.round_over) {
+            let start_pressed = (0..self.players).any(|i|
+                inputs[i] & mmx_core::BTN_START != 0
+                    && self.vs_prev_inputs[i] & mmx_core::BTN_START == 0);
+            self.vs_prev_inputs = inputs;
+            if start_pressed { self.game.restart_vs_round(); }
+            self.fps_frames += 1;
+            return;
+        }
+        self.vs_prev_inputs = inputs;
         if self.showcase_characters {
             if let Some((group, characters)) = self.demo_bots.as_ref().and_then(DemoBots::showcase_selection) {
                 for (slot, character) in characters.into_iter().enumerate() {
@@ -360,6 +429,9 @@ impl App {
     }
 
     fn hotkey(&mut self, h: Hotkey, pressed: bool, event_loop: &ActiveEventLoop) {
+        if self.vs_select.is_some() && !matches!(h, Hotkey::Quit | Hotkey::Fullscreen | Hotkey::Widescreen) {
+            return;
+        }
         // Pause, fast-forward and save states would desync an online session.
         if self.net.is_some() && !matches!(h, Hotkey::Quit | Hotkey::Fullscreen | Hotkey::Widescreen) {
             return;
@@ -438,6 +510,8 @@ impl App {
         let mut t = format!("mmxrs - {:.0} fps", self.fps);
         if let Some(net) = &self.net {
             t += &net.title();
+        } else if self.vs_select.is_some() || self.game.vs_status().is_some() {
+            t += " [VS]";
         } else if self.coop {
             t += " [coop]";
         }
@@ -504,7 +578,8 @@ impl App {
     }
 
     fn draw(&mut self) {
-        let (px, w, h) = self.game.frame();
+        let select_screen = self.vs_select.is_some();
+        let (px, w, h) = if select_screen { (&[][..], self.tex.0, self.tex.1) } else { self.game.frame() };
         let Some(p) = self.pixels.as_mut() else {
             return;
         };
@@ -521,10 +596,17 @@ impl App {
             }
         }
         let p = self.pixels.as_mut().expect("pixels");
-        for (dst, &c) in p.frame_mut().chunks_exact_mut(4).zip(&px[..w * h]) {
-            dst.copy_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8, 0xFF]);
+        if let Some(select) = &self.vs_select {
+            select.draw(p.frame_mut(), w, h);
+        } else {
+            for (dst, &c) in p.frame_mut().chunks_exact_mut(4).zip(&px[..w * h]) {
+                dst.copy_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8, 0xFF]);
+            }
+            crate::effects::apply(p.frame_mut(), w, h, &self.game, self.dynamic_lighting, self.charge_effects);
+            if let Some(status) = self.game.vs_status().filter(|status| status.round_over) {
+                crate::vs_select::draw_result(p.frame_mut(), w, h, status);
+            }
         }
-        crate::effects::apply(p.frame_mut(), w, h, &self.game, self.dynamic_lighting, self.charge_effects);
         let dest = self.dest();
         let (Some(p), Some(fit)) = (self.pixels.as_ref(), self.fit.as_mut()) else {
             return;
@@ -624,11 +706,22 @@ impl ApplicationHandler for App {
         // per `Game::fps` tick without audio). A hard-coded 60 Hz timer
         // overran the ring on the PAL ROM (50 fps): dropped audio, fast music.
         let was_live = self.net.as_ref().is_some_and(|n| n.play.live());
-        if self.net.is_some() && !was_live {
+        if self.vs_select.is_some() {
+            // The menu has no ROM audio, so use a real 60 Hz clock instead of
+            // repeatedly filling the empty audio ring.
+            self.acc = (self.acc + dt * 60.0).min(f64::from(MAX_CATCHUP));
+            while self.acc >= 1.0 {
+                self.acc -= 1.0;
+                self.step();
+                stepped += 1;
+            }
+        } else if self.net.is_some() && !was_live {
             self.net_tick(); // connecting / closed: network only
         }
         let live = self.net.as_ref().is_some_and(|n| n.play.live());
-        if live {
+        if self.vs_select.is_some() {
+            // Selection was paced above and must not enter the ROM audio loop.
+        } else if live {
             if let (true, Some(target)) = (was_live, self.audio_target()) {
                 let mut ticks = 0;
                 while ticks < MAX_CATCHUP && self.audio.as_ref().is_some_and(|a| a.depth() < target)

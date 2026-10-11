@@ -64,6 +64,7 @@ const P2_TILES_MAGIC_V2: &[u8; 4] = b"P2T2";
 /// (P2 hidden: it re-anchors beside P1 when it next shows).
 const COOP_MAGIC: &[u8; 4] = b"COOP";
 const EXTRA_COOP_MAGIC: &[u8; 4] = b"XTRA";
+const VS_MAGIC: &[u8; 4] = b"VS01";
 
 /// What a save state holds, without loading it ([`Game::state_info`]).
 #[derive(Debug, Clone)]
@@ -89,6 +90,8 @@ pub struct Game {
     pub(crate) local_player_index: usize,
     pub(crate) active_shot_extra: Option<usize>,
     pub(crate) player_characters: [crate::character::Character; 4],
+    pub(crate) vs_state: Option<crate::vs::VsState>,
+    pub(crate) vs_arena: Option<crate::vs_stages::Arena>,
     /// Debug: when `Some`, every opcode fetched inside `call_isolated*` is
     /// appended as `PBR:PC`.
     pub isolated_trace: Option<Vec<u32>>,
@@ -299,6 +302,8 @@ impl Game {
                 crate::character::Character::X,
                 crate::character::Character::X,
             ],
+            vs_state: None,
+            vs_arena: None,
             emu,
             hooks: HookMap::resolve(&rom),
             rom,
@@ -521,6 +526,8 @@ impl Game {
     }
 
     pub fn step(&mut self, pads: Pads) {
+        if self.vs_state.as_ref().is_some_and(|vs| vs.round_over) { return; }
+        let pads = crate::vs::mask_pads(self, pads);
         let inputs = SnesInputs {
             p1: joypad(pads.p1),
             p2: joypad(pads.p2),
@@ -550,6 +557,7 @@ impl Game {
             crate::sfx::mix(&mut self.coop.sfx, &s.swing, fps, &mut self.audio.0[audio_from..]);
         }
         self.frame_count += 1;
+        crate::vs::tick(self);
         if self.wide_margin() > 0 {
             let _t = crate::profile::scope("wide tiles");
             crate::widescreen::update_margin_tiles(self);
@@ -611,7 +619,7 @@ impl Game {
     }
 
     fn draw_local_health(&mut self) {
-        if self.local_players < 4 || !self.coop.enabled || !crate::coop_hud::four_hud_shown(self) { return }
+        if self.local_players < 3 || !self.coop.enabled || !crate::coop_hud::four_hud_shown(self) { return }
         let hp = [
             self.wram()[crate::ram::wram_index(crate::ram::X_HP)] & 0x7F,
             if self.coop.p2_hidden { 0 } else { self.coop.p2[crate::coop::OFF_HP] & 0x7F },
@@ -1111,6 +1119,10 @@ impl Game {
             v.extend(EXTRA_COOP_MAGIC);
             v.extend(bincode::encode_to_vec(&self.extra_coop, cfg).expect("extra co-op states encode"));
         }
+        if let Some(vs) = &self.vs_state {
+            v.extend(VS_MAGIC);
+            v.extend(bincode::encode_to_vec(vs, cfg).expect("VS state encodes"));
+        }
         v
     }
 
@@ -1131,6 +1143,21 @@ impl Game {
         let Some(t) = t.strip_prefix(EXTRA_COOP_MAGIC.as_slice()) else { return Ok(None) };
         let (extra, _) = bincode::decode_from_slice(t, bincode::config::standard()).map_err(|e| format!("extra co-op states: {e}"))?;
         Ok(Some(extra))
+    }
+
+    fn vs_tail(t: &[u8]) -> Result<Option<crate::vs::VsState>, String> {
+        let Some(t) = t.strip_prefix(COOP_MAGIC.as_slice()) else { return Ok(None) };
+        let n = t.get(..4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize).ok_or("co-op state truncated")?;
+        let Some(mut t) = t.get(4 + n..) else { return Err("co-op state truncated".into()) };
+        if let Some(rest) = t.strip_prefix(EXTRA_COOP_MAGIC.as_slice()) {
+            let (_, used): ([coop::CoopState; 2], usize) = bincode::decode_from_slice(rest, bincode::config::standard())
+                .map_err(|e| format!("extra co-op states: {e}"))?;
+            t = &rest[used..];
+        }
+        let Some(t) = t.strip_prefix(VS_MAGIC.as_slice()) else { return Ok(None) };
+        let (vs, _): (crate::vs::VsState, usize) = bincode::decode_from_slice(t, bincode::config::standard())
+            .map_err(|e| format!("VS state: {e}"))?;
+        Ok(Some(vs))
     }
 
     /// Frame count, tile-page marker and co-op state of a save state.
@@ -1164,6 +1191,7 @@ impl Game {
         let cfg = bincode::config::standard();
         let mut coop = None;
         let mut extra_coop = None;
+        let mut vs_state = None;
         let ((state, frame_count, fired_at), n): ((LegacyMmxSaveState, u64, Option<u32>), _) =
             bincode::decode_from_slice(s, cfg).map_err(|e| e.to_string())?;
         self.emu.load_state(state.into());
@@ -1172,6 +1200,7 @@ impl Game {
             self.emu.set_p2_tiles(t);
             coop = Self::coop_tail(&tail[m..])?;
             extra_coop = Self::extra_coop_tail(&tail[m..])?;
+            vs_state = Self::vs_tail(&tail[m..])?;
         } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V6.as_slice()) {
             let ((page, slots, next, next_slots, pending, page1, next_page1, page2, next_page2, pal, next_pal, palette, next_palette), m): (P2TilesV6, _) =
                 bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
@@ -1181,6 +1210,7 @@ impl Game {
             self.emu.set_p2_tiles(t);
             coop = Self::coop_tail(&tail[m..])?;
             extra_coop = Self::extra_coop_tail(&tail[m..])?;
+            vs_state = Self::vs_tail(&tail[m..])?;
         } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V5.as_slice()) {
             let ((page, slots, next_page, next_slots, pending, page1, next_page1, page2, next_page2), m): (P2TilesV5, _) =
                 bincode::decode_from_slice(tail, cfg).map_err(|e| e.to_string())?;
@@ -1190,6 +1220,7 @@ impl Game {
             self.emu.set_p2_tiles(t);
             coop = Self::coop_tail(&tail[m..])?;
             extra_coop = Self::extra_coop_tail(&tail[m..])?;
+            vs_state = Self::vs_tail(&tail[m..])?;
         } else if let Some(tail) = s[n..].strip_prefix(P2_TILES_MAGIC_V4.as_slice()) {
             const W3: usize = P2_PAGE_WORDS * 3;
             type V4 = (Box<[u16; W3]>, u128, Box<[u16; W3]>, u128, bool, u128, u128, u128, u128);
@@ -1233,6 +1264,9 @@ impl Game {
         self.extra_coop = extra_coop.unwrap_or_else(|| std::array::from_fn(|_| coop::CoopState::default()));
         for extra in &mut self.extra_coop {
             extra.enabled = enabled;
+        }
+        if self.vs_state.is_some() {
+            if let Some(vs) = vs_state { self.vs_state = Some(vs); }
         }
         Ok(())
     }

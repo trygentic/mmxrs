@@ -80,6 +80,9 @@ pub struct Settings {
     pub fullscreen: bool,
     pub zero: bool,
     pub coop_local: bool,
+    /// Local arena match; the in-game screen selects fighters and an arena.
+    #[serde(default)]
+    pub vs_mode: bool,
     /// Number of local players, 1-4. `coop_local` is retained for older saves.
     #[serde(default = "default_local_players")]
     pub local_players: u8,
@@ -161,6 +164,7 @@ impl Default for Settings {
             fullscreen: false,
             zero: false,
             coop_local: false,
+            vs_mode: false,
             local_players: 1,
             characters: default_characters(),
             dynamic_lighting: false,
@@ -224,6 +228,12 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
         return Err("local players must be 1-4".into());
     }
     let player_count = if s.online { 2 } else { local_players };
+    if s.vs_mode && (s.online || local_players < 2) {
+        return Err("VS mode needs 2-4 local players".into());
+    }
+    if s.vs_mode && !s.bone_sheets {
+        return Err("VS mode needs 60 FPS bone animation sheets for the full fighter roster".into());
+    }
     if s.online && s.characters[1] != "zero" {
         return Err("online co-op currently requires player 2 to be Zero".into());
     }
@@ -247,6 +257,7 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
     if s.fullscreen {
         push(&["--fullscreen"]);
     }
+    if s.vs_mode { push(&["--vs"]); }
     if s.zero && s.characters[0] == "x" {
         push(&["--zero"]);
     }
@@ -534,6 +545,21 @@ mod tests {
         assert!(args.contains("--players 4"));
         assert!(args.contains("--dynamic-lighting --charge-effects"));
         assert!(!args.contains("--p4-character"));
+    }
+
+    #[test]
+    fn vs_requires_local_opponents_and_full_roster_art() {
+        let mut s = base();
+        s.vs_mode = true;
+        assert!(build_args(&s).is_err());
+        s.local_players = 4;
+        assert!(build_args(&s).unwrap_err().contains("bone animation"));
+        s.bone_sheets = true;
+        let args = build_args(&s).unwrap();
+        assert!(args.contains(&"--vs".to_string()));
+        assert!(args.windows(2).any(|pair| pair == ["--players", "4"]));
+        s.online = true;
+        assert!(build_args(&s).is_err());
     }
 
     #[test]

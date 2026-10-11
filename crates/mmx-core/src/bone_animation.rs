@@ -30,6 +30,15 @@ pub struct BoneSheet {
     pub clips: Vec<BoneClip>,
 }
 
+/// A small, owned idle pose for character selection screens.
+pub fn selection_portrait(game: &Game, character: Character) -> Option<BoneFrame> {
+    game.bone_sheets.get(&character)
+        .and_then(|sheet| sheet.clips.iter().find(|clip| clip.name == "idle"))
+        .and_then(|clip| clip.frames.first())
+        .cloned()
+        .or_else(|| game.static_sprites.get(&character).map(|frame| frame.as_ref().clone()))
+}
+
 impl BoneSheet {
     pub fn validate(&self) -> Result<(), String> {
         if !self.clips.iter().any(|clip| clip.name == "idle" && !clip.frames.is_empty()) {

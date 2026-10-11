@@ -23,6 +23,18 @@ controller joins the first unclaimed slot when it presses a button. Use
 `--p1-character ID` through `--p4-character ID` to select characters, or use
 the launcher dropdowns. Boss visuals are extracted from the X1 ROM at
 startup; if extraction fails, the app reports the character and error.
+
+VS mode starts with `--vs --players 2..4 --bone-sheets DIR` (or the launcher's
+**VS arena match** option). Each player moves an independent cursor through
+the full 19-character roster and locks a fighter with an attack button or
+Start; Select unlocks it. Player 1 then chooses an arena from the Highway and
+eight Maverick stage openings. Fights use the ROM's movement and attacks with
+player projectile damage, a round winner, and cumulative scores. Press Start
+after a round to fight again. `--vs-stage ID` presets the arena cursor; IDs
+are `highway`, `octopus`, `chameleon`, `armadillo`, `mammoth`, `eagle`,
+`mandrill`, `kuwanger`, and `penguin`. VS is local only; players 3 and 4 need
+gamepads. The animation sheets include Bass and Proto Man, who have no X1 ROM
+sprites. Vile also needs the on-foot PNG described below.
 Zero uses X1 ROM art by default; `--x3-rom` selects X3 art. Local players 3 and 4 have independent control state,
 sprite pages and palettes. Sigma and Vile
 cycle ROM poses while moving; other bosses use their idle pose for unmapped
