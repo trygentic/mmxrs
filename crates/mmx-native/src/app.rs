@@ -5,6 +5,7 @@
 
 use crate::audio::Audio;
 use crate::cli::{Args, WideSetting};
+use crate::demo_bots::DemoBots;
 use crate::keys::{self, Hotkey, KeyAction};
 use crate::netplay::Net;
 use crate::video::{self, FitRenderer};
@@ -36,6 +37,9 @@ struct App {
     scale: u32,
     start_fullscreen: bool,
     coop: bool,
+    players: usize,
+    demo_bots: Option<DemoBots>,
+    showcase_characters: bool,
     window: Option<Arc<Window>>,
     pixels: Option<pixels::Pixels<'static>>,
     /// Scales the frame to fit the window (`video`).
@@ -46,14 +50,15 @@ struct App {
     wide: WideSetting,
     /// `MMX_VIDEO_DEBUG=1`: log window, margin, frame and picture rectangle.
     video_debug: bool,
+    dynamic_lighting: bool,
+    charge_effects: bool,
     tex: (usize, usize),
     audio: Option<Audio>,
     gilrs: Option<gilrs::Gilrs>,
     /// macOS GameController pads seen last frame (see `gc_pad`).
     #[cfg(target_os = "macos")]
     gc: Vec<crate::gc_pad::GcPad>,
-    pad1: Option<PadId>,
-    pad2: Option<PadId>,
+    pads: [Option<PadId>; 4],
     /// `--pads` / `MMX_PAD_DEBUG=1`: log every pad bit change.
     pad_debug: bool,
     /// Last bits logged per pad (`pad_debug` only).
@@ -102,20 +107,24 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         game,
         scale: args.scale,
         start_fullscreen: args.fullscreen,
-        coop: args.coop_local,
+        coop: args.players > 1 || args.coop_local,
+        players: usize::from(args.players.max(if args.coop_local { 2 } else { 1 })),
+        demo_bots: args.demo_bots.then(DemoBots::default),
+        showcase_characters: args.showcase_characters,
         window: None,
         pixels: None,
         fit: None,
         surface: (0, 0),
         wide: args.widescreen,
         video_debug: std::env::var_os("MMX_VIDEO_DEBUG").is_some_and(|v| v == "1"),
+        dynamic_lighting: args.dynamic_lighting,
+        charge_effects: args.charge_effects,
         tex: (args.widescreen.initial().width(), 224),
         audio,
         gilrs,
         #[cfg(target_os = "macos")]
         gc: Vec::new(),
-        pad1: None,
-        pad2: None,
+        pads: [None; 4],
         pad_debug,
         pad_seen: Vec::new(),
         kb: [0; 2],
@@ -179,26 +188,23 @@ impl App {
             )
     }
 
-    /// z2-native's rule: the pad that last pressed a button is P1; in co-op a
-    /// different pad that presses becomes P2.
+    /// Assign each newly used controller to the first open local player slot.
+    /// Single player retains the historical last-pressed-controller behavior.
     fn claim(&mut self, id: PadId) {
         if !self.coop {
-            self.pad1 = Some(id);
-        } else if self.pad2 != Some(id) {
-            if self.pad1.is_none() || self.pad1 == Some(id) {
-                self.pad1 = Some(id);
-            } else {
-                self.pad2 = Some(id);
+            self.pads[0] = Some(id);
+        } else if !self.pads.contains(&Some(id)) {
+            if let Some(slot) = self.pads[..self.players].iter_mut().find(|slot| slot.is_none()) {
+                *slot = Some(id);
             }
         }
     }
 
     fn forget(&mut self, id: PadId) {
-        if self.pad1 == Some(id) {
-            self.pad1 = None;
-        }
-        if self.pad2 == Some(id) {
-            self.pad2 = None;
+        for slot in &mut self.pads {
+            if *slot == Some(id) {
+                *slot = None;
+            }
         }
         self.pad_seen.retain(|(p, _)| *p != id);
     }
@@ -276,22 +282,37 @@ impl App {
                 Some(l) => l.1 = bits,
                 None => self.pad_seen.push((id, bits)),
             }
-            let slot = if self.pad1 == Some(id) {
-                "P1"
-            } else if self.pad2 == Some(id) {
-                "P2"
-            } else {
-                "--"
-            };
+            let slot = self.pads.iter().position(|p| *p == Some(id))
+                .map_or_else(|| "--".to_string(), |i| format!("P{}", i + 1));
             eprintln!("pad {slot} {name}: {bits:#06x} {}", keys::bit_names(bits));
         }
     }
 
     fn step(&mut self) {
-        let pads = Pads {
-            p1: self.kb[0] | self.pad_bits(self.pad1),
-            p2: self.kb[1] | self.pad_bits(self.pad2),
+        if let Some(bots) = self.demo_bots.as_ref() {
+            bots.maintain_party(&mut self.game);
+        }
+        let inputs = match self.demo_bots.as_mut() {
+            Some(bots) => bots.pads(&self.game),
+            None => [
+                self.kb[0] | self.pad_bits(self.pads[0]),
+                self.kb[1] | self.pad_bits(self.pads[1]),
+                self.pad_bits(self.pads[2]),
+                self.pad_bits(self.pads[3]),
+            ],
         };
+        if self.showcase_characters {
+            if let Some((group, characters)) = self.demo_bots.as_ref().and_then(DemoBots::showcase_selection) {
+                for (slot, character) in characters.into_iter().enumerate() {
+                    self.game.set_player_character(slot, character);
+                }
+                eprintln!("showcase group {}: {}", group + 1,
+                    characters.map(|character| character.label()).join(", "));
+            }
+        }
+        let pads = Pads { p1: inputs[0], p2: inputs[1] };
+        let extra = [inputs[2], inputs[3]];
+        self.game.set_extra_pads(extra);
         self.game.step(pads);
         self.push_audio();
         self.fps_frames += 1;
@@ -306,7 +327,7 @@ impl App {
 
     /// One online tick (this peer's pad is always the P1 keys / first pad).
     fn net_tick(&mut self) -> u32 {
-        let pad = self.kb[0] | self.pad_bits(self.pad1);
+        let pad = self.kb[0] | self.pad_bits(self.pads[0]);
         let Some(net) = self.net.as_mut() else { return 0 };
         let n = net.tick(&mut self.game, pad);
         self.push_audio();
@@ -315,7 +336,7 @@ impl App {
 
     /// Online tick paced by the audio device: always queues one frame of audio.
     fn net_tick_audio(&mut self) -> u32 {
-        let pad = self.kb[0] | self.pad_bits(self.pad1);
+        let pad = self.kb[0] | self.pad_bits(self.pads[0]);
         let (Some(net), Some(a)) = (self.net.as_mut(), &self.audio) else {
             return 0;
         };
@@ -420,6 +441,9 @@ impl App {
         } else if self.coop {
             t += " [coop]";
         }
+        if self.demo_bots.is_some() {
+            t += " [DEMO BOTS]";
+        }
         t += &format!(" [SLOT {}]", self.slot);
         if self.paused {
             t += " [PAUSED]";
@@ -500,6 +524,7 @@ impl App {
         for (dst, &c) in p.frame_mut().chunks_exact_mut(4).zip(&px[..w * h]) {
             dst.copy_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8, 0xFF]);
         }
+        crate::effects::apply(p.frame_mut(), w, h, &self.game, self.dynamic_lighting, self.charge_effects);
         let dest = self.dest();
         let (Some(p), Some(fit)) = (self.pixels.as_ref(), self.fit.as_mut()) else {
             return;

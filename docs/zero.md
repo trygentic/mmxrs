@@ -139,7 +139,7 @@ Code: `crates/mmx-core/src/p2tiles.rs`, PPU patch in
   `verify --coop-off` parity run stays identical).
 - **Save state.** The page is inside the PPU, so `to_save_state` clones it.
   Its bincode encoding inside `SnesEmulator` is empty (`P2TilesSlot`), and
-  `Game::save_state` appends the marker `P2T6` and the `P2Tiles` after
+  `Game::save_state` appends the marker `P2T7` and the `P2Tiles` after
   `(emu, frame_count, fired_at)`. States written before the patch (no tail)
   or with the old 512-word page (tail without the marker) load with an empty
   page; `P2T2` states (one 768-word page) load it as page 0, `P2T3` states
@@ -243,6 +243,12 @@ yourself may be shared.
 Code: `crates/mmx-core/src/zero_data.rs` (`extract_x1(rom) -> ZeroSet`,
 `zero_frame_for`). Sheet: `cargo xtask zerosheet --out DIR` (one PNG per frame
 plus `sheet.png`). The art is Capcom's: render it locally, never commit it.
+
+The launcher and native game now select this X1 art by default for Zero.
+`boss_data::extract_x1(rom, Character::Zero)` adapts the standing pose (frame
+4) and dash poses (frames 0–3) to the 48-tile local player page. Other actions
+reuse the standing pose where X1 has no matching animation. Passing an X3 ROM
+explicitly selects the X3 art and saber instead.
 
 **Where Zero is.** Highway ending, enemy table slot 1 (`$0EA8`), id `+0A = $33`,
 `+11 = $2C` (palette 6, priority 2), sprite set `+16 = $53`, graphics slot

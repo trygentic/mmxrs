@@ -188,7 +188,7 @@ impl App {
         ui.heading("ROMs");
         let [rx, rx3] = &mut self.roms;
         let x_ok = rom_row(ui, "Mega Man X (USA)", &mut s.rom, rx, false);
-        let x3_ok = rom_row(ui, "Mega Man X3 (USA), optional: Zero's sprites + saber", &mut s.x3_rom, rx3, true);
+        let x3_ok = rom_row(ui, "Mega Man X3 (USA), optional: alternate Zero art + saber", &mut s.x3_rom, rx3, true);
         ui.separator();
 
         ui.heading("Options");
@@ -207,20 +207,64 @@ impl App {
         .on_hover_text("extra scenery left and right of the picture; F10 in game cycles it");
         ui.checkbox(&mut s.wide_gameplay, "spawn enemies at the wide edges (changes gameplay; both players)")
             .on_hover_text("enemies spawn, act and leave 136-160 px further out on both sides, whatever the widescreen setting; online, both players must tick it");
-        ui.checkbox(&mut s.zero, "Play as Zero (needs X3)");
+        ui.checkbox(&mut s.dynamic_lighting, "Multiply style dynamic lighting");
+        ui.checkbox(&mut s.charge_effects, "Buster charge lighting and particles");
+        ui.checkbox(&mut s.bone_sheets, "60 FPS bone animation sheets");
+        if s.bone_sheets {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut s.bone_sheets_path).desired_width(ui.available_width() - 92.0));
+                if ui.button("Browse…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        s.bone_sheets_path = path.to_string_lossy().into_owned();
+                    }
+                }
+            });
+            ui.weak("Bone Animation Editor sheet pack; missing clips use the game's sprites.");
+        }
         ui.separator();
 
-        // One choice; the two saved bools stay as they are in launcher.json.
+        // Online remains a two-player mode; local play can use up to four.
         ui.horizontal(|ui| {
             ui.label("Players");
-            let mut mode = if s.online { 2 } else { u8::from(s.coop_local) };
-            for (m, name) in ["1 player", "Local co-op", "Online co-op"].into_iter().enumerate() {
-                ui.radio_value(&mut mode, m as u8, name);
-            }
-            (s.coop_local, s.online) = (mode == 1, mode == 2);
+            ui.radio_value(&mut s.online, false, "Local");
+            ui.radio_value(&mut s.online, true, "Online co-op");
         });
-        if s.coop_local {
-            ui.weak("Player 2 (Zero): WASD, G jump, F buster, H dash, T saber, or a second gamepad.");
+        if !s.online {
+            ui.add(egui::Slider::new(&mut s.local_players, 1..=4).text("local players"));
+            s.coop_local = s.local_players > 1;
+        }
+        let player_count = if s.online { 2 } else { s.local_players };
+        for i in 0..usize::from(player_count) {
+            ui.horizontal(|ui| {
+                ui.label(format!("Player {}", i + 1));
+                let selected = Character::parse(&s.characters[i])
+                    .map(|character| character.label().to_owned())
+                    .unwrap_or_else(|| s.characters[i].clone());
+                let response = egui::ComboBox::from_id_salt(("character", i)).selected_text(selected).show_ui(ui, |ui| {
+                    for &character in Character::ALL {
+                        ui.selectable_value(&mut s.characters[i], character.id().to_string(), character.label());
+                    }
+                });
+                if i == 0 && response.response.changed() { s.zero = false; }
+            });
+        }
+        if s.characters.iter().take(usize::from(player_count)).any(|c| c == "vile") {
+            ui.label("Vile on-foot sprite");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut s.vile_sprite_path).desired_width(ui.available_width() - 92.0));
+                if ui.button("Browse…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).pick_file() {
+                        s.vile_sprite_path = path.to_string_lossy().into_owned();
+                    }
+                }
+            });
+            ui.weak("Used for Vile even when 60 FPS bone animation sheets are off.");
+        }
+        if s.characters.iter().take(usize::from(player_count)).any(|c| c == "zero") {
+            ui.weak("Zero uses his X1 sprites by default. Add X3 for alternate art and saber attacks.");
+        }
+        if s.characters.iter().take(usize::from(player_count)).any(|c| Character::parse(c).is_some_and(|character| !matches!(character, Character::X | Character::Zero))) {
+            ui.weak("Bosses use their X1 ROM sprites. Missing movement poses use their idle animation.");
         }
         if s.online {
             ui.group(|ui| {
@@ -281,8 +325,8 @@ impl App {
         ui.separator();
 
         let args = build_args(s);
-        let zero_ok = !s.zero || x3_ok;
-        let can = x_ok && zero_ok && args.is_ok() && self.child.is_none();
+        let can = x_ok && (s.x3_rom.trim().is_empty() || x3_ok) && args.is_ok() && self.child.is_none();
+        let x3_invalid = !s.x3_rom.trim().is_empty() && !x3_ok;
         ui.horizontal(|ui| {
             if ui.add_enabled(can, egui::Button::new("Launch")).clicked() {
                 self.launch();
@@ -295,8 +339,8 @@ impl App {
         });
         if let Err(e) = &args {
             ui.weak(e.as_str());
-        } else if !zero_ok {
-            ui.weak("playing as Zero needs a valid X3 ROM");
+        } else if x3_invalid {
+            ui.weak("the selected X3 ROM is invalid");
         }
         if !self.status.is_empty() {
             ui.label(&self.status);

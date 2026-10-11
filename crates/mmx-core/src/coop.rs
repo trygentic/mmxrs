@@ -344,14 +344,14 @@ pub fn register_coop_traps(game: &mut Game) -> Result<(), String> {
         ));
     }
     crate::zero::register_zero_traps(game);
-    game.traps.register(game.hook(HOOK_UPDATE), "coop_p2_update", TrapReturn::Observe, p2_update);
-    game.traps.register(game.hook(HOOK_PHYSICS), "coop_p2_physics", TrapReturn::Observe, p2_physics);
-    game.traps.register(game.hook(HOOK_OAM_HIDE), "coop_p2_oam_hide", TrapReturn::Observe, oam_hide);
+    game.traps.register(game.hook(HOOK_UPDATE), "coop_p2_update", TrapReturn::Observe, local_update);
+    game.traps.register(game.hook(HOOK_PHYSICS), "coop_p2_physics", TrapReturn::Observe, local_physics);
+    game.traps.register(game.hook(HOOK_OAM_HIDE), "coop_p2_oam_hide", TrapReturn::Observe, local_oam_hide);
     register_display_trap(game);
-    game.traps.register(game.hook(HOOK_CONTACT), "coop_contact", TrapReturn::Observe, contact);
+    game.traps.register(game.hook(HOOK_CONTACT), "coop_contact", TrapReturn::Observe, local_contact);
     crate::coop_objects::register(game);
-    game.traps.register(game.hook(HOOK_SHOT_SLOT), "coop_shot_slot", TrapReturn::Observe, shot_slot);
-    game.traps.register(game.hook(HOOK_SHOT_SLOT_DONE), "coop_shot_slot_done", TrapReturn::Observe, shot_slot_done);
+    game.traps.register(game.hook(HOOK_SHOT_SLOT), "coop_shot_slot", TrapReturn::Observe, local_shot_slot);
+    game.traps.register(game.hook(HOOK_SHOT_SLOT_DONE), "coop_shot_slot_done", TrapReturn::Observe, local_shot_slot_done);
     game.traps.register(game.hook(crate::saber::HOOK_SHOTS_DONE), "coop_saber_shot", TrapReturn::Observe, crate::saber::shots_done);
     crate::coop_hud::register(game);
     Ok(())
@@ -366,6 +366,57 @@ fn go_down(game: &mut Game) {
     game.coop.p2_warp = false;
     game.coop.down_frames = P2_DOWN_FRAMES;
     crate::coop_hud::mark_down(game);
+}
+
+/// Run the established second-player ROM slice with a separate shadow block
+/// and controller for local player 3 or 4. The live P2 state is restored even
+/// though the isolated ROM calls may enter other co-op traps.
+fn with_extra_player(game: &mut Game, index: usize, f: impl FnOnce(&mut Game)) {
+    let pad_at = ix(PAD2_HELD);
+    let saved_pad = [game.wram()[pad_at], game.wram()[pad_at + 1]];
+    let extra_pad = game.extra_pads[index].to_le_bytes();
+    game.wram_mut()[pad_at..pad_at + 2].copy_from_slice(&extra_pad);
+    std::mem::swap(&mut game.coop, &mut game.extra_coop[index]);
+    let was_slice = std::mem::replace(&mut game.local_slice, true);
+    let previous_player = std::mem::replace(&mut game.local_player_index, index + 2);
+    f(game);
+    game.local_player_index = previous_player;
+    game.local_slice = was_slice;
+    std::mem::swap(&mut game.coop, &mut game.extra_coop[index]);
+    game.wram_mut()[pad_at..pad_at + 2].copy_from_slice(&saved_pad);
+}
+
+fn local_update(game: &mut Game) {
+    p2_update(game);
+    if game.local_slice { return; }
+    for index in 0..game.local_players.saturating_sub(2).min(2) {
+        with_extra_player(game, index, p2_update);
+    }
+}
+
+fn local_physics(game: &mut Game) {
+    p2_physics(game);
+    if game.local_slice { return; }
+    for index in 0..game.local_players.saturating_sub(2).min(2) {
+        with_extra_player(game, index, p2_physics);
+    }
+}
+
+fn local_oam_hide(game: &mut Game) {
+    game.local_oam_end = 0;
+    game.oam_slots[1] = 0;
+    oam_hide(game);
+    for index in 0..game.local_players.saturating_sub(2).min(2) {
+        with_extra_player(game, index, oam_hide);
+    }
+}
+
+fn local_contact(game: &mut Game) {
+    contact(game);
+    if game.local_slice { return; }
+    for index in 0..game.local_players.saturating_sub(2).min(2) {
+        with_extra_player(game, index, contact);
+    }
 }
 
 /// [`HOOK_UPDATE`]: P2 update slice.
@@ -430,7 +481,7 @@ fn p2_update(game: &mut Game) {
     // actions then resolve as with no input: it stops, lands and stands.
     let locked = coop_stages::p1_scripted(game.wram());
     let mut pad = if locked { 0 } else { word(game.wram(), PAD2_HELD) & !(BTN_START | BTN_SELECT) };
-    if game.zero_set.is_some() {
+    if game.current_shadow_is_zero() {
         // X swings the saber; during a swing the ROM gets a masked pad.
         pad = crate::saber::update(&mut game.coop.saber, &game.coop.p2, pad);
         if crate::saber::whoosh(&game.coop.saber) {
@@ -500,6 +551,31 @@ pub const HOOK_SHOT_SLOT_DONE: HookId = HookId::ShotSlotDone;
 /// the despawn does `DEC $0BDD` / `DEC $0C0B` (the shot counts). Run with
 /// P1's block, P2's shots came out of X, flew X's way, and took from P1's
 /// count (B3 had patched only the count).
+fn local_shot_slot(game: &mut Game) {
+    game.active_shot_extra = None;
+    if !p2_shot_slot(game) {
+        let k = game.regs().d.wrapping_sub(X_SHOTS as u16) / 0x40;
+        if k < 8 {
+            for index in 0..game.local_players.saturating_sub(2).min(2) {
+                if game.extra_coop[index].p2_shots >> k & 1 != 0 {
+                    game.active_shot_extra = Some(index);
+                    with_extra_player(game, index, shot_slot);
+                    return;
+                }
+            }
+        }
+    }
+    shot_slot(game);
+}
+
+fn local_shot_slot_done(game: &mut Game) {
+    if let Some(index) = game.active_shot_extra.take() {
+        with_extra_player(game, index, shot_slot_done);
+    } else {
+        shot_slot_done(game);
+    }
+}
+
 fn shot_slot(game: &mut Game) {
     if game.coop.enabled && p2_shot_slot(game) {
         let mut p2 = game.coop.p2;
@@ -512,7 +588,7 @@ fn shot_slot(game: &mut Game) {
 /// block back.
 fn shot_slot_done(game: &mut Game) {
     let p2 = game.coop.enabled && p2_shot_slot(game);
-    if (p2 && game.zero_set.is_some()) || (!p2 && game.p1_zero()) {
+    if (p2 && game.current_shadow_is_zero()) || (!p2 && game.p1_zero()) {
         zero_muzzle(game);
     }
     if p2 {
@@ -698,7 +774,13 @@ pub(crate) fn register_display_trap(game: &mut Game) {
 
 fn display_slice(game: &mut Game) {
     p2_display(game);
+    if !game.local_slice {
+        for index in 0..game.local_players.saturating_sub(2).min(2) {
+            with_extra_player(game, index, p2_display);
+        }
+    }
     crate::margin_sprites::observe(game);
+    crate::bone_animation::prepare(game);
 }
 
 /// [`HOOK_DISPLAY`]: P2 display slice, after the ROM's OAM build is done.
@@ -721,10 +803,18 @@ fn p2_display(game: &mut Game) {
     // `call_isolated`'s sentinel frame, so P2 must end below slot 127: when
     // the game left too few slots, P2 takes the game's last (lowest priority)
     // ones. Measured at M3 (hw-a f240..300): the game uses 100-128 slots.
-    let used = dp[OAM_USED].min(128);
-    let zero = game.zero_set.clone();
+    let used = dp[OAM_USED].max(game.local_oam_end).min(128);
+    let boss = game.current_boss_set();
+    let zero = game.current_shadow_is_zero().then(|| game.zero_set.clone()).flatten();
     let fx = &game.coop.p2_scratch[P2_SWAPPED_LEN - 0x60..];
-    let need = match &zero {
+    let need = if let Some(b) = &boss {
+        (game.coop.p2[0x0E] != 0).then(|| {
+            std::iter::once(b.idle_frame).chain(b.run_frames.iter().copied())
+                .filter_map(|f| b.frames.get(f))
+                .map(|f| f.sprites.len())
+                .max().unwrap_or(0)
+        }).unwrap_or(0)
+    } else { match &zero {
         Some(z) => {
             crate::zero::x3_frame(&game.coop.p2, &game.coop.saber).map_or(0, |f| z.frames[f].sprites.len())
                 + crate::zero::wave_len(z, &game.coop.saber)
@@ -733,14 +823,49 @@ fn p2_display(game: &mut Game) {
             layout_len(game, &game.coop.p2)
                 + (0..3).map(|k| &fx[k * 0x20..k * 0x20 + 0x20]).filter(|o| o[0] != 0).map(|o| layout_len(game, o)).sum::<usize>()
         }
+    }};
+    let need = if game.local_players >= 4 && (boss.is_some() || zero.is_some()) {
+        need.min(crate::zero::FOUR_PLAYER_ART_SLOTS)
+    } else {
+        need
     };
-    let Some(room) = (127 - crate::coop_hud::HUD_SLOTS).checked_sub(need) else { return };
-    let first = ((used + 3) & !3).min(room as u8 & !3);
+    let hud_slots = if game.local_players >= 4 { 0 } else { crate::coop_hud::HUD_SLOTS };
+    let Some(room) = (127 - hud_slots).checked_sub(need) else { return };
+    if game.local_slice && game.local_players < 4 && usize::from(used) > room {
+        // Earlier players already own these OAM slots. An extra player may
+        // disappear for a crowded frame, but must never overwrite them.
+        return;
+    }
+    let mut first = ((used + 3) & !3).min(room as u8 & !3);
+    if game.local_players >= 4 {
+        // A crowded ROM OAM build can consume 100+ slots. Reserve room for
+        // every remaining local player by replacing the game's lowest
+        // priority sprites; never replace an earlier co-op player's slots.
+        let remaining = game.local_players.saturating_sub(game.local_player_index);
+        let reserve = (127usize.saturating_sub(remaining * crate::zero::FOUR_PLAYER_ART_SLOTS
+            + remaining.saturating_sub(1) * 3)) & !3;
+        first = first.min(reserve as u8).max((game.local_oam_end + 3) & !3);
+    }
     let pal = game.coop.zero_palette;
+    if let Some(b) = boss {
+        let page = match game.local_player_index { 2 => 4, 3 => 5, _ => 0 };
+        let last = crate::zero::emit_boss(game, &b, first, pal, page);
+        game.oam_slots[1] |= crate::display::slots(first.into(), last.into());
+        game.local_oam_end = last;
+        let w = game.wram_mut();
+        for slot in usize::from(used)..usize::from(first) {
+            w[ix(ram::OAM_BUF) + slot * 4 + 1] = OAM_HIDDEN_Y;
+        }
+        let base = used.min(first);
+        game.coop.p2_oam_base = usize::from(base);
+        game.coop.p2_oam_count = usize::from(last - base);
+        return;
+    }
     if let Some(z) = zero {
         // X3 Zero: a Rust emitter writes P2's slots and the page (zero.rs).
         let last = crate::zero::emit_x3(game, &z, first, pal);
-        game.oam_slots[1] = crate::display::slots(first.into(), last.into());
+        game.oam_slots[1] |= crate::display::slots(first.into(), last.into());
+        game.local_oam_end = last;
         let w = game.wram_mut();
         for slot in usize::from(used)..usize::from(first) {
             w[ix(ram::OAM_BUF) + slot * 4 + 1] = OAM_HIDDEN_Y; // alignment padding
@@ -768,10 +893,15 @@ fn p2_display(game: &mut Game) {
     // as in the ROM's OAM build.
     game.call_isolated_ret(game.hook(FX_OAM), crate::TrapReturn::Rts);
     game.call_isolated_ret(game.hook(PLAYER_OAM), crate::TrapReturn::Rts);
+    let four_player = game.local_players >= 4;
     let w = game.wram_mut();
     swap_block(w, &mut p2);
     swap_scratch(w, &mut scratch);
-    let last = (w[OAM_CURSOR] & 0x7F).max(first);
+    let raw_last = (w[OAM_CURSOR] & 0x7F).max(first);
+    let last = if four_player { raw_last.min(first.saturating_add(crate::zero::FOUR_PLAYER_ART_SLOTS as u8)) } else { raw_last };
+    for slot in usize::from(last)..usize::from(raw_last) {
+        w[ix(ram::OAM_BUF) + slot * 4 + 1] = OAM_HIDDEN_Y;
+    }
     // Flush the partial high-table byte like the build's tail (`$80:D565`),
     // keeping the bits of any game slots above P2's in that byte.
     let r = last & 3;
@@ -792,7 +922,8 @@ fn p2_display(game: &mut Game) {
     let base = used.min(first);
     game.coop.p2_oam_base = usize::from(base);
     game.coop.p2_oam_count = usize::from(last - base);
-    game.oam_slots[1] = p2_slots;
+    game.oam_slots[1] |= p2_slots;
+    game.local_oam_end = last;
     game.add_p2_palette_slots(p2_slots);
     // Route P2's slots to the PPU's shadow tile page (p2tiles.rs).
     crate::p2tiles::mark_p2_slots(game);

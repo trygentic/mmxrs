@@ -33,7 +33,7 @@ Bring your own ROM: nothing from the cartridge is in this repository. See
 make run        # build and open the launcher
 make game       # build and start the game directly (ROM from MMX_ROM or roms/)
 make coop       # local two-player
-make zero       # play as Zero (needs the X3 dump)
+make zero       # play as Zero with the X1 ROM's sprites
 ```
 
 Manual commands:
@@ -45,21 +45,31 @@ export MMX_ROM=/path/to/Mega\ Man\ X\ \(USA\).sfc
 cargo xtask rominfo                     # title, version byte, sha256
 cargo xtask verify --frames 600         # oracle vs DUT, zero input
 cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local
-# Zero with X3's sprites and the saber (optional Mega Man X3 (USA) dump):
+# X1 Zero by default in local co-op and player 1:
+cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local
+cargo run --release -p mmx-native -- --rom "$MMX_ROM" --zero
+# Optional X3 Zero art and saber (requires your Mega Man X3 (USA) dump):
 cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local --x3-rom "/path/to/Mega Man X3 (USA).sfc"
-# player 1 plays as Zero too (single player or co-op; needs the X3 ROM):
-cargo run --release -p mmx-native -- --rom "$MMX_ROM" --x3-rom "/path/to/Mega Man X3 (USA).sfc" --zero
 # online co-op: one side --coop-host ROOM, the other --coop-join ROOM, same --mode on both
 # (rollback default; on a good link --mode lockstep --delay 3 plays smoothest, see docs/netplay.md)
 ```
 
-Player 1: arrows, Z jump, X buster, C dash, V saber (with `--zero`). Player 2:
-WASD, G jump, F buster, H dash, T saber (X3 ROM loaded). Without an X3 ROM
-player 2 is X's sprites in Zero's colours, buster only.
+Player 1: arrows, Z jump, X buster, C dash, V saber with the optional X3 art.
+Player 2: WASD, G jump, F buster, H dash, T saber with the optional X3 art.
+X1 Zero uses his original standing and dash poses; the X3 ROM adds its full
+animation set and saber.
 
 Prefer a window to flags? The launcher picks the ROMs, options and online
 settings, remembers them, and starts the game (docs/launcher.md):
 `cargo build --release -p mmx-native -p mmx-launcher && ./target/release/mmxrs-launcher`.
+
+The launcher now offers 1–4 local controller slots, a character selector per
+slot, optional multiply lighting, and optional X/Zero charge glow and sparks.
+Each local player has independent movement and a sprite page and palette.
+Boss choices draw their sprites from the selected Mega Man X ROM. Sigma and
+Vile use ROM poses while moving; other bosses use their idle pose for actions
+without a mapped animation. Some stage-scale bosses have compact or partial
+player-sized renditions (notably Wolf Sigma and Rangda Bangda).
 
 Per-crate docs: `docs/launcher.md`, `docs/traps.md`, `docs/verify.md`, `docs/coop.md`,
 `docs/netplay.md`, `docs/native.md`, `docs/web.md`.

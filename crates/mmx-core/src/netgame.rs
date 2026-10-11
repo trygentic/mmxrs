@@ -879,6 +879,11 @@ fn start_game(
     // Static art, part of the handshake id (see `NetPlay::config`).
     g.zero_set = game.zero_set.clone();
     g.set_p1_zero(game.p1_zero())?;
+    for index in 0..4 {
+        if let Some(character) = game.player_character(index) {
+            g.set_player_character(index, character);
+        }
+    }
     // Gameplay, part of the handshake id.
     g.set_wide_gameplay(game.wide_gameplay());
     g.set_overclock(game.overclock());

@@ -87,7 +87,7 @@ fn stream_enter(game: &mut Game) {
 /// Take P2's entries back out of the queue and into the page.
 fn stream_exit(game: &mut Game) {
     let Some((start, budget)) = game.p2_stream.take() else { return };
-    let zero = game.zero_set.is_some(); // X3 Zero fills the page itself (zero::emit_x3)
+    let zero = game.current_shadow_is_zero(); // X3 Zero fills the page itself (zero::emit_x3)
     let w = game.wram();
     let end = w[DMA_INDEX];
     let entries: Vec<QueueEntry> = (usize::from(start)..usize::from(end))
@@ -116,7 +116,7 @@ pub fn fill_page(game: &mut Game, o: usize, bytes: &[u8]) {
 
 /// OAM build start (`$80:D544`): no P2 slots until the display slice says so.
 pub fn clear_slots(game: &mut Game) {
-    if game.coop.enabled || game.coop.p1.on {
+    if game.coop.enabled || game.coop.p1.on || game.player_character(0).and_then(|c| game.boss_sets.get(&c)).is_some() {
         game.set_p2_tile_slots(0);
         game.clear_p2_palette_slots();
     }

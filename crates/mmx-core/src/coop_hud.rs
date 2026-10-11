@@ -27,6 +27,9 @@ const BAR_REDRAW: crate::hooks::HookId = crate::hooks::HookId::BarRedraw;
 /// `$1F11`: HP bar state (0 init, 2 shown, 4 hide, 6 hidden).
 const BAR_STATE: u32 = 0x7E1F11;
 const BAR_SHOWN: u8 = 2;
+pub(crate) fn four_hud_shown(game: &Game) -> bool {
+    game.wram()[ix(BAR_STATE)] == BAR_SHOWN && coop_stages::p2_should_exist(game.wram())
+}
 /// Slots of X's bar (icon + up to 6 pieces).
 const BAR_SLOTS: usize = 7;
 /// OAM slots P2's HUD takes past P2's sprites: the bar and the down marker.
@@ -217,6 +220,15 @@ fn put_icon(game: &mut Game) -> bool {
 /// slots past P2's.
 fn hud(game: &mut Game) {
     let shown = game.wram()[ix(BAR_STATE)] == BAR_SHOWN;
+    if game.local_players >= 4 {
+        // Four-player HUD is composed after PPU rendering. The seven ROM bar
+        // sprites would consume scarce OAM and duplicate its P1 display.
+        let o = ix(ram::OAM_BUF);
+        for slot in 0..BAR_SLOTS {
+            game.wram_mut()[o + slot * 4 + 1] = OAM_HIDDEN_Y;
+        }
+        return;
+    }
     // P1 as Zero: X's own icon (slot 0, never moved by the ROM after the
     // bar's init) becomes the Z, in Zero's palette (slot 1).
     if game.coop.p1.on && shown && put_icon(game) {
@@ -290,6 +302,70 @@ fn hud(game: &mut Game) {
     game.coop.p2_oam_count = start + HUD_SLOTS - base;
 }
 
+/// Four vertical HP meters at the screen edges, styled like the original
+/// seven-sprite X bar. Pixel composition avoids consuming scarce SNES OAM
+/// slots in a four-player game. Each player's meter has its own live HP.
+pub fn draw_four_health_bars(pixels: &mut [u32], width: usize, height: usize, hp: [u8; 4], max_hp: u8, initials: [char; 4]) {
+    if width < 256 || height < 144 || pixels.len() < width * height { return }
+    let fill = |pixels: &mut [u32], x: usize, y: usize, w: usize, h: usize, colour: u32| {
+        for row in y..(y + h).min(height) {
+            for col in x..(x + w).min(width) { pixels[row * width + col] = colour; }
+        }
+    };
+    let glyph = |c: char| -> [u8; 5] {
+        match c {
+            '0' => [7,5,5,5,7], '1' => [2,6,2,2,7], '2' => [7,1,7,4,7],
+            '3' => [7,1,7,1,7], '4' => [5,5,7,1,1], '5' => [7,4,7,1,7],
+            '6' => [7,4,7,5,7], '7' => [7,1,1,1,1], '8' => [7,5,7,5,7],
+            '9' => [7,5,7,1,7], 'P' => [7,5,7,4,4], 'X' => [5,5,2,5,5],
+            'Z' => [7,1,2,4,7], 'S' => [7,4,7,1,7], 'V' => [5,5,5,5,2],
+            'A' => [2,5,7,5,5], 'B' => [6,5,6,5,6], 'C' => [7,4,4,4,7],
+            'D' => [6,5,5,5,6], 'E' => [7,4,7,4,7], 'F' => [7,4,7,4,4],
+            'G' => [7,4,5,5,7], 'H' => [5,5,7,5,5], 'I' => [7,2,2,2,7],
+            'L' => [4,4,4,4,7], 'M' => [5,7,7,7,5], 'N' => [5,7,7,7,5],
+            'O' => [7,5,5,5,7], 'R' => [6,5,6,5,5], 'T' => [7,2,2,2,2],
+            'U' => [5,5,5,5,7], 'W' => [5,5,7,7,5], 'Y' => [5,5,2,2,2],
+            _ => [0; 5],
+        }
+    };
+    let text = |pixels: &mut [u32], x: usize, y: usize, s: &str, colour: u32| {
+        for (i, c) in s.chars().enumerate() {
+            for (dy, row) in glyph(c).into_iter().enumerate() {
+                for dx in 0..3 {
+                    if row & (4 >> dx) != 0 { fill(pixels, x + i * 4 + dx, y + dy, 1, 1, colour); }
+                }
+            }
+        }
+    };
+    const BAR_Y: usize = 26;
+    const BAR_H: usize = 100;
+    const BAR_W: usize = 14;
+    const SEGMENTS: usize = 32;
+    let colours = [0x3DA5FF, 0xFF606C, 0x67DB8D, 0xC28BFF];
+    let xs = [6, 24, width - 38, width - 20];
+    for p in 0..4 {
+        let x = xs[p];
+        // Metallic cap and border, dark recessed well, then bright segments
+        // growing upwards from the bottom, as in the game's own HP meter.
+        fill(pixels, x, BAR_Y, BAR_W, BAR_H, 0x0A1326);
+        fill(pixels, x, BAR_Y, BAR_W, 2, 0xCBD5E6);
+        fill(pixels, x, BAR_Y + BAR_H - 2, BAR_W, 2, 0x66768C);
+        fill(pixels, x + 1, BAR_Y + 2, 1, BAR_H - 4, 0x8293A9);
+        fill(pixels, x + BAR_W - 2, BAR_Y + 2, 1, BAR_H - 4, 0x8293A9);
+        fill(pixels, x + 3, BAR_Y + 2, 8, 96, 0x17243A);
+        let units = (usize::from(hp[p].min(max_hp)) * SEGMENTS + usize::from(max_hp.max(1)) / 2)
+            / usize::from(max_hp.max(1));
+        let colour = if hp[p] <= max_hp / 4 { 0xFF675F } else { colours[p] };
+        for segment in 0..units {
+            let y = BAR_Y + 96 - segment * 3;
+            fill(pixels, x + 3, y, 8, 2, colour);
+            fill(pixels, x + 3, y, 2, 2, 0xEFF8FF);
+        }
+        text(pixels, x + 1, BAR_Y - 9, &format!("P{}", p + 1), 0xF5F6FC);
+        text(pixels, x + 5, BAR_Y + BAR_H + 4, &initials[p].to_string(), colours[p]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +381,18 @@ mod tests {
         assert!(!touching(&w, (525, 367)));
         // Fall spot below the screen (pit): never.
         assert!(!touching(&w, (500, 513)));
+    }
+
+    #[test]
+    fn four_health_bars_use_each_players_hp() {
+        let mut pixels = vec![0; 256 * 224];
+        draw_four_health_bars(&mut pixels, 256, 224, [32, 16, 8, 0], 32, ['X', 'Z', 'S', 'V']);
+        let at = |x: usize, y: usize| pixels[y * 256 + x];
+        assert_eq!(at(12, 30), 0x3DA5FF); // full P1 reaches the top
+        assert_eq!(at(30, 80), 0xFF606C); // half P2 reaches the middle
+        assert_eq!(at(30, 50), 0x17243A);
+        assert_eq!(at(224, 122), 0xFF675F); // low P3 uses the warning colour
+        assert_eq!(at(224, 80), 0x17243A);
+        assert_eq!(at(242, 122), 0x17243A); // empty P4
     }
 }

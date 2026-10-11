@@ -17,6 +17,42 @@ a timer at the ROM's rate drives it (`Game::fps`: 60.0988 NTSC, 50.007 PAL;
 `roms/mega-man-x.smc` is the PAL release). `MMX_AUDIO_STATS=1` prints samples/s,
 ring depth and drops once a second.
 
+Local multiplayer accepts `--players 1..4`; the first two slots use the
+keyboard layouts below, and each further slot needs its own gamepad. A
+controller joins the first unclaimed slot when it presses a button. Use
+`--p1-character ID` through `--p4-character ID` to select characters, or use
+the launcher dropdowns. Boss visuals are extracted from the X1 ROM at
+startup; if extraction fails, the app reports the character and error.
+Zero uses X1 ROM art by default; `--x3-rom` selects X3 art. Local players 3 and 4 have independent control state,
+sprite pages and palettes. Sigma and Vile
+cycle ROM poses while moving; other bosses use their idle pose for unmapped
+actions. Wolf Sigma's large face is reduced to a player-sized sprite, and
+Rangda Bangda uses its ROM sprite component. `--dynamic-lighting` adds a
+per-pixel multiply light pass; `--charge-effects` adds X/Zero charge glow and particles. Both are
+display-only options. `--bone-sheets DIR` loads optional 60 FPS Bone Animation
+Editor `bae-sheet` JSON and PNG pages from `DIR/<character-id>/` for the
+selected characters. Missing action clips use the sheet's idle clip, and a
+missing sheet for a ROM character keeps its ROM art. Bass and Proto Man use
+user-supplied sheets and require them in the pack. Four-player HP bars appear
+vertically on the left and right screen edges. Online co-op currently keeps
+player 2 as Zero.
+Vile uses the private on-foot crop at
+`roms/derived/bone_sheets/user_sources/vile_idle.png` even without
+`--bone-sheets`; `--vile-sprite PNG` overrides that path. A selected Vile
+cannot start if the crop is missing, so the ROM's incorrect large boss sprite
+is never shown as a substitute.
+
+For a repeatable recording, pass `--demo-bots --p1-character x
+--p2-character zero --p3-character sigma --p4-character vile`. Demo mode
+enables four local players, taps through the title into Highway, then drives
+their movement, jumps, and shots. `--dynamic-lighting --charge-effects` can
+be added to show both display effects. The same bot inputs work with
+`--headless --frames N` for capture checks.
+For uninterrupted showcase recording, demo mode restores a living player's
+health when it falls to 5 or less. Downed players use the usual co-op respawn.
+`--showcase-characters --bone-sheets DIR` also enables the four-player demo
+and cycles the complete character roster for recording.
+
 | action | P1 keys | P2 keys (`--coop-local` only) | pad |
 |---|---|---|---|
 | d-pad | arrows | W A S D | d-pad / left stick |

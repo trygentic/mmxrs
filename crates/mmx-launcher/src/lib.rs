@@ -11,12 +11,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use serde::{Deserialize, Serialize};
+pub use mmx_core::Character;
 
 /// Public signalling server used in playtests.
 pub const DEFAULT_SIGNAL_URL: &str = "wss://signal.z2rs.com";
 /// Game output (stdout + stderr) goes here, inside the data dir: a file, not
 /// a pipe, so the game keeps printing safely after the launcher closes.
 pub const LOG_FILE_NAME: &str = "last-game.log";
+pub const DEFAULT_BONE_SHEETS_PATH: &str = "roms/derived/bone_sheets";
+pub const DEFAULT_VILE_SPRITE_PATH: &str = "roms/derived/bone_sheets/user_sources/vile_idle.png";
+
+fn default_characters() -> [String; 4] {
+    ["x".into(), "zero".into(), "x".into(), "x".into()]
+}
 
 /// `$XDG_DATA_HOME/mmxrs`, `~/Library/Application Support/mmxrs` (macOS),
 /// `%APPDATA%/mmxrs` (Windows), else `~/.local/share/mmxrs`, else
@@ -73,6 +80,23 @@ pub struct Settings {
     pub fullscreen: bool,
     pub zero: bool,
     pub coop_local: bool,
+    /// Number of local players, 1-4. `coop_local` is retained for older saves.
+    #[serde(default = "default_local_players")]
+    pub local_players: u8,
+    #[serde(default = "default_characters")]
+    pub characters: [String; 4],
+    #[serde(default)]
+    pub dynamic_lighting: bool,
+    #[serde(default)]
+    pub charge_effects: bool,
+    /// Optional private Bone Animation Editor sheet pack.
+    #[serde(default)]
+    pub bone_sheets: bool,
+    #[serde(default = "default_bone_sheets_path")]
+    pub bone_sheets_path: String,
+    /// Correct on-foot Vile crop; loaded even when animated sheets are off.
+    #[serde(default = "default_vile_sprite_path")]
+    pub vile_sprite_path: String,
     pub online: bool,
     pub host: bool,
     pub room: String,
@@ -98,6 +122,36 @@ pub struct Settings {
     pub wide_gameplay: bool,
 }
 
+fn default_local_players() -> u8 { 1 }
+fn default_bone_sheets_path() -> String {
+    let relative = PathBuf::from(DEFAULT_BONE_SHEETS_PATH);
+    if let Ok(found) = relative.canonicalize() {
+        return found.to_string_lossy().into_owned();
+    }
+    if let Some(binary) = std::env::current_exe().ok() {
+        for parent in binary.ancestors().skip(1).take(4) {
+            if let Ok(found) = parent.join(DEFAULT_BONE_SHEETS_PATH).canonicalize() {
+                return found.to_string_lossy().into_owned();
+            }
+        }
+    }
+    DEFAULT_BONE_SHEETS_PATH.into()
+}
+fn default_vile_sprite_path() -> String {
+    let relative = PathBuf::from(DEFAULT_VILE_SPRITE_PATH);
+    if let Ok(found) = relative.canonicalize() {
+        return found.to_string_lossy().into_owned();
+    }
+    if let Some(binary) = std::env::current_exe().ok() {
+        for parent in binary.ancestors().skip(1).take(4) {
+            if let Ok(found) = parent.join(DEFAULT_VILE_SPRITE_PATH).canonicalize() {
+                return found.to_string_lossy().into_owned();
+            }
+        }
+    }
+    DEFAULT_VILE_SPRITE_PATH.into()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -107,6 +161,13 @@ impl Default for Settings {
             fullscreen: false,
             zero: false,
             coop_local: false,
+            local_players: 1,
+            characters: default_characters(),
+            dynamic_lighting: false,
+            charge_effects: false,
+            bone_sheets: false,
+            bone_sheets_path: default_bone_sheets_path(),
+            vile_sprite_path: default_vile_sprite_path(),
             online: false,
             host: true,
             room: String::new(),
@@ -127,10 +188,18 @@ impl Settings {
         data_dir().join("launcher.json")
     }
     pub fn load(path: &Path) -> Settings {
-        std::fs::read_to_string(path)
+        let mut settings: Settings = std::fs::read_to_string(path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if settings.zero && settings.characters[0] == "x" {
+            settings.characters[0] = "zero".into();
+            settings.zero = false;
+        }
+        if settings.coop_local && settings.local_players == 1 {
+            settings.local_players = 2;
+        }
+        settings
     }
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(d) = path.parent() {
@@ -141,7 +210,7 @@ impl Settings {
 }
 
 /// The game's argv (without the program name), or why it cannot start.
-/// Checks what the game would refuse, plus Zero without an X3 ROM. File
+/// Checks what the game would refuse. X1 Zero uses the X1 ROM by default. File
 /// contents are checked separately ([`rom_info`]).
 pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
     let rom = s.rom.trim();
@@ -149,8 +218,22 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
     if rom.is_empty() {
         return Err("choose the Mega Man X ROM".into());
     }
-    if s.zero && x3.is_empty() {
-        return Err("playing as Zero needs the Mega Man X3 ROM".into());
+    let p1 = if s.zero && s.characters[0] == "x" { "zero" } else { s.characters[0].as_str() };
+    let local_players = if s.coop_local { s.local_players.max(2) } else { s.local_players };
+    if !(1..=4).contains(&local_players) {
+        return Err("local players must be 1-4".into());
+    }
+    let player_count = if s.online { 2 } else { local_players };
+    if s.online && s.characters[1] != "zero" {
+        return Err("online co-op currently requires player 2 to be Zero".into());
+    }
+    for (i, character) in s.characters.iter().enumerate().take(usize::from(player_count)) {
+        if Character::parse(character).is_none() {
+            return Err(format!("unknown player {} character {character:?}", i + 1));
+        }
+        if matches!(Character::parse(character), Some(Character::Bass | Character::ProtoMan)) && !s.bone_sheets {
+            return Err(format!("{} needs 60 FPS bone animation sheets enabled", character));
+        }
     }
     if !(1..=8).contains(&s.scale) {
         return Err("scale must be 1-8".into());
@@ -164,8 +247,27 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
     if s.fullscreen {
         push(&["--fullscreen"]);
     }
-    if s.zero {
+    if s.zero && s.characters[0] == "x" {
         push(&["--zero"]);
+    }
+    for i in 0..usize::from(player_count) {
+        let id = if i == 0 { p1 } else { &s.characters[i] };
+        let default = if i == 1 { "zero" } else { "x" };
+        if id != default && !(i == 0 && s.zero && s.characters[0] == "x") {
+            push(&[&format!("--p{}-character", i + 1), id]);
+        }
+    }
+    if s.dynamic_lighting { push(&["--dynamic-lighting"]); }
+    if s.charge_effects { push(&["--charge-effects"]); }
+    if s.bone_sheets {
+        let path = s.bone_sheets_path.trim();
+        if path.is_empty() { return Err("choose a bone animation sheet folder".into()); }
+        push(&["--bone-sheets", path]);
+    }
+    if s.characters.iter().take(usize::from(player_count)).any(|id| id == "vile") {
+        let path = s.vile_sprite_path.trim();
+        if path.is_empty() { return Err("choose the on-foot Vile PNG".into()); }
+        push(&["--vile-sprite", path]);
     }
     match s.widescreen.as_str() {
         "" | "off" => {}
@@ -211,8 +313,12 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
         if !s.ice.trim().is_empty() {
             push(&["--ice", s.ice.trim()]);
         }
-    } else if s.coop_local {
-        push(&["--coop-local"]);
+    } else if local_players > 1 {
+        if local_players == 2 && s.coop_local {
+            push(&["--coop-local"]);
+        } else {
+            push(&["--players", &local_players.to_string()]);
+        }
     }
     Ok(a)
 }
@@ -395,7 +501,7 @@ mod tests {
     fn argv_refusals() {
         assert!(build_args(&Settings::default()).is_err());
         let zero = Settings { zero: true, ..base() };
-        assert!(build_args(&zero).unwrap_err().contains("X3"));
+        assert!(build_args(&zero).unwrap().contains(&"--zero".to_string()));
         assert!(build_args(&Settings { scale: 9, ..base() }).is_err());
         let ws = Settings { widescreen: "16:9".into(), ..base() };
         assert_eq!(build_args(&ws).unwrap()[4..], ["--widescreen", "16:9"]);
@@ -410,6 +516,46 @@ mod tests {
         assert!(build_args(&net).is_err());
         let net = Settings { online: true, room: "r".into(), signal: "http://x".into(), ..base() };
         assert!(build_args(&net).is_err());
+    }
+
+    #[test]
+    fn character_players_and_effects_args() {
+        let s = Settings {
+            local_players: 4,
+            characters: ["storm-eagle".into(), "sigma".into(), "vile".into(), "x".into()],
+            dynamic_lighting: true,
+            charge_effects: true,
+            ..base()
+        };
+        let args = build_args(&s).unwrap().join(" ");
+        assert!(args.contains("--p1-character storm-eagle"));
+        assert!(args.contains("--p2-character sigma"));
+        assert!(args.contains("--p3-character vile"));
+        assert!(args.contains("--players 4"));
+        assert!(args.contains("--dynamic-lighting --charge-effects"));
+        assert!(!args.contains("--p4-character"));
+    }
+
+    #[test]
+    fn bone_sheet_option_and_external_characters() {
+        let mut s = base();
+        s.characters[0] = "bass".into();
+        assert!(build_args(&s).unwrap_err().contains("bone animation sheets"));
+        s.bone_sheets = true;
+        s.bone_sheets_path = "/private/sheets".into();
+        assert!(build_args(&s).unwrap().windows(2).any(|w| w == ["--bone-sheets", "/private/sheets"]));
+        s.bone_sheets_path.clear();
+        assert!(build_args(&s).is_err());
+    }
+
+    #[test]
+    fn vile_static_sprite_is_passed_without_bone_sheets() {
+        let mut s = base();
+        s.characters[0] = "vile".into();
+        s.vile_sprite_path = "/private/vile.png".into();
+        let args = build_args(&s).unwrap();
+        assert!(args.windows(2).any(|w| w == ["--vile-sprite", "/private/vile.png"]));
+        assert!(!args.contains(&"--bone-sheets".to_string()));
     }
 
     #[test]
@@ -440,7 +586,10 @@ mod tests {
         let p = std::env::temp_dir().join(format!("mmx-launcher-{}/launcher.json", std::process::id()));
         let s = Settings { x3_rom: "y".into(), zero: true, mode: Mode::Lockstep, delay: Some(2), ..base() };
         s.save(&p).unwrap();
-        assert_eq!(Settings::load(&p), s);
+        let loaded = Settings::load(&p);
+        assert_eq!(loaded.characters[0], "zero");
+        assert!(!loaded.zero);
+        assert_eq!(loaded.x3_rom, s.x3_rom);
         std::fs::write(&p, r#"{"rom":"old.sfc"}"#).unwrap();
         assert_eq!(Settings::load(&p), Settings { rom: "old.sfc".into(), ..Default::default() });
         let _ = std::fs::remove_dir_all(p.parent().unwrap());

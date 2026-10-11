@@ -10,7 +10,7 @@
 
 /// LoROM bank:addr of the tables.
 pub const SET_TABLE: u32 = 0x8D8000; // 3-byte pointer per sprite set (object +$16)
-pub const GFX_TABLE: u32 = 0x86F69B; // 5 B per graphics id: size16, src16, bank
+pub const GFX_TABLE: u32 = 0x86F69B; // PAL location; USA Rev 1 moves it to $86:F6F7
 pub const ZERO_GFX: u8 = 0x51;
 pub const ZERO_SET: u8 = 0x53;
 pub const ZERO_DMA: u32 = 0x85A96E; // per-frame DMA lists (object +$31)
@@ -172,7 +172,11 @@ fn rl(rom: &[u8], addr: u32) -> Result<u32, String> {
 /// byte; each control bit (MSB first) set = copy the next literal, clear =
 /// the fill byte. The source crosses banks at `$xx:FFFF -> $xx+1:8000`.
 pub fn decompress(rom: &[u8], id: u8) -> Result<Vec<u8>, String> {
-    let e = GFX_TABLE + 5 * u32::from(id);
+    decompress_from_table(rom, id, crate::boss_data::graphics_table(rom)?)
+}
+
+fn decompress_from_table(rom: &[u8], id: u8, table: u32) -> Result<Vec<u8>, String> {
+    let e = table + 5 * u32::from(id);
     let size = usize::from(rw(rom, e)?);
     let mut a = u32::from(rw(rom, e + 2)?) | u32::from(rd(rom, e + 4)?) << 16;
     let mut next = || -> Result<u8, String> {
@@ -837,7 +841,7 @@ mod tests {
         let s = off(0x818000);
         // ctrl $A0 fill $11: lit, fill, lit, fill x5; ctrl $80 fill $22: lit, fill...
         rom[s..s + 8].copy_from_slice(&[0xA0, 0x11, 0xAA, 0xBB, 0x80, 0x22, 0xCC, 0]);
-        let d = decompress(&rom, 0).unwrap();
+        let d = decompress_from_table(&rom, 0, GFX_TABLE).unwrap();
         assert_eq!(d, [0xAA, 0x11, 0xBB, 0x11, 0x11, 0x11, 0x11, 0x11, 0xCC]);
     }
 

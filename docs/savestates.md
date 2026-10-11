@@ -4,8 +4,8 @@
 writes, in order:
 
 1. bincode `(SnesEmulator, frame_count, fired_at)`: the whole console.
-2. `P2T6` + bincode `P2Tiles`: the PPU's P2/Zero shadow tile pages and P2's
-   sprite palette (the PPU's ninth, docs/coop.md "Palettes").
+2. `P2T7` + bincode `P2Tiles`: the PPU's six shadow tile pages and three
+   independent local co-op sprite palettes.
 3. `COOP` + `u32` LE length + bincode `CoopState`: P2's shadow block
    (`$0BA8..`), scratch, hidden/down/revive, saber, shots/effects/pickup
    bookkeeping, P1-as-Zero swing.
@@ -17,7 +17,8 @@ offsets (display only, rebuilt by the next frame's OAM build).
 
 Compatibility: every tail is optional. A state without `COOP` (saved before
 it) loads with a default `CoopState`: P2 is hidden and re-anchors beside P1
-when it next shows. Older tile markers still load: `P2T5` (no P2 palette: none until the next
+when it next shows. Older tile markers still load: `P2T6` (four pages and one
+extra palette), `P2T5` (no P2 palette: none until the next
 OAM build fills it), `P2T4`..`P2T2`, none.
 A truncated `COOP` tail is an error. Rollback states (`net_save`) are the
 same bytes; `NET_REVISION` 3 marks the change (6 the P2 palette).

@@ -19,18 +19,35 @@ The window:
 * **Options**: window scale 1-8 (`--scale`), `--fullscreen`, Widescreen off/16:10/16:9/21:9/auto (`--widescreen`; auto
   follows the window's shape, so maximized or fullscreen fills the screen), "spawn enemies at the
   wide edges (changes gameplay; both players)" (`--wide-gameplay`, docs/widescreen.md
-  "Wide gameplay"; online both players must tick it), Play as Zero
-  (`--zero`, needs the X3 ROM; a game built before `--zero` landed
-  rejects it as an unknown argument). No overclock control: the game's default
+  "Wide gameplay"; online both players must tick it), optional multiply
+  lighting (`--dynamic-lighting`), and optional X/Zero charge glow and
+  particles (`--charge-effects`). The optional 60 FPS bone animation sheet
+  toggle selects a private `bae-sheet` folder (`--bone-sheets DIR`); it starts
+  at `roms/derived/bone_sheets` and missing action clips use idle or the ROM
+  sprite. Bass and Proto Man require sheets from that folder. Four-player HP
+  meters run vertically along the screen sides. No overclock control: the game's default
   (2x) applies; `mmxrs --overclock off` from a terminal restores the slowdown.
-* **Players**: one radio, 1 player / Local co-op (`--coop-local`) / Online co-op;
+* **Players**: 1–4 local controller slots (`--players N`) or two-player online
+  co-op, with a character dropdown for each active player. X and Zero have
+  playable art from the X1 ROM. Zero uses his X1 standing and dash poses by
+  default; an optional X3 ROM supplies his full animation set and saber.
+  Every listed boss uses graphics and a
+  palette extracted from the selected X1 ROM at startup. Sigma and Vile cycle
+  ROM poses while moving; other bosses use their idle pose when a matching
+  action pose has not been mapped. Wolf Sigma's large face is reduced to a
+  player-sized sprite, and Rangda Bangda uses its ROM sprite component.
+  Selecting Vile loads the private on-foot PNG from
+  `roms/derived/bone_sheets/user_sources/vile_idle.png` even when animated
+  sheets are off; its path can be changed in the Vile sprite field.
+  Each local player has its own sprite page and palette.
+  For online co-op,
   the online controls show only for Online co-op: Host/Join (`--coop-host`/`--coop-join ROOM`), room with a
   random 8-char button, signal URL (default `wss://signal.z2rs.com`), mode,
   delay (auto = the mode's default; rollback 0-3, lockstep 0-8), ICE (empty =
   game default, `none` allowed). Host and guest need identical ROM dumps and
   the same mode.
 * **Launch / Stop**: Launch is disabled while the X ROM is missing or has the
-  wrong header, or Zero is ticked without a valid X3 ROM. The game's stdout +
+  wrong header. The game's stdout +
   stderr go to `<data-dir>/last-game.log` (a file, so the game survives the
   launcher closing); the last lines show under the button.
 

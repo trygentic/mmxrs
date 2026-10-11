@@ -15,6 +15,7 @@ name = "mmxrs-launcher"
 path = "src/main.rs"
 
 [dependencies]
+mmx-core = { path = "../mmx-core" }
 # glow (OpenGL) backend only, as in z2-launcher: no second wgpu next to the
 # game's. `wayland` + `x11` are loaded at run time on Linux.
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "persistence", "wayland", "x11"] }

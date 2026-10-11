@@ -15,6 +15,12 @@ use crate::traps::TrapReturn;
 use crate::saber::Saber;
 use crate::zero_data::{zero_x3_frame_for, Sprite, ZeroSet};
 use crate::Game;
+use crate::boss_data::BossSet;
+
+/// Four local players share the SNES's 128 OAM slots with enemies and effects.
+/// Keep each custom character within a modest slot budget so the fourth
+/// player can still be displayed on busy Highway frames.
+pub const FOUR_PLAYER_ART_SLOTS: usize = 16;
 
 /// OAM build entry (`JSR` from the object master); once per gameplay frame,
 /// before the coop display slice at `$80:9A86`.
@@ -121,13 +127,15 @@ pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
     }
     // The charge sparkles (VRAM tiles, in front), in what the co-op slice
     // left below the HUD's slots after the body and the arc.
-    let room = (127 - crate::coop_hud::HUD_SLOTS).saturating_sub(usize::from(first) + e.len());
+    let hud_slots = if game.local_players >= 4 { 0 } else { crate::coop_hud::HUD_SLOTS };
+    let room = (127 - hud_slots).saturating_sub(usize::from(first) + e.len());
     let frame = game.wram()[ix(ram::FRAME_MAIN)] % SPARKLE_FRAMES;
     let mut sp = sparkle_entries(game, &p2, frame, X3_Y_OFFSET);
     sp.truncate(room);
     let n_sp = sp.len();
     sp.extend(e);
-    let e = &sp[..sp.len().min(128 - usize::from(first))];
+    let budget = if game.local_players >= 4 { FOUR_PLAYER_ART_SLOTS } else { usize::MAX };
+    let e = &sp[..sp.len().min(128 - usize::from(first)).min(budget)];
     let last = write_entries(game, first, e);
     let mask = |a: usize, b: usize| (a..b).fold(0u128, |m, s| m | 1 << s);
     let f = usize::from(first) + n_sp.min(e.len());
@@ -256,6 +264,44 @@ fn frame_entries(game: &Game, set: &ZeroSet, obj: &[u8], f: usize, attr: u8) -> 
     set.frames[f].sprites.iter().filter_map(|s| oam_entry(s, (ox, oy + X3_Y_OFFSET), right, attr)).collect()
 }
 
+/// A boss uses its own ROM layout. X actions without a matching boss pose
+/// retain the first (idle) frame.
+fn boss_frame(obj: &[u8], set: &BossSet, tick: u64) -> Option<usize> {
+    if obj[0x0E] == 0 || set.frames.is_empty() { return None }
+    let velocity = i16::from_le_bytes([obj[0x1A], obj[0x1B]]);
+    if velocity != 0 && obj[0x02] != 0x0C && !set.run_frames.is_empty() {
+        return Some(set.run_frames[(tick as usize / 6) % set.run_frames.len()].min(set.frames.len() - 1));
+    }
+    Some(set.idle_frame.min(set.frames.len() - 1))
+}
+
+fn boss_entries(game: &Game, set: &BossSet, obj: &[u8], f: usize, attr: u8) -> Vec<([u8; 4], u8)> {
+    let w = game.wram();
+    let cam = |a: u32| u16::from_le_bytes([w[ix(a)], w[ix(a) + 1]]);
+    let (ox, oy) = screen_origin(obj, cam(ram::CAMERA_X), cam(ram::CAMERA_Y));
+    let origin = (ox, oy + set.y_offset);
+    let right = obj[0x11] & 0x40 != 0;
+    set.frames[f].sprites.iter().filter_map(|s| oam_entry(s, origin, right, attr)).collect()
+}
+
+/// Draw a selected X1 boss in an isolated local-player display slice.
+pub fn emit_boss(game: &mut Game, set: &BossSet, first: u8, pal: u8, page: u8) -> u8 {
+    let obj = game.coop.p2;
+    let Some(f) = boss_frame(&obj, set, game.frame_count()) else { return first };
+    // Always refresh: another local player may have used the page earlier in
+    // the frame, and a saved state can restore older page contents.
+    crate::p2tiles::fill_page(game, usize::from(page) * crate::p2tiles::SHADOW_WORDS, &set.page(f));
+    let attr = obj[0x11] & 0x30 | (pal & 7) << 1;
+    let entries = boss_entries(game, set, &obj, f, attr);
+    let budget = if game.local_players >= 4 { FOUR_PLAYER_ART_SLOTS } else { usize::MAX };
+    let entries = &entries[..entries.len().min(128 - usize::from(first)).min(budget)];
+    let last = write_entries(game, first, entries);
+    let mask = crate::display::slots(first.into(), last.into());
+    game.add_p2_tile_slots(mask, page);
+    game.add_local_palette_slots(game.local_player_index, mask, set.palette);
+    last
+}
+
 /// The slash arc's colours on Zero's palette (`$8C:B580`, which every
 /// Zero wears): the arc draws with 1-5 (`$8C:A460`: white `73BC`, greens
 /// `5394 3B8E 2308 1284`) and 15 (`18C6`); Zero's has white 4 (`639C`),
@@ -358,23 +404,41 @@ impl Default for ZeroP1 {
 /// sprite order. Both then return for the ROM (Observe + `RTS` by hand);
 /// P2's isolated calls of the same routines run as before.
 fn skip_p1_parts(game: &mut Game) {
-    if game.coop.p1.on && game.isolated_depth == 0 {
+    if p1_custom_art(game) && game.isolated_depth == 0 {
         game.emulate_return(false);
     }
 }
 
 fn p1_emitter(game: &mut Game) {
-    if game.coop.p1.on && game.isolated_depth == 0 {
-        emit_p1(game);
+    if p1_custom_art(game) && game.isolated_depth == 0 {
+        if let Some(set) = game.boss_sets.get(&game.player_character(0).unwrap()).cloned() {
+            emit_p1_boss(game, &set);
+        } else {
+            emit_p1(game);
+        }
         game.emulate_return(false);
     }
+}
+
+fn p1_custom_art(game: &Game) -> bool {
+    game.coop.p1.on || game.player_character(0).and_then(|c| game.boss_sets.get(&c)).is_some()
+}
+
+fn emit_p1_boss(game: &mut Game, set: &BossSet) {
+    let b = ix(ram::X_BASE);
+    let obj: [u8; ram::X_BLOCK_LEN] = game.wram()[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
+    let Some(f) = boss_frame(&obj, set, game.frame_count()) else { return };
+    crate::p2tiles::fill_page(game, crate::p2tiles::SHADOW_WORDS, &set.page(f));
+    let entries = boss_entries(game, set, &obj, f, obj[0x11] & 0x3E);
+    write_p1_entries(game, &entries, 1);
 }
 
 /// `$80:E518` entry (the input remapper, reads pad 1 `$A7`): P1's saber.
 /// X starts a swing; during one the pad is masked as for P2 (Start and
 /// Select pass). `$A7` (held) and `$AB` (pressed) are edited in place.
 fn p1_pad(game: &mut Game) {
-    if !game.coop.p1.on || game.isolated_depth > 0 || game.zero_set.is_none() {
+    if !game.coop.p1.on || game.isolated_depth > 0 || game.zero_set.is_none()
+        || game.boss_sets.contains_key(&crate::Character::Zero) {
         return;
     }
     let w = game.wram();
@@ -438,6 +502,24 @@ pub fn emit_p1(game: &mut Game) {
     game.add_p2_tile_slots(fx, 2);
 }
 
+fn write_p1_entries(game: &mut Game, entries: &[([u8; 4], u8)], page: u8) {
+    let w = game.wram_mut();
+    let mut body = 0u128;
+    for &(entry, high) in entries {
+        let slot = usize::from(w[OAM_CURSOR] & 0x7F);
+        if slot >= 127 { break; }
+        w[ix(ram::OAM_BUF) + slot * 4..][..4].copy_from_slice(&entry);
+        body |= 1 << slot;
+        w[OAM_HI_ACC] = w[OAM_HI_ACC] >> 2 | high << 6;
+        w[OAM_CURSOR] += 1;
+        if w[OAM_CURSOR] & 3 == 0 {
+            w[ix(OAM_HI) + usize::from(w[OAM_HI_INDEX])] = w[OAM_HI_ACC];
+            w[OAM_HI_INDEX] += 1;
+        }
+    }
+    game.add_p2_tile_slots(body, page);
+}
+
 /// The OAM build's direct-page cursor (`$E4`), high-table byte index (`$E5`)
 /// and accumulator (`$E6`).
 const OAM_CURSOR: usize = 0xE4;
@@ -488,7 +570,7 @@ fn p2_flash_end(game: &mut Game) {
 fn oam_build(game: &mut Game) {
     crate::p2tiles::clear_slots(game);
     write_palette(game);
-    if game.coop.p1.on && game.zero_set.is_some() {
+    if game.coop.p1.on && game.zero_set.is_some() && !game.boss_sets.contains_key(&crate::Character::Zero) {
         lift_p1_sparkles(game);
     }
 }
@@ -499,7 +581,10 @@ fn oam_build(game: &mut Game) {
 /// palettes on stage load, fades and weapon swaps, so the check doubles as a
 /// repair).
 pub fn write_palette(game: &mut Game) {
-    if let Some(z) = game.zero_set.as_ref().filter(|_| game.coop.p1.on) {
+    if let Some(set) = game.player_character(0).and_then(|c| game.boss_sets.get(&c)).cloned() {
+        put_palette(game, X_SPRITE_PALETTE, &set.palette);
+    }
+    if let Some(z) = game.zero_set.as_ref().filter(|_| game.coop.p1.on && game.player_character(0) == Some(crate::Character::Zero) && !game.boss_sets.contains_key(&crate::Character::Zero)) {
         let b = ix(ram::X_BASE);
         let pal = charge_palette(&game.wram()[b..b + ram::X_BLOCK_LEN], &z.palette);
         put_palette(game, X_SPRITE_PALETTE, &pal);
@@ -510,7 +595,7 @@ pub fn write_palette(game: &mut Game) {
     let src = sprite_palette_offset(X_SPRITE_PALETTE);
     let w = game.wram();
     let x: [u16; 16] = std::array::from_fn(|i| u16::from_le_bytes([w[src + 2 * i], w[src + 2 * i + 1]]));
-    let want = game.zero_set.as_ref().map_or_else(|| palette_for(&x), |z| charge_palette(&game.coop.p2, &z.palette));
+    let want = game.current_boss_set().map(|b| b.palette).unwrap_or_else(|| game.zero_set.as_ref().filter(|_| game.current_shadow_is_zero()).map_or_else(|| palette_for(&x), |z| charge_palette(&game.coop.p2, &z.palette)));
     game.set_p2_palette(want);
 }
 

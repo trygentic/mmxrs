@@ -2,6 +2,7 @@
 //! Never opens a window or an audio device.
 
 use crate::cli::Args;
+use crate::demo_bots::DemoBots;
 use mmx_core::{Game, Pads};
 use sha2::{Digest, Sha256};
 
@@ -32,16 +33,42 @@ pub fn run(game: &mut Game, args: &Args) -> Result<String, String> {
         // ponytail: TODO wire mmx-verify's bk2 parser here once it exists.
         return Err("--movie is not implemented yet (needs mmx-verify's bk2 parser)".into());
     }
-    let pads = Pads {
-        p1: args.hold,
-        p2: args.p2_hold,
-    };
+    let mut bots = args.demo_bots.then(DemoBots::default);
     for f in 1..=args.frames {
+        if let Some(bots) = bots.as_ref() {
+            bots.maintain_party(game);
+        }
+        let inputs = match bots.as_mut() {
+            Some(bots) => bots.pads(game),
+            None => [args.hold, args.p2_hold, args.p3_hold, args.p4_hold],
+        };
+        if args.showcase_characters {
+            if let Some((group, characters)) = bots.as_ref().and_then(DemoBots::showcase_selection) {
+                for (slot, character) in characters.into_iter().enumerate() {
+                    game.set_player_character(slot, character);
+                }
+                eprintln!("showcase group {}: {}", group + 1,
+                    characters.map(|character| character.label()).join(", "));
+            }
+        }
+        let pads = Pads { p1: inputs[0], p2: inputs[1] };
+        game.set_extra_pads([inputs[2], inputs[3]]);
         game.step(pads);
         let _ = game.take_audio(); // drain so it doesn't pile up
         for (_, path) in args.dump_at.iter().filter(|(at, _)| *at == f) {
             let (px, w, h) = game.frame();
-            write_png(path, px, w, h)?;
+            if args.dynamic_lighting || args.charge_effects {
+                let mut rgba: Vec<u8> = px.iter().take(w * h).flat_map(|p| [
+                    (p >> 16) as u8, (p >> 8) as u8, *p as u8, 255,
+                ]).collect();
+                crate::effects::apply(&mut rgba, w, h, game, args.dynamic_lighting, args.charge_effects);
+                let effected: Vec<u32> = rgba.chunks_exact(4).map(|p| {
+                    (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2])
+                }).collect();
+                write_png(path, &effected, w, h)?;
+            } else {
+                write_png(path, px, w, h)?;
+            }
             eprintln!("frame {f}: wrote {path} ({w}x{h})");
         }
     }

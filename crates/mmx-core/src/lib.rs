@@ -4,6 +4,9 @@
 #![forbid(unsafe_code)]
 
 pub mod coop;
+pub mod boss_data;
+pub mod bone_animation;
+pub mod character;
 pub mod coop_hud;
 pub mod coop_objects;
 pub mod coop_stages;
@@ -25,6 +28,7 @@ pub mod zero;
 pub mod zero_data;
 
 pub use game::{Game, IsolatedError, StateInfo};
+pub use character::Character;
 pub use widescreen::Widescreen;
 /// CPU overclock (`Game::set_overclock`; docs/widescreen.md "Slowdown and overclock").
 pub use snes_core::api::CpuOverclock as Overclock;

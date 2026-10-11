@@ -279,6 +279,25 @@ fn save_state_carries_p2_tile_page() {
 }
 
 #[test]
+fn p2t6_four_page_state_still_loads() {
+    let mut game = game();
+    step(&mut game, 2);
+    let current = game.save_state();
+    let marker = current.windows(4).rposition(|w| w == b"P2T7").unwrap();
+    let mut old = current[..marker].to_vec();
+    old.extend_from_slice(b"P2T6");
+    let mut page = Box::new([0u16; 768 * 4]);
+    page[5] = 0xBEEF;
+    let legacy = (page, 0u128, Box::new([0u16; 768 * 4]), 0u128, false,
+        0u128, 0u128, 0u128, 0u128, 0u128, 0u128, [0u16; 16], [0u16; 16]);
+    old.extend(bincode::encode_to_vec(legacy, bincode::config::standard()).unwrap());
+    assert_eq!(Game::state_info(&old).unwrap().tiles.as_deref(), Some("P2T6"));
+    game.load_state(&old).unwrap();
+    assert_eq!(game.p2_tiles().0[5], 0xBEEF);
+    assert_eq!(game.p2_tile_page_mut()[4 * 768 + 5], 0);
+}
+
+#[test]
 fn save_state_carries_coop_state() {
     use mmx_core::coop::{CoopState, OFF_HP, OFF_POS_X};
     let mut g = game();
@@ -295,7 +314,7 @@ fn save_state_carries_coop_state() {
     g.coop.revive.spot = Some((0x100, 0x80));
     let s = g.save_state();
     let info = Game::state_info(&s).unwrap();
-    assert_eq!((info.frame_count, info.tiles.as_deref()), (2, Some("P2T6")));
+    assert_eq!((info.frame_count, info.tiles.as_deref()), (2, Some("P2T7")));
     assert_eq!(info.coop.as_ref(), Some(&g.coop));
 
     let mut fresh = game();

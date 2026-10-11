@@ -545,7 +545,7 @@ changes (`verify --coop-off` identical). mmx-core: `Game::set_p2_palette`
 (cleared each OAM build in `p2tiles::clear_slots`; set for P2's body,
 armour parts and slash arc, P2's HP icon and down marker, P2's margin
 sprites, not for P2's sparkles, which keep the ROM's palettes 0/2/3).
-Saved in the state (`P2T6`). P2's shots are the game's objects in palette
+Saved in the state (`P2T7`). P2's shots are the game's objects in palette
 3, so they now look like X's. A Zero P1 still wears CGRAM slot 1 (X is not
 drawn then, and X's lemons are palette 2, shots 3), so two Zeros keep two
 independent charge flashes.
@@ -943,6 +943,15 @@ lines shortened to mode, X, action, HP, camera and P2's pos/action/HP/OAM.
   after the fade.
 
 Still open:
+
+- [ ] Local players 3 and 4 have independent inputs, shadow player blocks,
+  update/physics/contact passes, OAM slots, and save-state data. Their sprites
+  still share P2's single PPU shadow tile page and extra palette. When their
+  animation poses differ, one player's tile upload can change another's art;
+  the visible pose or colours can be wrong. The P2-specific companion-object,
+  effect, and HUD paths also need separate ownership for full four-player
+  parity. The real-ROM `local_four` test covers separate movement and saved
+  positions, not visual correctness.
 
 - [ ] **P2's tile DMA can still shift P1's lag frames** (M3 idle: P2 is hit
   at f272, P1 is 4-5 px behind solo from f275). P2's animation changes

@@ -1,17 +1,21 @@
 //! Hand-rolled argv parser (no clap). See `docs/native.md`.
 
-use mmx_core::netgame::Mode;
+use mmx_core::{netgame::Mode, Character};
 
 pub const USAGE: &str = "\
-usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local] [--pads]
+usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local|--players 1..4] [--pads]
+             [--p1-character ID] [--p2-character ID] [--p3-character ID] [--p4-character ID]
+             [--dynamic-lighting] [--charge-effects] [--bone-sheets DIR] [--vile-sprite PNG]
+             [--demo-bots] [--showcase-characters]
              [--widescreen off|16:10|16:9|21:9|auto|N] [--wide-gameplay] [--overclock off|1.5|2]
        mmxrs (--coop-host ROOM | --coop-join ROOM) [--signal ws://HOST:PORT]
              [--ice 'stun:.. turn:.. username=U credential=C' | none]
              [--mode rollback|lockstep] [--delay N] [--prediction N] [--net-record LOG]
        mmxrs --headless --frames N [--rom PATH] [--dump-at F=out.png,...]
              [--hold P1MASK] [--p2-hold MASK] [--coop-local]
-ROM defaults to $MMX_ROM, --x3-rom (Mega Man X3 USA: P2 is drawn as X3 Zero, X swings
-the saber) to $MMX_X3_ROM. --zero: player 1 plays as Zero too (needs the X3 ROM). Masks are SNES pad words (hex 0x.. or decimal).
+ROM defaults to $MMX_ROM. Zero uses X1 ROM art by default; explicit --x3-rom
+(Mega Man X3 USA) selects X3 Zero art and saber hooks. Masks are
+SNES pad words (hex 0x.. or decimal).
 --widescreen draws extra scenery left and right (N = 8-px tiles per side, 0-24; auto follows
 the window's shape so a maximized or fullscreen window is filled; F10 cycles the presets and
 auto; docs/widescreen.md). --wide-gameplay spawns enemies at the wide edges (136/160 px
@@ -19,6 +23,10 @@ past the original ones whatever the preset; changes the game, online both player
 --overclock runs the SNES CPU 1.5x or 2x as fast, which removes the game's own slowdown with
 many enemies (changes the game: online both players need the same); default 2, off restores
 the original slowdown. --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
+--demo-bots enables four local players, drives a repeatable Highway run, and restores critically low health for recording.
+--showcase-characters cycles all playable characters during that four-player demo (requires --bone-sheets).
+Vile uses the private on-foot PNG at roms/derived/bone_sheets/user_sources/vile_idle.png
+even when bone sheets are off; --vile-sprite overrides its location.
 Online: both players pass the same --mode (default rollback). --delay is the input delay
 in frames, host's wins: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
 same-region link --mode lockstep --delay 3 plays smoothest; across continents use
@@ -36,6 +44,20 @@ pub struct Args {
     pub scale: u32,
     pub fullscreen: bool,
     pub coop_local: bool,
+    /// Total local players (1-4); online sessions still use two peers.
+    pub players: u8,
+    /// Per-player art, while movement and attacks follow the X/Zero player code.
+    pub characters: [Character; 4],
+    pub dynamic_lighting: bool,
+    pub charge_effects: bool,
+    /// Private Bone Animation Editor sheet pack root (optional).
+    pub bone_sheets: Option<String>,
+    /// Override for the private, transparent on-foot Vile idle crop.
+    pub vile_sprite: Option<String>,
+    /// Drive all four local players with a deterministic Highway demo script.
+    pub demo_bots: bool,
+    /// Cycle the full character roster in the four-player demo.
+    pub showcase_characters: bool,
     /// `--pads`: log gamepads and pad bit changes to stderr.
     pub pads: bool,
     pub headless: bool,
@@ -44,6 +66,8 @@ pub struct Args {
     pub dump_at: Vec<(u64, String)>,
     pub hold: u16,
     pub p2_hold: u16,
+    pub p3_hold: u16,
+    pub p4_hold: u16,
     // ponytail: --movie is parsed but unused until mmx-verify's bk2 parser lands.
     pub movie: Option<String>,
     /// Online co-op: (host?, room).
@@ -125,12 +149,22 @@ impl Default for Args {
             scale: 3,
             fullscreen: false,
             coop_local: false,
+            players: 1,
+            characters: [Character::X, Character::Zero, Character::X, Character::X],
+            dynamic_lighting: false,
+            charge_effects: false,
+            bone_sheets: None,
+            vile_sprite: None,
+            demo_bots: false,
+            showcase_characters: false,
             pads: false,
             headless: false,
             frames: 0,
             dump_at: Vec::new(),
             hold: 0,
             p2_hold: 0,
+            p3_hold: 0,
+            p4_hold: 0,
             movie: None,
             net: None,
             signal: mmx_net::DEFAULT_SIGNAL_URL.into(),
@@ -177,7 +211,24 @@ pub fn parse<I: IntoIterator<Item = String>>(
             }
             "--fullscreen" => a.fullscreen = true,
             "--zero" => a.zero = true,
-            "--coop-local" => a.coop_local = true,
+            "--coop-local" => { a.coop_local = true; a.players = a.players.max(2); }
+            "--players" => {
+                let v = val("--players")?;
+                a.players = v.parse().map_err(|_| format!("bad --players {v:?}: use 1-4"))?;
+                if !(1..=4).contains(&a.players) { return Err("--players must be 1-4".into()); }
+                a.coop_local = a.players > 1;
+            }
+            "--p1-character" | "--p2-character" | "--p3-character" | "--p4-character" => {
+                let i = usize::from(flag.as_bytes()[3] - b'1');
+                let v = val(&flag)?;
+                a.characters[i] = Character::parse(&v).ok_or_else(|| format!("unknown character {v:?}"))?;
+            }
+            "--dynamic-lighting" => a.dynamic_lighting = true,
+            "--charge-effects" => a.charge_effects = true,
+            "--bone-sheets" => a.bone_sheets = Some(val("--bone-sheets")?),
+            "--vile-sprite" => a.vile_sprite = Some(val("--vile-sprite")?),
+            "--demo-bots" => a.demo_bots = true,
+            "--showcase-characters" => a.showcase_characters = true,
             "--pads" => a.pads = true,
             "--headless" => a.headless = true,
             "--frames" => {
@@ -197,6 +248,8 @@ pub fn parse<I: IntoIterator<Item = String>>(
             }
             "--hold" => a.hold = parse_u16(&val("--hold")?)?,
             "--p2-hold" => a.p2_hold = parse_u16(&val("--p2-hold")?)?,
+            "--p3-hold" => a.p3_hold = parse_u16(&val("--p3-hold")?)?,
+            "--p4-hold" => a.p4_hold = parse_u16(&val("--p4-hold")?)?,
             "--movie" => a.movie = Some(val("--movie")?),
             "--coop-host" | "--coop-join" => {
                 let room = val(&flag)?;
@@ -242,8 +295,23 @@ pub fn parse<I: IntoIterator<Item = String>>(
     if a.rom.is_none() {
         a.rom = env_rom.filter(|s| !s.is_empty());
     }
+    if a.zero { a.characters[0] = Character::Zero; }
+    if a.showcase_characters {
+        if a.bone_sheets.is_none() {
+            return Err("--showcase-characters requires --bone-sheets DIR".into());
+        }
+        a.demo_bots = true;
+    }
+    if a.demo_bots {
+        a.players = 4;
+        a.coop_local = true;
+    }
+    a.zero = a.characters[0] == Character::Zero;
     if a.net.is_some() && (a.headless || a.coop_local) {
         return Err("--coop-host/--coop-join cannot be combined with --headless or --coop-local".into());
+    }
+    if a.net.is_some() && a.characters[1] != Character::Zero {
+        return Err("online co-op currently requires player 2 to be Zero".into());
     }
     if a.net_delay() > a.mode.max_delay() {
         return Err(format!("--delay must be 0-{} with --mode {}", a.mode.max_delay(), a.mode.name()));
@@ -267,6 +335,31 @@ mod tests {
         let a = p("").unwrap();
         assert_eq!(a, Args::default());
         assert_eq!(a.scale, 3);
+    }
+
+    #[test]
+    fn players_characters_and_effects() {
+        let a = p("--players 4 --p1-character storm-eagle --p2-character sigma --p3-character vile --dynamic-lighting --charge-effects").unwrap();
+        assert_eq!(a.players, 4);
+        assert_eq!(a.characters[0], Character::StormEagle);
+        assert_eq!(a.characters[1], Character::Sigma);
+        assert_eq!(a.characters[2], Character::Vile);
+        assert!(a.dynamic_lighting && a.charge_effects);
+        assert!(p("--players 5").is_err());
+        assert!(p("--p1-character unknown").is_err());
+    }
+
+    #[test]
+    fn demo_bots_enable_four_local_players() {
+        let a = p("--demo-bots").unwrap();
+        assert!(a.demo_bots && a.coop_local);
+        assert_eq!(a.players, 4);
+        assert!(p("--demo-bots --coop-host room").is_err());
+    }
+
+    #[test]
+    fn online_rejects_unsupported_p2_character() {
+        assert!(p("--coop-host room --p2-character x").unwrap_err().contains("player 2"));
     }
 
     #[test]
@@ -316,6 +409,18 @@ mod tests {
         assert_eq!(a.x3_rom.as_deref(), Some("x3.sfc"));
         assert_eq!(a.scale, 5);
         assert!(a.fullscreen && a.coop_local && !a.headless);
+    }
+
+    #[test]
+    fn bone_sheet_path_and_external_character() {
+        let args = p("--p1-character bass --bone-sheets /private/sheets").unwrap();
+        assert_eq!(args.characters[0], Character::Bass);
+        assert_eq!(args.bone_sheets.as_deref(), Some("/private/sheets"));
+        assert_eq!(p("--p2-character proto-man").unwrap().characters[1], Character::ProtoMan);
+        assert!(p("--showcase-characters").is_err());
+        let showcase = p("--showcase-characters --bone-sheets sheets").unwrap();
+        assert!(showcase.showcase_characters && showcase.demo_bots && showcase.players == 4);
+        assert_eq!(p("--p1-character vile --vile-sprite /private/vile.png").unwrap().vile_sprite.as_deref(), Some("/private/vile.png"));
     }
 
     #[test]
