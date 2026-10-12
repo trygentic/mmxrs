@@ -1,75 +1,128 @@
 # mmxrs
 
-Reconstruction of Mega Man X (SNES, USA) in Rust, with two-player co-op
-(Zero as player 2) and rollback netplay over WebRTC. Native desktop and
-browser (WASM). Modelled on [z2rs](../z2rs-private): the original ROM runs
-inside a forked [jgenesis](https://github.com/jsgroth/jgenesis) SNES core and
-hand-ported routines are installed as traps on their entry addresses, so the
-game is playable at every percentage ported and every routine is diffed in
-lockstep against the untrapped core.
+mmxrs rebuilds Mega Man X for the SNES in Rust. Your own cartridge dump runs
+inside an SNES emulator core, and routines ported to Rust take over from the
+original code one by one. Every ported routine is checked frame by frame
+against the unmodified game.
 
-Bring your own ROM: nothing from the cartridge is in this repository. See
-[LEGAL.md](LEGAL.md). Licence: GPL-3.0 (inherited from jgenesis).
+On top of the original game it adds local co-op for up to four players,
+online co-op over WebRTC, Zero as a playable character, widescreen, and a
+launcher window for choosing the ROM and options.
 
-## Layout
+Download builds from the [Releases](https://github.com/trygentic/mmxrs/releases)
+page. There are builds for macOS (Apple Silicon), Windows (x86-64) and Linux
+(x86-64). Each zip holds the game and the launcher.
 
-| path | what |
-|---|---|
-| `docs/PLAN.md` | the plan and the `mmx-core` contract; read first |
-| shared Trygentic jgenesis | pinned GPL-3.0-only SNES core, including MMX and LTTP host hooks; see [shared-core development](docs/shared-core.md) |
-| `crates/mmx-core` | `Game`: emulator wrapper, trap table, RAM map, co-op |
-| `crates/mmx-verify` | lockstep oracle-vs-DUT compare, `.bk2` movies |
-| `crates/mmx-net` | rollback / lockstep netplay protocol (from z2rs), WebRTC via matchbox |
-| `crates/mmx-native` | desktop app + headless runner |
-| `crates/mmx-launcher` | egui window that configures and starts `mmxrs` |
-| `crates/mmx-web` | wasm cdylib + static site |
-| `tools/xtask` | `cargo xtask verify|dump|ledger|rominfo` |
-| `tools/mmx-signal` | signalling server for netplay |
-| `ports.toml`, `ram-map.toml` | routine and RAM ledgers |
+## You need a Mega Man X ROM
 
-## Quickstart
+No part of the game is included here or in the downloads. You need a dump of
+a Mega Man X cartridge you own, as an `.sfc` or `.smc` file. The USA v1.1
+(Rev 1) and Europe v1.0 dumps are tested. Other revisions may refuse co-op if
+the code the game hooks has moved; the launcher shows the ROM's title,
+version and SHA-256 when you pick it.
 
-```sh
-make run        # build and open the launcher
-make game       # build and start the game directly (ROM from MMX_ROM or roms/)
-make coop       # local two-player
-make zero       # play as Zero with the X1 ROM's sprites
+A Mega Man X3 (USA) dump is optional. With it, Zero gets his full animation
+set and saber.
+
+## Play on macOS
+
+You need an Apple Silicon Mac (M1 or newer).
+
+1. Download `mmxrs-<version>-macos-arm64.zip` from the latest release and
+   unzip it.
+2. Move `mmxrs.app` to your Applications folder.
+3. The app isn't signed by Apple, so macOS blocks it the first time.
+   Right-click `mmxrs.app`, choose Open, then confirm. If macOS still refuses,
+   run this once in Terminal:
+
+   ```
+   xattr -dr com.apple.quarantine /Applications/mmxrs.app
+   ```
+
+4. Open the app. The launcher opens; choose your ROM and click Launch.
+
+## Play on Windows
+
+1. Download `mmxrs-<version>-windows-x86_64.zip` and unzip it anywhere.
+2. Run `mmxrs-launcher.exe`. If SmartScreen warns about an unknown publisher,
+   click More info, then Run anyway.
+3. Choose your ROM and click Launch.
+
+Keep `mmxrs.exe` in the same folder as the launcher; the launcher starts it
+from there.
+
+## Play on Linux
+
+The build targets x86-64 with glibc 2.36 or newer (Debian 12, Ubuntu 23.04,
+Fedora 37 and later). It needs ALSA and udev, which desktop distributions
+install by default.
+
+1. Download `mmxrs-<version>-linux-x86_64.zip` and unzip it.
+2. Run `./mmxrs-launcher` from that folder.
+3. Choose your ROM and click Launch.
+
+## The launcher
+
+The launcher sets up a game and starts `mmxrs` with the matching options. It
+remembers your choices between runs.
+
+- ROMs: drop the files on the window or browse for them.
+- Options: window scale, fullscreen, widescreen (16:10, 16:9, 21:9 or follow
+  the window), optional lighting and charge effects.
+- Players: one to four local players, each with a character choice, or
+  two-player online co-op with a room name.
+
+You can also skip the launcher and run the game from a terminal:
+
+```
+mmxrs --rom "Mega Man X (USA).sfc" --coop-local
+mmxrs --help
 ```
 
-Manual commands:
+## Controls
 
-```sh
-cargo build --workspace                 # no ROM needed
-cargo test --workspace                  # ROM-gated tests skip without MMX_ROM
-export MMX_ROM=/path/to/Mega\ Man\ X\ \(USA\).sfc
-cargo xtask rominfo                     # title, version byte, sha256
-cargo xtask verify --frames 600         # oracle vs DUT, zero input
-cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local
-# X1 Zero by default in local co-op and player 1:
-cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local
-cargo run --release -p mmx-native -- --rom "$MMX_ROM" --zero
-# Optional X3 Zero art and saber (requires your Mega Man X3 (USA) dump):
-cargo run --release -p mmx-native -- --rom "$MMX_ROM" --coop-local --x3-rom "/path/to/Mega Man X3 (USA).sfc"
-# online co-op: one side --coop-host ROOM, the other --coop-join ROOM, same --mode on both
-# (rollback default; on a good link --mode lockstep --delay 3 plays smoothest, see docs/netplay.md)
+Player 1 uses the keyboard: arrow keys to move, Z jump, X shoot, C dash, V
+saber (with the X3 ROM). Player 2 on the keyboard: WASD, G jump, F shoot,
+H dash, T saber. Players 3 and 4 need gamepads. A gamepad joins the first free
+slot when you press a button on it.
+
+Esc quits, F11 toggles fullscreen, F10 cycles widescreen, F5 and F7 save and
+load a state, and the number keys pick the save slot.
+
+## Online co-op
+
+One player hosts a room and the other joins it with the same room name. Both
+need identical ROM dumps and the same mode. The launcher fills in the default
+signalling server; you can run your own with `mmx-signal` from this
+repository.
+
+## Building from source
+
+You need Rust 1.96 or newer.
+
+```
+cargo build --release -p mmx-native -p mmx-launcher
+./target/release/mmxrs-launcher
 ```
 
-Player 1: arrows, Z jump, X buster, C dash, V saber with the optional X3 art.
-Player 2: WASD, G jump, F buster, H dash, T saber with the optional X3 art.
-X1 Zero uses his original standing and dash poses; the X3 ROM adds its full
-animation set and saber.
+On Linux, install the ALSA and udev development packages first (on Debian and
+Ubuntu: `libasound2-dev libudev-dev pkg-config`). Tests that need the ROM look
+for it in `MMX_ROM` and skip when it is unset.
 
-Prefer a window to flags? The launcher picks the ROMs, options and online
-settings, remembers them, and starts the game (docs/launcher.md):
-`cargo build --release -p mmx-native -p mmx-launcher && ./target/release/mmxrs-launcher`.
+## Reporting problems
 
-The launcher now offers 1–4 local controller slots, a character selector per
-slot, optional multiply lighting, and optional X/Zero charge glow and sparks.
-Each local player has independent movement and a sprite page and palette.
-Boss choices draw their sprites from the selected Mega Man X ROM. Sigma and
-Vile use ROM poses while moving; other bosses use their idle pose for actions
-without a mapped animation. Some stage-scale bosses have compact or partial
-player-sized renditions (notably Wolf Sigma and Rangda Bangda).
+Open an issue on this repository. Say which build you used, which ROM dump
+(the launcher shows its SHA-256), what you did and what happened.
 
-Per-crate docs: `docs/launcher.md`, `docs/traps.md`, `docs/verify.md`, `docs/coop.md`,
-`docs/netplay.md`, `docs/native.md`, `docs/web.md`.
+## License
+
+mmxrs is licensed under the GPL-3.0 (see [LICENSE](LICENSE)), because it
+includes the [jgenesis](https://github.com/jsgroth/jgenesis) emulator core.
+See [LEGAL.md](LEGAL.md) for what is and isn't in this repository.
+
+Mega Man is a trademark of Capcom. This project is not affiliated with or
+endorsed by Capcom.
+
+## Contributors
+
+Ryan Zaki and Troy Edwards.

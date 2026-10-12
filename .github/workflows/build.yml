@@ -1,0 +1,75 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Upload the zips to this release tag (leave empty to only build)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config libxkbcommon-dev libwayland-dev
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p mmx-native -p mmx-launcher
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ inputs.release }}"
+          version="${version#v}"
+          version="${version:-dev}"
+          out="mmxrs-${version}-${{ matrix.name }}"
+          bin="target/${{ matrix.target }}/release"
+          mkdir -p "dist/$out"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "$bin/mmxrs.exe" "$bin/mmxrs-launcher.exe" "dist/$out/"
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            app="dist/$out/mmxrs.app/Contents"
+            mkdir -p "$app/MacOS"
+            cp "$bin/mmxrs-launcher" "$bin/mmxrs" "$app/MacOS/"
+            sed "s/@VERSION@/$version/" packaging/Info.plist > "$app/Info.plist"
+            codesign --force --deep --sign - "dist/$out/mmxrs.app"
+          else
+            cp "$bin/mmxrs" "$bin/mmxrs-launcher" "dist/$out/"
+          fi
+          cp README.md LICENSE LEGAL.md "dist/$out/"
+          (cd dist && 7z a -tzip "$out.zip" "$out" > /dev/null)
+          echo "ZIP=dist/$out.zip" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ZIP }}
+      - name: Upload to release
+        if: inputs.release != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.release }}" "$ZIP" --clobber
