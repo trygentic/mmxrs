@@ -194,7 +194,8 @@ impl CaptureExport {
             "audio_duration_seconds": self.audio_samples as f64/48000.0,
             "native_capture_seen": audit.capture_seen, "native_clear_seen": audit.clear_seen,
             "hd_gameplay_verified": audit.saw_hd_gameplay,
-            "stage_select_verified": stage_select, "audit_deaths": [0,0,0,0], "audit_warps": [0,0,0,0],
+            "stage_select_verified": stage_select, "audit_deaths": audit.deaths, "audit_warps": audit.warps,
+            "audit_respawns": audit.respawns, "follower_losses_allowed": audit.allow_follower_losses,
             "minimum_hp": audit.minimum_hp, "furthest_x": audit.furthest_x,
             "clear_state": "/tmp/mmx_verified_clear.state"
         });
@@ -248,6 +249,11 @@ struct IntroAudit {
     capture_seen: bool,
     clear_seen: bool,
     saw_hd_gameplay: bool,
+    allow_follower_losses: bool,
+    down: [bool; 4],
+    deaths: [u64; 4],
+    respawns: [u64; 4],
+    warps: [u64; 4],
     stage_select_frames: usize,
     last_mode: Option<(u8, u8)>,
     level: Option<u8>,
@@ -293,17 +299,35 @@ impl IntroAudit {
                 // Vile's required story capture is not a player death. Its
                 // capture action plus gameplay phase distinguishes it from
                 // HP0/action$0C/pit-death and the respawn phase.
-                if s[3] == 0x0c || (s[2] == 0 && !(slot == 0 && self.capture_seen && scripted)) {
-                    return Err(format!("P{} died at frame{}: raw={s:?}", slot + 1, game.frame_count()));
+                let lost = s[3] == 0x0c || (s[2] == 0 && !(slot == 0 && self.capture_seen && scripted))
+                    || (slot > 0 && !visible[slot] && !scripted);
+                if lost {
+                    if slot == 0 || !self.allow_follower_losses {
+                        return Err(format!("P{} died/disappeared at frame{}: raw={s:?}", slot + 1, game.frame_count()));
+                    }
+                    if !self.down[slot] {
+                        self.deaths[slot] += 1;
+                        eprintln!("FOLLOWER_DOWN frame{} P{} raw={s:?} deaths={:?}", game.frame_count(), slot+1, self.deaths);
+                    }
+                    self.down[slot] = true;
+                    self.previous[slot] = None;
+                    continue;
                 }
-                if slot > 0 && !visible[slot] && !scripted {
-                    return Err(format!("P{} disappeared/downed at frame{}: raw={s:?}", slot + 1, game.frame_count()));
+                if self.down[slot] && visible[slot] && s[2] > 0 {
+                    self.respawns[slot] += 1;
+                    self.down[slot] = false;
+                    self.previous[slot] = None;
+                    eprintln!("FOLLOWER_RESPAWN frame{} P{} raw={s:?} respawns={:?}", game.frame_count(), slot+1, self.respawns);
                 }
                 if visible[slot] && (slot > 0 || !scripted) {
                     let at = [s[0], s[1]];
                     if let Some(before) = self.previous[slot] {
                         if before[0].abs_diff(at[0]) > 64 || before[1].abs_diff(at[1]) > 64 {
-                            return Err(format!("P{} warped at frame{}: {before:?}->{at:?}", slot + 1, game.frame_count()));
+                            if slot == 0 || !self.allow_follower_losses {
+                                return Err(format!("P{} warped at frame{}: {before:?}->{at:?}", slot + 1, game.frame_count()));
+                            }
+                            self.warps[slot] += 1;
+                            eprintln!("FOLLOWER_RESCUE frame{} P{} {before:?}->{at:?} warps={:?}",game.frame_count(),slot+1,self.warps);
                         }
                     }
                     self.previous[slot] = Some(at);
@@ -326,8 +350,11 @@ impl IntroAudit {
             if !self.seen.iter().all(|seen| *seen) {
                 return Err(format!("stage select reached without all four players: {:?}", self.seen));
             }
-            if self.furthest_x.iter().any(|x| *x < 7000) {
+            if self.furthest_x[0] < 7000 || (!self.allow_follower_losses && self.furthest_x.iter().any(|x| *x < 7000)) {
                 return Err(format!("stage select reached with a player missing the final road: {:?}", self.furthest_x));
+            }
+            if self.allow_follower_losses && self.deaths[1..].iter().sum::<u64>()>0 && self.respawns[1..].iter().sum::<u64>()==0 {
+                return Err("followers died but no actual native respawn was observed".into());
             }
             return Ok(true);
         }
@@ -337,6 +364,15 @@ impl IntroAudit {
 
 #[test]
 fn real_rom_four_player_power_on_intro_finishes_without_death_or_warp() {
+    run_four_player_intro(false, 8);
+}
+
+#[test]
+fn real_rom_four_player_leader_survives_with_native_follower_respawns() {
+    run_four_player_intro(true, 20);
+}
+
+fn run_four_player_intro(allow_follower_losses: bool, base_delay: u16) {
     let Some(rom_path) = std::env::var_os("MMX_ROM").map(std::path::PathBuf::from) else {
         return eprintln!("MMX_ROM not set; skipping full intro acceptance test");
     };
@@ -348,7 +384,7 @@ fn real_rom_four_player_power_on_intro_finishes_without_death_or_warp() {
     let args = crate::cli::parse([
         "--rom".to_owned(), rom_path.to_string_lossy().into_owned(),
         "--movie".into(), movie_path.to_string_lossy().into_owned(),
-        "--movie-smart".into(), "--movie-coop-delay".into(), "8".into(),
+        "--movie-smart".into(), "--movie-coop-delay".into(), base_delay.to_string(),
         "--widescreen".into(), "16:9".into(),
         "--dynamic-lighting".into(), "--charge-effects".into(),
         "--p1-character".into(), "x".into(), "--p2-character".into(), "zero".into(),
@@ -376,7 +412,7 @@ fn real_rom_four_player_power_on_intro_finishes_without_death_or_warp() {
         game.set_audio_rate(48000);
         CaptureExport::new(std::path::PathBuf::from(dir), game.fps()).unwrap()
     });
-    let mut audit = IntroAudit::default();
+    let mut audit = IntroAudit { allow_follower_losses, ..IntroAudit::default() };
     let max_frames = std::env::var("MMX_ACCEPTANCE_MAX_FRAMES").ok()
         .and_then(|v| v.parse::<usize>().ok()).unwrap_or(36_000);
     for frame in 0..max_frames {
@@ -419,8 +455,13 @@ fn real_rom_four_player_power_on_intro_finishes_without_death_or_warp() {
         if complete {
             assert_eq!(audit.level, Some(0), "completed a different stage than the canonical intro");
             let (deaths, warps, _) = controller.outcomes();
-            assert_eq!(deaths, [0; 4], "controller detected deaths missed by independent audit");
-            assert_eq!(warps, [0; 4], "controller detected warps missed by independent audit");
+            if allow_follower_losses {
+                assert_eq!(deaths[0], 0, "controller detected P1 death missed by independent audit");
+                assert_eq!(warps[0], 0, "controller detected P1 warp missed by independent audit");
+            } else {
+                assert_eq!(deaths, [0; 4], "controller detected deaths missed by independent audit");
+                assert_eq!(warps, [0; 4], "controller detected warps missed by independent audit");
+            }
             assert!(audit.saw_hd_gameplay, "test never verified actual HD gameplay");
             compose_recording_frame(&game);
             if let Some(export) = &mut capture {
@@ -431,7 +472,7 @@ fn real_rom_four_player_power_on_intro_finishes_without_death_or_warp() {
                 let (pixels, width, height) = game.frame();
                 crate::headless::write_png("/tmp/mmx_verified_stage_select.png", pixels, width, height).unwrap();
             }
-            eprintln!("FULL_INTRO_PASS frames={} level={:?} deaths=[0,0,0,0] warps=[0,0,0,0] min_hp={:?} furthest_x={:?} capture={} clear={} stage_select=true", game.frame_count(), audit.level, audit.minimum_hp, audit.furthest_x, audit.capture_seen, audit.clear_seen);
+            eprintln!("FULL_INTRO_PASS frames={} level={:?} deaths={:?} respawns={:?} warps={:?} controller_deaths={deaths:?} controller_warps={warps:?} follower_losses_allowed={} base_delay={base_delay} min_hp={:?} furthest_x={:?} capture={} clear={} stage_select=true", game.frame_count(), audit.level, audit.deaths, audit.respawns, audit.warps, allow_follower_losses, audit.minimum_hp, audit.furthest_x, audit.capture_seen, audit.clear_seen);
             return;
         }
         if frame == 15000 && std::env::var_os("MMX_NPC_TRACE").is_some() {

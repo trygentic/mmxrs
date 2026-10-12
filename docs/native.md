@@ -221,7 +221,13 @@ ordinary controller inputs, so collisions and damage remain live. At the
 intro ending, companions stage on the right while the final drivers are
 fought; X then receives the native Vile capture sequence. It stops
 at the end of the first stage; later stages are not supported by this mode.
-The default spacing is 8, 16 and 24 source frames. During movie co-op, Zero
+The smart default follower spacing is 20, 40 and 60 source frames (P2/P3/P4),
+roughly 30 pixels per actor during an uninterrupted walk. `--movie-coop-delay N`
+sets the base and uses N/2N/3N. The wider spacing applies on clear, grounded,
+flat road near the end of the Highway, after its gaps and both collapses. Spawn, combat, gaps and final scenes keep
+the proven 8/16/24 safety cadence (or the configured value when smaller). These
+are source-waypoint offsets; physical recovery can temporarily bring players
+together to preserve real co-op survival. During movie co-op, Zero
 and Sigma replace buster fire with saber swings. Vile fires one maximum-charge X
 blast from his shoulder, with at least 120 video frames between shots, with its native animation tinted yellow and its
 full-charge collision, speed and damage. Weapon collision uses logical game
@@ -235,7 +241,7 @@ Example with [Hetfield90's tool-assisted input movie](https://tasvideos.org/3197
 ```sh
 cargo run -p mmx-native --release -- \
   --rom "roms/Mega Man X (USA) (Rev 1).sfc" \
-  --movie movies/hetfield90v3-megamanx-100p.bk2 --movie-smart --movie-coop-delay 8 \
+  --movie movies/hetfield90v3-megamanx-100p.bk2 --movie-smart --movie-coop-delay 20 \
   --p1-character x --p2-character zero --p3-character sigma --p4-character vile \
   --bone-sheets roms/derived/bone_sheets --widescreen 16:9 \
   --dynamic-lighting --charge-effects

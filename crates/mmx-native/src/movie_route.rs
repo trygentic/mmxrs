@@ -64,7 +64,8 @@ pub struct RoutePlayback {
     boot_at: usize,
     route: Vec<Point>,
     followers: [Follower; 4],
-    delay: usize,
+    delay_offsets: [usize; 4],
+    farthest_leader_x: u16,
     started: bool,
     finished: bool,
     level: u8,
@@ -200,7 +201,8 @@ impl RoutePlayback {
             boot_at: 0,
             route,
             followers: std::array::from_fn(|_| Follower::default()),
-            delay: args.movie_coop_delay.map_or(8, usize::from),
+            delay_offsets: movie_delay_offsets(usize::from(args.movie_coop_delay.unwrap_or(crate::cli::DEFAULT_MOVIE_COOP_DELAY))),
+            farthest_leader_x: 0,
             started: false,
             finished: false,
             level,
@@ -453,6 +455,40 @@ impl RoutePlayback {
                 }
             }
         }
+        if let Some((x, _, _)) = positions[0] {
+            self.farthest_leader_x = self.farthest_leader_x.max(x);
+        }
+        // Preserve the proven spawn cadence, then widen formation gradually.
+        // An abrupt larger spawn offset can trap the last player in the
+        // source movie's initial stationary charge/jump sequence.
+        let safe_spacing = positions[0].is_some_and(|(x, y, action)| {
+            (6200..6900).contains(&x) && grounded_action(action)
+                && game.player_floor_probe_offset(0).is_some_and(|off| {
+                    let feet=i32::from(y)+i32::from(off)+1;
+                    (0..=64).step_by(16).all(|dx| {
+                        flat_floor(game,i32::from(x)+dx,feet)
+                            && game.terrain_flat_floor_y(i32::from(x)+dx,i32::from(y)+8).is_none()
+                    })
+                })
+        }) && (0..4).all(|slot| {
+            positions[slot].is_some_and(|(x,y,action)| grounded_action(action)
+                && game.player_floor_probe_offset(slot).is_some_and(|off| flat_floor(game,i32::from(x),i32::from(y)+i32::from(off)+1)))
+                && self.followers[slot].traversal.is_none()
+                && !self.followers[slot].recovering_collapse
+        }) && (0..ram::ENEMY_COUNT).all(|i| {
+            let at=ix(ram::ENEMIES_BASE)+i*ram::ENEMY_STRIDE;
+            w[at]==0 || w[at+ram::ENEMY_HP]&0x7f==0
+        }) && (0..8).all(|i| {
+            let at=0x1428+i*0x40;
+            w[at]==0 || w[at+0x26]==0
+        });
+        // Use the proven cadence for collisions, fire and coordinated jumps.
+        // Wider spacing belongs to clear road, not a wait under enemy fire.
+        let delays = if safe_spacing {
+            effective_movie_delay_offsets(self.delay_offsets, self.farthest_leader_x)
+        } else {
+            movie_delay_offsets(self.delay_offsets[1].min(8))
+        };
         let leader_limit = self.followers[0].at;
         let bees: Vec<_> = (0..ram::ENEMY_COUNT)
             .filter_map(|slot| {
@@ -547,13 +583,13 @@ impl RoutePlayback {
             let Some((x, y, action)) = positions[slot] else {
                 return 0;
             };
-            if slot > 0 && leader_limit < self.delay * slot {
+            if slot > 0 && delayed_source_limit(leader_limit, delays[slot]).is_none() {
                 return 0;
             }
             let limit = if slot == 0 {
                 self.route.len() - 1
             } else {
-                leader_limit.saturating_sub(self.delay * slot)
+                delayed_source_limit(leader_limit, delays[slot]).unwrap()
             };
             if !self.followers[slot].recovering_collapse
                 && limit >= self.followers[slot].landed_floor_at
@@ -1599,7 +1635,7 @@ impl RoutePlayback {
         if std::env::var_os("MMX_GAP_TRACE").is_some() && game.frame_count() % 4 == 0 {
             for slot in 0..4 {
                 if positions[slot].is_some_and(|(x, _, _)| (4130..4338).contains(&x)) {
-                    eprintln!("GAP_TRACE frame{} P{} raw={:?} grounded={} road={:?} cursor={} limit={} actualprev={:04x} pads={:04x} decision={:?} traversal={:?} gaps={:?}",game.frame_count(),slot+1,game.player_physics_state(slot),live_ground[slot],self.grounded_road[slot],self.followers[slot].at,self.followers[0].at.saturating_sub(self.delay*slot),self.previous_delivered[slot],pads[slot],decision_trace[slot],self.followers[slot].traversal,self.known_gaps.iter().filter(|p|p.start[0]>4100&&p.start[0]<4338).collect::<Vec<_>>());
+                    eprintln!("GAP_TRACE frame{} P{} raw={:?} grounded={} road={:?} cursor={} limit={} actualprev={:04x} pads={:04x} decision={:?} traversal={:?} gaps={:?}",game.frame_count(),slot+1,game.player_physics_state(slot),live_ground[slot],self.grounded_road[slot],self.followers[slot].at,self.followers[0].at.saturating_sub(delays[slot]),self.previous_delivered[slot],pads[slot],decision_trace[slot],self.followers[slot].traversal,self.known_gaps.iter().filter(|p|p.start[0]>4100&&p.start[0]<4338).collect::<Vec<_>>());
                 }
             }
         }
@@ -1608,6 +1644,21 @@ impl RoutePlayback {
         }
         pads
     }
+}
+
+/// Fixed per-character source offsets. The smart controller retains these
+/// independently; physical gap/combat recovery can temporarily converge actors.
+fn movie_delay_offsets(base: usize) -> [usize; 4] {
+    std::array::from_fn(|slot| base.saturating_mul(slot))
+}
+
+fn effective_movie_delay_offsets(configured: [usize; 4], furthest_leader_x: u16) -> [usize; 4] {
+    let ramped_base = 8 + usize::from(furthest_leader_x.saturating_sub(500)) / 40;
+    movie_delay_offsets(configured[1].min(ramped_base))
+}
+
+fn delayed_source_limit(leader: usize, offset: usize) -> Option<usize> {
+    leader.checked_sub(offset)
 }
 
 /// Bee Blader's explosion also creates a type22 visual child (variant4).
@@ -2112,6 +2163,43 @@ mod tests {
         assert_eq!(steer(&route, &mut s, 100, 100, 0, 99) & BTN_B, 0);
     }
     #[test]
+    fn default_followers_reach_the_same_attack_at_distinct_offsets() {
+        let offsets=movie_delay_offsets(usize::from(crate::cli::DEFAULT_MOVIE_COOP_DELAY));
+        assert_eq!(offsets,[0,20,40,60]);
+        // A single attack event at source24 cannot collapse to one shared
+        // delay: each actual source limit exposes it on a different leader tick.
+        let mut attack_ticks=[None;4];
+        for leader in 0..=84 {
+            for slot in 0..4 {
+                if delayed_source_limit(leader,offsets[slot])==Some(24) {
+                    attack_ticks[slot]=Some(leader);
+                }
+            }
+        }
+        assert_eq!(attack_ticks,[Some(24),Some(44),Some(64),Some(84)]);
+        assert_eq!(delayed_source_limit(59,offsets[3]),None);
+    }
+
+    #[test]
+    fn wider_spacing_preserves_spawn_then_ramps_without_a_source_jump() {
+        let configured = movie_delay_offsets(20);
+        assert_eq!(effective_movie_delay_offsets(configured, 254), [0, 8, 16, 24]);
+        assert_eq!(effective_movie_delay_offsets(configured, 500), [0, 8, 16, 24]);
+        assert_eq!(effective_movie_delay_offsets(configured, 540), [0, 9, 18, 27]);
+        assert_eq!(effective_movie_delay_offsets(configured, 980), [0, 20, 40, 60]);
+        assert_eq!(effective_movie_delay_offsets(configured, 7000), [0, 20, 40, 60]);
+        assert_eq!(effective_movie_delay_offsets(movie_delay_offsets(8), 7000), [0, 8, 16, 24]);
+        assert_eq!(effective_movie_delay_offsets(movie_delay_offsets(0), 7000), [0; 4]);
+    }
+
+    #[test]
+    fn explicit_zero_and_custom_offsets_remain_honored() {
+        assert_eq!(movie_delay_offsets(0),[0,0,0,0]);
+        assert_eq!(movie_delay_offsets(8),[0,8,16,24]);
+        assert_eq!(movie_delay_offsets(120),[0,120,240,360]);
+    }
+
+    #[test]
     fn follower_cannot_advance_past_leader_delay() {
         let route = vec![
             Point {
@@ -2446,7 +2534,8 @@ mod tests {
             boot_at: 0,
             route,
             followers: std::array::from_fn(|_| Follower::default()),
-            delay: 8,
+            delay_offsets: movie_delay_offsets(20),
+            farthest_leader_x: 0,
             started: true,
             finished: false,
             level: game.wram()[ix(ram::LEVEL_ID)],

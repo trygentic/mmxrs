@@ -2,6 +2,8 @@
 
 use mmx_core::{netgame::Mode, Character};
 
+pub const DEFAULT_MOVIE_COOP_DELAY: u16 = 20;
+
 pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local|--players 1..4] [--vs] [--vs-stage ID] [--pads]
              [--p1-character ID] [--p2-character ID] [--p3-character ID] [--p4-character ID]
@@ -27,7 +29,8 @@ the original slowdown. --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and e
 --demo-bots enables four local players, drives a repeatable Highway run, and restores critically low health for recording.
 --movie replays recorded inputs from power-on (overclock off by default).
 --movie-coop-delay N enables four players copying P1 at 0/N/2N/3N frame delays during gameplay.
---movie-smart follows the movie's Highway route and resynchronizes inputs after hits (--movie-route is an alias).
+--movie-smart follows the Highway route with default P2/P3/P4 offsets of 20/40/60 source frames; --movie-coop-delay overrides the base.
+It resynchronizes after hits (--movie-route is an alias); safety maneuvers can temporarily bring players together.
 --showcase-characters cycles all playable characters during that four-player demo (requires --bone-sheets).
 --bone-sheets loads private Blender or bone animation sprites; high-resolution packs preserve game size.
 Vile uses the private on-foot PNG at roms/derived/bone_sheets/user_sources/vile_idle.png
@@ -326,7 +329,7 @@ pub fn parse<I: IntoIterator<Item = String>>(
     if a.zero { a.characters[0] = Character::Zero; }
     if a.movie_route {
         if a.movie.is_none() { return Err("--movie-route requires --movie PATH".into()); }
-        a.movie_coop_delay.get_or_insert(8);
+        a.movie_coop_delay.get_or_insert(DEFAULT_MOVIE_COOP_DELAY);
     }
     if a.demo_survival && !a.movie_route && !a.demo_bots && !a.showcase_characters {
         return Err("--demo-survival requires --movie-smart, --demo-bots or --showcase-characters".into());
@@ -409,7 +412,11 @@ mod tests {
         assert_eq!(a.overclock(), mmx_core::Overclock::Off);
         let route = p("--movie run.bk2 --movie-route").unwrap();
         assert!(route.movie_route && route.coop_local);
-        assert_eq!(route.movie_coop_delay, Some(8));
+        assert_eq!(route.movie_coop_delay, Some(20));
+        let explicit = p("--movie run.bk2 --movie-smart --movie-coop-delay 8").unwrap();
+        assert_eq!(explicit.movie_coop_delay, Some(8));
+        let synchronized = p("--movie run.bk2 --movie-smart --movie-coop-delay 0").unwrap();
+        assert_eq!(synchronized.movie_coop_delay, Some(0));
         assert!(p("--movie run.bk2 --movie-smart").unwrap().movie_route);
         for bad in ["--movie-route", "--movie-coop-delay 8", "--movie a.bk2 --demo-bots", "--movie a.bk2 --wide-gameplay", "--movie a.bk2 --coop-host room", "--movie a.bk2 --movie-coop-delay 121"] {
             assert!(p(bad).is_err(), "{bad}");
