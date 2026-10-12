@@ -93,6 +93,92 @@ pub fn map_key(k: KeyCode, coop: bool) -> Option<KeyAction> {
         .or_else(|| find(HOTKEYS, k).map(KeyAction::Hot))
 }
 
+/// Pad button -> SNES bit tables, the defaults below or a `--pad-map` override.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PadMap {
+    pub gilrs: Vec<(gilrs::Button, u16)>,
+    /// GameController buttons in `gc_pad::snapshot` order, derived from `gilrs`.
+    pub gc: [(&'static str, u16); 10],
+}
+impl Default for PadMap {
+    fn default() -> Self {
+        Self { gilrs: PAD_BUTTONS.to_vec(), gc: GC_BUTTONS }
+    }
+}
+/// gilrs button names accepted by `--pad-map`, and the GameController button
+/// (if any) at the same physical position.
+const PAD_NAMES: &[(&str, gilrs::Button, Option<&str>)] = &[
+    ("South", gilrs::Button::South, Some("buttonA")),
+    ("East", gilrs::Button::East, Some("buttonB")),
+    ("West", gilrs::Button::West, Some("buttonX")),
+    ("North", gilrs::Button::North, Some("buttonY")),
+    ("LeftTrigger", gilrs::Button::LeftTrigger, Some("leftShoulder")),
+    ("RightTrigger", gilrs::Button::RightTrigger, Some("rightShoulder")),
+    ("LeftTrigger2", gilrs::Button::LeftTrigger2, Some("leftTrigger")),
+    ("RightTrigger2", gilrs::Button::RightTrigger2, Some("rightTrigger")),
+    ("Start", gilrs::Button::Start, Some("buttonMenu")),
+    ("Select", gilrs::Button::Select, Some("buttonOptions")),
+    ("DPadUp", gilrs::Button::DPadUp, None),
+    ("DPadDown", gilrs::Button::DPadDown, None),
+    ("DPadLeft", gilrs::Button::DPadLeft, None),
+    ("DPadRight", gilrs::Button::DPadRight, None),
+    ("LeftThumb", gilrs::Button::LeftThumb, None),
+    ("RightThumb", gilrs::Button::RightThumb, None),
+    ("C", gilrs::Button::C, None),
+    ("Z", gilrs::Button::Z, None),
+    ("Mode", gilrs::Button::Mode, None),
+];
+const BIT_NAMES: [(&str, u16); 12] = [
+    ("A", BTN_A),
+    ("B", BTN_B),
+    ("X", BTN_X),
+    ("Y", BTN_Y),
+    ("L", BTN_L),
+    ("R", BTN_R),
+    ("Start", BTN_START),
+    ("Select", BTN_SELECT),
+    ("Up", BTN_UP),
+    ("Down", BTN_DOWN),
+    ("Left", BTN_LEFT),
+    ("Right", BTN_RIGHT),
+];
+impl PadMap {
+    /// `--pad-map "South=A,East=B,LeftTrigger2=none"`: each listed pad button
+    /// gets that SNES button (`none` unbinds it); unlisted buttons keep the
+    /// default. Names are gilrs button names and SNES button names, case-insensitive.
+    pub fn parse(spec: Option<&str>) -> Result<Self, String> {
+        let mut m = Self::default();
+        let Some(spec) = spec else { return Ok(m) };
+        for pair in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let (pad, btn) = pair
+                .split_once('=')
+                .ok_or_else(|| format!("bad --pad-map entry {pair:?}: want PAD=BUTTON"))?;
+            let (_, button, gc) = PAD_NAMES
+                .iter()
+                .find(|(n, _, _)| n.eq_ignore_ascii_case(pad.trim()))
+                .ok_or_else(|| format!("unknown pad button {pad:?} in --pad-map"))?;
+            let bit = if btn.trim().eq_ignore_ascii_case("none") {
+                0
+            } else {
+                BIT_NAMES
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(btn.trim()))
+                    .map(|(_, b)| *b)
+                    .ok_or_else(|| format!("unknown SNES button {btn:?} in --pad-map"))?
+            };
+            m.gilrs.retain(|(b, _)| b != button);
+            if bit != 0 {
+                m.gilrs.push((*button, bit));
+            }
+            if let Some(gc) = gc {
+                for entry in m.gc.iter_mut().filter(|(n, _)| n == gc) {
+                    entry.1 = bit;
+                }
+            }
+        }
+        Ok(m)
+    }
+}
 /// Standard-mapping gamepad buttons -> SNES bits.
 pub const PAD_BUTTONS: &[(gilrs::Button, u16)] = &[
     (gilrs::Button::South, BTN_B),
@@ -175,6 +261,22 @@ pub fn stick_bits(x: f32, y: f32) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pad_map_overrides_only_listed_buttons() {
+        use super::*;
+        let m = PadMap::parse(Some("south=A, East=b, LeftTrigger2=none")).unwrap();
+        let bit = |b: gilrs::Button| m.gilrs.iter().find(|(x, _)| *x == b).map(|(_, v)| *v);
+        assert_eq!(bit(gilrs::Button::South), Some(BTN_A));
+        assert_eq!(bit(gilrs::Button::East), Some(BTN_B));
+        assert_eq!(bit(gilrs::Button::LeftTrigger2), None);
+        assert_eq!(bit(gilrs::Button::North), Some(BTN_X), "unlisted keeps default");
+        let gc = |n: &str| m.gc.iter().find(|(x, _)| *x == n).map(|(_, v)| *v).unwrap();
+        assert_eq!((gc("buttonA"), gc("buttonB"), gc("leftTrigger")), (BTN_A, BTN_B, 0));
+        assert_eq!(PadMap::parse(None).unwrap(), PadMap::default());
+        assert!(PadMap::parse(Some("Souths=A")).is_err());
+        assert!(PadMap::parse(Some("South=Jump")).is_err());
+        assert!(PadMap::parse(Some("South")).is_err());
+    }
     use super::*;
     use std::collections::HashSet;
 

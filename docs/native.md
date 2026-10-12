@@ -158,6 +158,15 @@ The layout is positional, the same on every pad: bottom face button = SNES B
 out swapped against Xbox's (Switch B is jump, Switch A is dash), which is what
 a SNES player expects since the Switch layout is the SNES one.
 
+`--pad-map 'South=A,East=B'` rebinds buttons: comma-separated `PAD=BUTTON`
+pairs with gilrs pad names (`South`, `East`, `West`, `North`, `LeftTrigger`,
+`RightTrigger`, `LeftTrigger2`, `RightTrigger2`, `Start`, `Select`,
+`DPadUp/Down/Left/Right`, `LeftThumb`, `RightThumb`) and SNES buttons (`A`,
+`B`, `X`, `Y`, `L`, `R`, `Start`, `Select`, `Up`, `Down`, `Left`, `Right`, or
+`none` to unbind). Unlisted pad buttons keep the positional default. The same
+spec drives both sources: GameController buttons are matched by position
+(`buttonA` is `South`, and so on). The d-pad and left stick always steer.
+
 | SNES | Xbox | PlayStation | Switch Pro | gilrs | GameController |
 |---|---|---|---|---|---|
 | B (jump) | A | Cross | B | South | buttonA |

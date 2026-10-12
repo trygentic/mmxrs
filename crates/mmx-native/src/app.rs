@@ -61,6 +61,7 @@ struct App {
     tex: (usize, usize),
     audio: Option<Audio>,
     gilrs: Option<gilrs::Gilrs>,
+    pad_map: keys::PadMap,
     /// macOS GameController pads seen last frame (see `gc_pad`).
     #[cfg(target_os = "macos")]
     gc: Vec<crate::gc_pad::GcPad>,
@@ -104,6 +105,7 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
     // and GameController delivers nothing to inactive apps otherwise.
     crate::gc_pad::monitor_background(true);
     let _ = pad_debug;
+    let pad_map = keys::PadMap::parse(args.pad_map.as_deref())?;
     let gilrs = gilrs::Gilrs::new()
         .map_err(|e| eprintln!("gamepads: {e}"))
         .ok();
@@ -148,6 +150,7 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         tex: (args.widescreen.initial().width(), 224),
         audio,
         gilrs,
+        pad_map,
         #[cfg(target_os = "macos")]
         gc: Vec::new(),
         pads: [None; 4],
@@ -205,7 +208,9 @@ impl App {
         let Some(gp) = self.gilrs.as_ref().and_then(|g| g.connected_gamepad(id)) else {
             return 0;
         };
-        let buttons = keys::PAD_BUTTONS
+        let buttons = self
+            .pad_map
+            .gilrs
             .iter()
             .filter(|(b, _)| gp.is_pressed(*b))
             .fold(0, |a, (_, bit)| a | bit);
@@ -267,7 +272,7 @@ impl App {
     /// connects/disconnects, and a newly pressed bit counts as a press.
     #[cfg(target_os = "macos")]
     fn poll_gc(&mut self) {
-        let now = crate::gc_pad::snapshot();
+        let now = crate::gc_pad::snapshot(&self.pad_map.gc);
         let old = std::mem::replace(&mut self.gc, now.clone());
         for o in &old {
             match now.iter().find(|p| p.key == o.key) {

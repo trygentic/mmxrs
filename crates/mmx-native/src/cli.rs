@@ -8,6 +8,7 @@ pub const USAGE: &str = "\
 usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local|--players 1..4] [--vs] [--vs-bots] [--vs-stage ID] [--pads]
              [--p1-character ID] [--p2-character ID] [--p3-character ID] [--p4-character ID]
              [--dynamic-lighting] [--charge-effects] [--bone-sheets DIR] [--vile-sprite PNG]
+             [--pad-map 'South=B,East=A,...'] [--timing ntsc|pal]
              [--demo-bots] [--showcase-characters] [--demo-survival]
              [--movie PATH.bk2|PATH.lsmv|PATH.smv] [--movie-coop-delay N] [--movie-smart]
              [--widescreen off|16:10|16:9|21:9|auto|N] [--wide-gameplay] [--overclock off|1.5|2]
@@ -26,6 +27,10 @@ past the original ones whatever the preset; changes the game, online both player
 --overclock runs the SNES CPU 1.5x or 2x as fast, which removes the game's own slowdown with
 many enemies (changes the game: online both players need the same); default 2, off restores
 the original slowdown. --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
+--pad-map rebinds gamepad buttons: comma-separated PAD=BUTTON with gilrs pad names (South, East,
+West, North, LeftTrigger, RightTrigger, LeftTrigger2, RightTrigger2, Start, Select, DPadUp/Down/Left/Right,
+LeftThumb, RightThumb) and SNES buttons (A, B, X, Y, L, R, Start, Select, Up, Down, Left, Right, or none);
+unlisted pad buttons keep the default positional layout.
 --demo-bots enables four local players, drives a repeatable Highway run, and restores critically low health for recording.
 --movie replays recorded inputs from power-on (overclock off by default).
 --movie-coop-delay N enables four players copying P1 at 0/N/2N/3N frame delays during gameplay.
@@ -78,6 +83,8 @@ pub struct Args {
     pub showcase_characters: bool,
     /// `--pads`: log gamepads and pad bit changes to stderr.
     pub pads: bool,
+    /// `--pad-map`: gamepad button rebinding spec (see `keys::PadMap::parse`).
+    pub pad_map: Option<String>,
     pub headless: bool,
     pub frames: u64,
     /// (frame number after stepping, png path)
@@ -182,6 +189,7 @@ impl Default for Args {
             demo_survival: false,
             showcase_characters: false,
             pads: false,
+            pad_map: None,
             headless: false,
             frames: 0,
             dump_at: Vec::new(),
@@ -260,6 +268,7 @@ pub fn parse<I: IntoIterator<Item = String>>(
             "--demo-survival" => a.demo_survival = true,
             "--showcase-characters" => a.showcase_characters = true,
             "--pads" => a.pads = true,
+            "--pad-map" => a.pad_map = Some(val("--pad-map")?),
             "--headless" => a.headless = true,
             "--frames" => {
                 let v = val("--frames")?;
