@@ -35,6 +35,13 @@ are `highway`, `octopus`, `chameleon`, `armadillo`, `mammoth`, `eagle`,
 `mandrill`, `kuwanger`, and `penguin`. VS is local only; players 3 and 4 need
 gamepads. The animation sheets include Bass and Proto Man, who have no X1 ROM
 sprites. Vile also needs the on-foot PNG described below.
+For an unattended match, add `--vs-bots`: the configured fighters and
+`--vs-stage` arena start directly. Bots use normal movement and attack
+inputs, show the round winner for 90 frames, then start the next round.
+Use `--players 2` for a duel or `--players 4` for a free-for-all. Automated
+VS also supports `--headless --frames N`; dumped frames include the winner
+overlay above lighting and the HUD. The VS bots use no health or revival
+assistance.
 Zero uses X1 ROM art by default; `--x3-rom` selects X3 art. Local players 3 and 4 have independent control state,
 sprite pages and palettes. Sigma and Vile
 cycle ROM poses while moving; other bosses use their idle pose for unmapped

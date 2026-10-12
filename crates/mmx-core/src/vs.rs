@@ -68,6 +68,12 @@ impl Game {
 
     pub fn vs_status(&self) -> Option<VsStatus> { self.vs_state.as_ref().map(VsState::status) }
 
+    /// Eliminated P1 retains a harmless native actor at HP1. Controllers must
+    /// use round membership rather than that actor's native health value.
+    pub fn vs_player_active(&self, player: usize) -> bool {
+        self.vs_state.as_ref().is_some_and(|vs| player < vs.players && !vs.eliminated[player])
+    }
+
     /// Start the next round in the current arena. The native menu calls this
     /// after showing the winner; all fighters regain full health and space out.
     pub fn restart_vs_round(&mut self) {
@@ -182,7 +188,7 @@ fn owner(game: &Game, shot: usize) -> usize {
 }
 
 fn shot_damage(id: u8) -> u8 {
-    match id { 1 => 2, 2 => 4, _ => 1 }
+    match id { 1 => 2, 2 | 3 => 4, _ => 1 }
 }
 
 fn hit(game: &mut Game, target: usize, damage: u8) {
@@ -269,14 +275,14 @@ pub(crate) fn tick(game: &mut Game) {
         if w[at] == 0 { continue; }
         let shooter = owner(game, shot);
         if player_eliminated(game, shooter) { continue; }
-        let (sx, sy) = (i32::from(u16::from_le_bytes([w[at + 5], w[at + 6]])),
-                        i32::from(u16::from_le_bytes([w[at + 8], w[at + 9]])));
         let damage = shot_damage(w[at + 0x0a]);
+        let shot_bounds = game.object_contact_bounds(at as u16);
         for target in 0..players {
             if target == shooter || game.vs_state.as_ref().unwrap().eliminated[target] { continue; }
-            let Some(b) = block(game, target) else { continue };
-            let (px, py) = pos(b);
-            if (sx - px).abs() <= 12 && (sy - (py - 14)).abs() <= 18 {
+            let Some(body) = game.player_contact_bounds(target) else { continue };
+            let Some(shot_box) = shot_bounds else { continue };
+            if shot_box[0] <= body[2] && shot_box[2] >= body[0]
+                && shot_box[1] <= body[3] && shot_box[3] >= body[1] {
                 if game.vs_state.as_ref().unwrap().cooldown[target] != 0 { break; }
                 hit(game, target, damage);
                 game.wram_mut()[at] = 0;
@@ -343,6 +349,8 @@ mod tests {
         let at = ix(SHOTS);
         let w = game.wram_mut();
         w[at] = 1;
+        w[at + 0x20..at + 0x22].copy_from_slice(&0x1fc0u16.to_le_bytes());
+        w[0x1fc0..0x1fc4].copy_from_slice(&[0, 0, 4, 4]);
         w[at + 5..at + 7].copy_from_slice(&(x as u16).to_le_bytes());
         w[at + 8..at + 10].copy_from_slice(&((y - 14) as u16).to_le_bytes());
         tick(&mut game);
@@ -356,5 +364,32 @@ mod tests {
         assert_eq!(status.scores[0], 1);
         assert!(!game.coop.p2_hidden);
         assert!(game.coop.p2[OFF_HP] & 0x7f > 0);
+        // A full-charge blast reaches beyond the former fixed 12px VS box
+        // and must deal the same four damage as its native charged attack.
+        let body = game.player_contact_bounds(1).unwrap();
+        game.coop.p2[OFF_HP] = 4;
+        let w = game.wram_mut();
+        w[at] = 1;
+        w[at + 0x0a] = 3;
+        w[at + 5..at + 7].copy_from_slice(&((body[2] + 17) as u16).to_le_bytes());
+        w[at + 8..at + 10].copy_from_slice(&(((body[1]+body[3])/2) as u16).to_le_bytes());
+        w[at + 0x20..at + 0x22].copy_from_slice(&0x1fc0u16.to_le_bytes());
+        w[0x1fc0..0x1fc4].copy_from_slice(&[0, 0, 18, 17]);
+        tick(&mut game);
+        assert_eq!(game.vs_status().unwrap().winner, Some(0));
+        assert_eq!(game.vs_status().unwrap().scores[0], 2);
+        game.restart_vs_round();
+        let body = game.player_contact_bounds(0).unwrap();
+        game.coop.p2_shots |= 1;
+        let w = game.wram_mut();
+        w[ix(ram::X_HP)] = 4;
+        w[at] = 1;
+        w[at + 5..at + 7].copy_from_slice(&(((body[0]+body[2])/2) as u16).to_le_bytes());
+        w[at + 8..at + 10].copy_from_slice(&(((body[1]+body[3])/2) as u16).to_le_bytes());
+        tick(&mut game);
+        assert_eq!(game.vs_status().unwrap().winner, Some(1));
+        assert_eq!(game.wram()[ix(ram::X_HP)] & 0x7f, 1);
+        assert!(!game.vs_player_active(0), "native HP1 must not make a KO'd P1 a bot target");
+        assert!(game.vs_player_active(1));
     }
 }

@@ -19,6 +19,7 @@ mod movie_route_validation;
 mod netplay;
 mod video;
 mod vs_select;
+mod vs_bots;
 
 use mmx_core::Game;
 
@@ -146,6 +147,21 @@ fn main() {
     if args.movie.is_some() { game.set_allow_opposing_directions(true); }
     game.set_wide_gameplay(args.wide_gameplay);
     game.set_overclock(args.overclock());
+    if args.vs_bots {
+        let arena = mmx_core::vs_stages::arena(args.vs_stage.as_deref().unwrap_or("highway"))
+            .expect("CLI validated the arena");
+        let ready = game.enable_vs(usize::from(args.players))
+            .and_then(|_| {
+                game.set_vs_arena(*arena);
+                mmx_core::vs_stages::start_stage(&mut game, arena)
+            });
+        if let Err(error) = ready {
+            eprintln!("VS bots: {error}");
+            std::process::exit(2);
+        }
+        game.take_audio(); // Discard silent boot before live arena audio.
+        eprintln!("VS bots: {} players, {}", args.players, arena.name);
+    }
     if args.headless {
         match headless::run(&mut game, &args) {
             Ok(sha) => println!("frames {} wram_sha256 {sha}", game.frame_count()),

@@ -40,6 +40,8 @@ struct App {
     coop: bool,
     players: usize,
     demo_bots: Option<DemoBots>,
+    vs_bots: Option<crate::vs_bots::VsBots>,
+    vs_bot_round_hold: u16,
     demo_survival: bool,
     movie: Option<crate::movie::Playback>,
     movie_route: Option<crate::movie_route::RoutePlayback>,
@@ -110,7 +112,7 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
             eprintln!("gamepad connected (gilrs): {}", gp.name());
         }
     }
-    let vs_select = args.vs_mode.then(|| {
+    let vs_select = (args.vs_mode && !args.vs_bots).then(|| {
         let mut select = VsSelect::new(
             usize::from(args.players),
             args.characters,
@@ -129,6 +131,8 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         coop: args.vs_mode || args.players > 1 || args.coop_local,
         players: usize::from(args.players.max(if args.coop_local { 2 } else { 1 })),
         demo_bots: args.demo_bots.then(DemoBots::default),
+        vs_bots: args.vs_bots.then(crate::vs_bots::VsBots::default),
+        vs_bot_round_hold: 0,
         demo_survival: args.demo_survival,
         movie: if args.movie_route { None } else { crate::movie::Playback::load(args)? },
         movie_route: if args.movie_route { Some(crate::movie_route::RoutePlayback::load(args)?) } else { None },
@@ -358,7 +362,9 @@ impl App {
         if let Some(bots) = self.demo_bots.as_ref() {
             bots.maintain_party(&mut self.game);
         }
-        let inputs = if let Some(route) = self.movie_route.as_mut() {
+        let inputs = if let Some(bots) = self.vs_bots.as_mut() {
+            bots.pads(&self.game)
+        } else if let Some(route) = self.movie_route.as_mut() {
             route.next(&self.game)
         } else if let Some(movie) = self.movie.as_mut() {
             movie.next(&self.game)
@@ -372,6 +378,23 @@ impl App {
             ],
         }};
         if self.game.vs_status().is_some_and(|status| status.round_over) {
+            if self.vs_bots.is_some() {
+                self.vs_bot_round_hold += 1;
+                // Game::step freezes the completed round, so supply one frame
+                // of silence to keep audio-led pacing at the normal rate.
+                if !self.fast {
+                    if let Some(audio) = &self.audio {
+                        let frames = (f64::from(audio.rate) / self.game.fps()).ceil() as usize;
+                        audio.push(&vec![(0.0, 0.0); frames]);
+                    }
+                }
+                if self.vs_bot_round_hold >= 90 {
+                    self.game.restart_vs_round();
+                    self.vs_bot_round_hold = 0;
+                }
+                self.fps_frames += 1;
+                return;
+            }
             let start_pressed = (0..self.players).any(|i|
                 inputs[i] & mmx_core::BTN_START != 0
                     && self.vs_prev_inputs[i] & mmx_core::BTN_START == 0);
@@ -380,6 +403,7 @@ impl App {
             self.fps_frames += 1;
             return;
         }
+        self.vs_bot_round_hold = 0;
         self.vs_prev_inputs = inputs;
         if self.showcase_characters {
             if let Some((group, characters)) = self.demo_bots.as_ref().and_then(DemoBots::showcase_selection) {

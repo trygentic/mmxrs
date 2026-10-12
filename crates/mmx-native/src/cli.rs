@@ -5,7 +5,7 @@ use mmx_core::{netgame::Mode, Character};
 pub const DEFAULT_MOVIE_COOP_DELAY: u16 = 20;
 
 pub const USAGE: &str = "\
-usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local|--players 1..4] [--vs] [--vs-stage ID] [--pads]
+usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local|--players 1..4] [--vs] [--vs-bots] [--vs-stage ID] [--pads]
              [--p1-character ID] [--p2-character ID] [--p3-character ID] [--p4-character ID]
              [--dynamic-lighting] [--charge-effects] [--bone-sheets DIR] [--vile-sprite PNG]
              [--demo-bots] [--showcase-characters] [--demo-survival]
@@ -32,6 +32,8 @@ the original slowdown. --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and e
 --movie-smart follows the Highway route with default P2/P3/P4 offsets of 20/40/60 source frames; --movie-coop-delay overrides the base.
 It resynchronizes after hits (--movie-route is an alias); safety maneuvers can temporarily bring players together.
 --showcase-characters cycles all playable characters during that four-player demo (requires --bone-sheets).
+--vs-bots starts the selected local VS arena and roster directly, drives native fighter inputs,
+and restarts each round after a 90-frame winner display. Also supports --headless --frames N.
 --bone-sheets loads private Blender or bone animation sprites; high-resolution packs preserve game size.
 Vile uses the private on-foot PNG at roms/derived/bone_sheets/user_sources/vile_idle.png
 when no animated Vile sheet is loaded; --vile-sprite overrides its location.
@@ -54,6 +56,8 @@ pub struct Args {
     pub coop_local: bool,
     /// Local arena match with character and stage selection (2-4 players).
     pub vs_mode: bool,
+    /// Input-driven local fighters; bypass selection and restart rounds.
+    pub vs_bots: bool,
     /// Initial arena choice, selected from `vs_stages::ARENAS`.
     pub vs_stage: Option<String>,
     /// Total local players (1-4); online sessions still use two peers.
@@ -166,6 +170,7 @@ impl Default for Args {
             fullscreen: false,
             coop_local: false,
             vs_mode: false,
+            vs_bots: false,
             vs_stage: None,
             players: 1,
             characters: [Character::X, Character::Zero, Character::X, Character::X],
@@ -234,6 +239,7 @@ pub fn parse<I: IntoIterator<Item = String>>(
             "--zero" => a.zero = true,
             "--coop-local" => { a.coop_local = true; a.players = a.players.max(2); }
             "--vs" => a.vs_mode = true,
+            "--vs-bots" => a.vs_bots = true,
             "--vs-stage" => a.vs_stage = Some(val("--vs-stage")?),
             "--players" => {
                 let v = val("--players")?;
@@ -352,9 +358,12 @@ pub fn parse<I: IntoIterator<Item = String>>(
         a.players = 4;
         a.coop_local = true;
     }
+    if a.vs_bots && !a.vs_mode {
+        return Err("--vs-bots requires --vs".into());
+    }
     if a.vs_mode {
-        if a.net.is_some() || a.demo_bots || a.headless {
-            return Err("--vs requires an interactive local game".into());
+        if a.net.is_some() || a.demo_bots || (a.headless && !a.vs_bots) {
+            return Err("--vs requires local play; headless VS requires --vs-bots".into());
         }
         if a.players < 2 {
             return Err("--vs needs --players 2..4 (or --coop-local)".into());
@@ -442,6 +451,26 @@ mod tests {
         assert_eq!(a.players, 4);
         assert!(p("--vs").is_err());
         assert!(p("--vs --players 2 --bone-sheets sheets --coop-host room").is_err());
+    }
+
+    #[test]
+    fn vs_bots_preserve_player_count_and_allow_headless_rounds() {
+        for players in [2, 4] {
+            let a = p(&format!("--vs --vs-bots --players {players} --bone-sheets sheets --vs-stage penguin --headless --frames 600")).unwrap();
+            assert!(a.vs_mode && a.vs_bots && a.coop_local && a.headless);
+            assert_eq!(a.players, players);
+            assert!(!a.demo_bots && !a.demo_survival);
+            assert_eq!(a.vs_stage.as_deref(), Some("penguin"));
+        }
+        for invalid in [
+            "--vs-bots --players 2 --bone-sheets sheets",
+            "--vs --vs-bots --players 1 --bone-sheets sheets",
+            "--vs --vs-bots --players 2 --bone-sheets sheets --demo-bots",
+            "--vs --vs-bots --players 2 --bone-sheets sheets --demo-survival",
+            "--vs --players 2 --bone-sheets sheets --headless --frames 600",
+        ] {
+            assert!(p(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

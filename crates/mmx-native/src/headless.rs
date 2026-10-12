@@ -32,6 +32,8 @@ pub fn run(game: &mut Game, args: &Args) -> Result<String, String> {
     let mut movie = if args.movie_route { None } else { crate::movie::Playback::load(args)? };
     let mut route = if args.movie_route { Some(crate::movie_route::RoutePlayback::load(args)?) } else { None };
     let mut bots = args.demo_bots.then(DemoBots::default);
+    let mut vs_bots = args.vs_bots.then(crate::vs_bots::VsBots::default);
+    let mut vs_round_hold = 0_u16;
     let trace = std::env::var_os("MMX_BOT_TRACE").is_some();
     let state = |game: &Game| {
         use mmx_core::ram::{self, wram_index as ix};
@@ -53,7 +55,9 @@ pub fn run(game: &mut Game, args: &Args) -> Result<String, String> {
         if let Some(bots) = bots.as_ref() {
             bots.maintain_party(game);
         }
-        let inputs = if let Some(route) = route.as_mut() {
+        let inputs = if let Some(bots) = vs_bots.as_mut() {
+            bots.pads(game)
+        } else if let Some(route) = route.as_mut() {
             route.next(game)
         } else if let Some(movie) = movie.as_mut() {
             movie.next(game)
@@ -73,7 +77,16 @@ pub fn run(game: &mut Game, args: &Args) -> Result<String, String> {
         let pads = Pads { p1: inputs[0], p2: inputs[1] };
         game.set_extra_pads([inputs[2], inputs[3]]);
         let before = trace.then(|| state(game));
-        game.step(pads);
+        if vs_bots.is_some() && game.vs_status().is_some_and(|status| status.round_over) {
+            vs_round_hold += 1;
+            if vs_round_hold >= 90 {
+                game.restart_vs_round();
+                vs_round_hold = 0;
+            }
+        } else {
+            vs_round_hold = 0;
+            game.step(pads);
+        }
         if let Some(before) = before {
             let after = state(game);
             if after[2] < before[2]
@@ -92,6 +105,9 @@ pub fn run(game: &mut Game, args: &Args) -> Result<String, String> {
                 ]).collect();
                 crate::effects::apply(&mut rgba, w, h, game, args.dynamic_lighting, args.charge_effects);
                 game.draw_ui_rgba(&mut rgba, w, h);
+                if let Some(status) = game.vs_status().filter(|status| status.round_over) {
+                    crate::vs_select::draw_result_scaled(&mut rgba, w, h, status, game.frame_scale());
+                }
                 let effected: Vec<u32> = rgba.chunks_exact(4).map(|p| {
                     (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2])
                 }).collect();
