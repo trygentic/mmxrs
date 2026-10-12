@@ -32,6 +32,22 @@ pub fn run(game: &mut Game, args: &Args) -> Result<String, String> {
     let mut movie = if args.movie_route { None } else { crate::movie::Playback::load(args)? };
     let mut route = if args.movie_route { Some(crate::movie_route::RoutePlayback::load(args)?) } else { None };
     let mut bots = args.demo_bots.then(DemoBots::default);
+    let trace = std::env::var_os("MMX_BOT_TRACE").is_some();
+    let state = |game: &Game| {
+        use mmx_core::ram::{self, wram_index as ix};
+        let w = game.wram();
+        let word = |at| u16::from_le_bytes([w[ix(at)], w[ix(at) + 1]]);
+        [
+            word(ram::X_POS_X),
+            word(ram::X_POS_Y),
+            u16::from(w[ix(ram::X_HP)] & 0x7f),
+            u16::from(w[ix(ram::X_ACTION)]),
+            word(ram::X_VEL_Y),
+            word(ram::CAMERA_Y),
+            u16::from(w[ix(ram::MODE_D2)]),
+            u16::from(w[ix(ram::STAGE_PHASE)]),
+        ]
+    };
     for f in 1..=args.frames {
         if args.demo_survival { game.maintain_demo_survival(); }
         if let Some(bots) = bots.as_ref() {
@@ -56,7 +72,17 @@ pub fn run(game: &mut Game, args: &Args) -> Result<String, String> {
         }
         let pads = Pads { p1: inputs[0], p2: inputs[1] };
         game.set_extra_pads([inputs[2], inputs[3]]);
+        let before = trace.then(|| state(game));
         game.step(pads);
+        if let Some(before) = before {
+            let after = state(game);
+            if after[2] < before[2]
+                || after[6..] != before[6..]
+                || (after[3] == 0x0c && before[3] != 0x0c)
+            {
+                eprintln!("bot trace frame {f}: [x,y,hp,action,vy,camera_y,mode,phase] {before:?} -> {after:?}; pad {:04x}", inputs[0]);
+            }
+        }
         let _ = game.take_audio(); // drain so it doesn't pile up
         for (_, path) in args.dump_at.iter().filter(|(at, _)| *at == f) {
             let (px, w, h) = game.frame();

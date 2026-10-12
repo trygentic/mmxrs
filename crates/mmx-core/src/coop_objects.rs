@@ -79,16 +79,62 @@ pub fn effects_live(w: &[u8; 0x20000]) -> u32 {
 }
 
 pub fn register(game: &mut Game) {
-    game.traps.register(game.hook(HOOK_EFFECT_SLOT), "coop_effect", TrapReturn::Observe, effect_slot);
+    game.traps.register(game.hook(HOOK_EFFECT_SLOT), "coop_effect", TrapReturn::Observe, local_effect_slot);
     let emitter = emitter(game);
-    game.traps.register(emitter, "coop_effect_oam", TrapReturn::Observe, effect_oam);
-    game.traps.register(game.hook(HOOK_PLATFORM), "coop_platform", TrapReturn::Observe, platform);
-    game.traps.register(game.hook(HOOK_PLATFORM_TOUCH), "coop_platform_touch", TrapReturn::Observe, platform);
-    game.traps.register(game.hook(HOOK_CAR), "coop_car", TrapReturn::Observe, platform);
-    game.traps.register(game.hook(HOOK_COLLAPSE), "coop_collapse", TrapReturn::Observe, collapse);
+    game.traps.register(emitter, "coop_effect_oam", TrapReturn::Observe, local_effect_oam);
+    game.traps.register(game.hook(HOOK_PLATFORM), "coop_platform", TrapReturn::Observe, local_platform);
+    game.traps.register(game.hook(HOOK_PLATFORM_TOUCH), "coop_platform_touch", TrapReturn::Observe, local_platform);
+    game.traps.register(game.hook(HOOK_CAR), "coop_car", TrapReturn::Observe, local_platform);
+    game.traps.register(game.hook(HOOK_COLLAPSE), "coop_collapse", TrapReturn::Observe, local_collapse);
     for a in PICKUPS {
-        game.traps.register(game.hook(a), "coop_pickup", TrapReturn::Observe, pickup);
+        game.traps.register(game.hook(a), "coop_pickup", TrapReturn::Observe, local_pickup);
     }
+}
+
+/// Each shadow actor has its own carry/pickup bookkeeping. Reentrant
+/// isolated passes must not dispatch the other actors a second time. A
+/// pickup or collapse may skip the original ROM call; stop visiting then.
+fn all_followers(game: &mut Game, operation: fn(&mut Game)) {
+    if !crate::coop_stages::p2_should_exist(game.wram()) { return; }
+    if game.coop.in_contact { return; }
+    let pc = game.regs().pbr_pc();
+    operation(game);
+    if game.local_slice || game.regs().pbr_pc() != pc { return; }
+    for i in 0..game.local_players.saturating_sub(2).min(2) {
+        crate::coop::with_extra_player(game, i, operation);
+        if game.regs().pbr_pc() != pc { return; }
+    }
+}
+
+fn local_platform(game: &mut Game) { all_followers(game, platform); }
+fn local_collapse(game: &mut Game) { all_followers(game, collapse); }
+fn local_pickup(game: &mut Game) { all_followers(game, pickup); }
+
+fn own_effect(game: &mut Game, k: u16, operation: fn(&mut Game)) {
+    if !crate::coop_stages::stage_actor_scene(game.wram()) {
+        crate::coop::clear_inactive_scene_ownership(game);
+        return;
+    }
+    if !crate::coop_stages::p2_should_exist(game.wram()) { return; }
+    if game.coop.in_contact || k >= FX_SLOTS { return; }
+    if game.local_slice || game.coop.p2_fx >> k & 1 != 0 { return operation(game); }
+    for i in 0..game.local_players.saturating_sub(2).min(2) {
+        if game.extra_coop[i].p2_fx >> k & 1 != 0 {
+            crate::coop::with_extra_player(game, i, operation);
+            return;
+        }
+    }
+}
+
+fn local_effect_slot(game: &mut Game) {
+    let k = game.regs().d.wrapping_sub(FX_FIRST) / FX_STRIDE;
+    own_effect(game, k, effect_slot);
+}
+
+fn local_effect_oam(game: &mut Game) {
+    let x = game.regs().x;
+    if !x.wrapping_sub(FX_FIRST).is_multiple_of(FX_STRIDE) { return; }
+    own_effect(game, x.wrapping_sub(FX_FIRST) / FX_STRIDE, effect_oam);
 }
 
 /// Object slot bit of `D` (see [`OBJ_FIRST`]).
@@ -99,6 +145,7 @@ fn slot_bit(d: u16) -> Option<u64> {
 
 fn p2_up(game: &Game) -> bool {
     game.coop.enabled && !game.coop.in_contact && !game.coop.p2_hidden && !p2_is_down(&game.coop.p2)
+        && crate::coop_stages::p2_should_exist(game.wram())
 }
 
 /// [`HOOK_PLATFORM`] / [`HOOK_PLATFORM_TOUCH`] / [`HOOK_CAR`]: the same routine for P2. The
@@ -309,8 +356,92 @@ fn near(game: &Game, base: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inactive_scene_does_not_hijack_reused_native_effect_slots() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut game = crate::Game::from_rom(rom).unwrap();
+        game.set_local_players(4);
+        fn forbidden(_: &mut crate::Game) { panic!("menu effect ran in a shadow player context"); }
+        for (mode,phase) in [(0,1),(2,0),(4,8),(4,10)] {
+            game.wram_mut()[super::ix(crate::ram::MODE_D2)] = mode;
+            game.wram_mut()[super::ix(crate::ram::STAGE_PHASE)] = phase;
+            for state in std::iter::once(&mut game.coop).chain(game.extra_coop.iter_mut()) {
+                state.enabled = true;
+                state.p2_hidden = false;
+                state.p2_fx = 1;
+                state.p2_items = 1;
+                state.p2_on_obj = 1;
+                state.p2_oam_count = 4;
+                state.p2[5..7].copy_from_slice(&7551u16.to_le_bytes());
+                state.p2[crate::coop::OFF_HP] = 9;
+            }
+            game.wram_mut()[usize::from(super::FX_FIRST)] = 1;
+            let before = Box::new(*game.wram());
+            let registers = game.regs();
+            super::own_effect(&mut game,0,forbidden);
+            assert_eq!(game.wram(),before.as_ref(),"inactive scene WRAM changed");
+            assert_eq!(game.regs().pbr_pc(),registers.pbr_pc());
+            for state in std::iter::once(&game.coop).chain(game.extra_coop.iter()) {
+                assert!(state.p2_hidden);
+                assert_eq!((state.p2_fx,state.p2_items,state.p2_on_obj,state.p2_oam_count),(0,0,0,0));
+                assert_eq!(state.p2[crate::coop::OFF_HP],9);
+                assert_eq!(&state.p2[5..7],&7551u16.to_le_bytes());
+            }
+        }
+        // Pausing a live stage does not dispose of the actor's ownership.
+        game.wram_mut()[super::ix(crate::ram::MODE_D2)] = 4;
+        game.wram_mut()[super::ix(crate::ram::STAGE_PHASE)] = 4;
+        game.wram_mut()[super::ix(crate::ram::PAUSE)] = 1;
+        game.coop.p2_fx = 1;
+        super::own_effect(&mut game,0,forbidden);
+        assert_eq!(game.coop.p2_fx,1);
+    }
     use super::*;
     use crate::ram::X_POS_X;
+
+    #[test]
+    fn real_rom_car_carries_every_local_follower() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut g = Game::from_rom(rom).unwrap();
+        g.coop.enabled = true; g.set_local_players(4); crate::coop::register_coop_traps(&mut g).unwrap();
+        for i in 0..4 { g.set_player_character(i, crate::Character::X); }
+        for f in 0..2400 {
+            g.step(crate::Pads { p1: if f % 90 == 0 { crate::BTN_START } else { 0 }, p2: 0 });
+            if g.visible_extra_player_object(1).is_some() && g.coop.p2[2] == 0 { break; }
+        }
+        // A moving-car contact fixture uses the real resolved native car
+        // routine and real standing player blocks. No production movement is
+        // synthesized: the ROM must carry each actor by the car's own delta.
+        let d = 0x1468u16;
+        let at = usize::from(d);
+        let actor_box = u16::from_le_bytes([g.coop.p2[0x20], g.coop.p2[0x21]]);
+        g.wram_mut()[at..at + 0x40].fill(0);
+        g.wram_mut()[at] = 1;
+        g.wram_mut()[at + 0x20..at + 0x22].copy_from_slice(&actor_box.to_le_bytes());
+        g.wram_mut()[at + 5..at + 7].copy_from_slice(&1005u16.to_le_bytes());
+        g.wram_mut()[at + 8..at + 10].copy_from_slice(&352u16.to_le_bytes());
+        g.wram_mut()[at + 0x22..at + 0x24].copy_from_slice(&1000u16.to_le_bytes());
+        g.wram_mut()[at + 0x24..at + 0x26].copy_from_slice(&350u16.to_le_bytes());
+        let bit = slot_bit(d).unwrap();
+        for c in std::iter::once(&mut g.coop).chain(g.extra_coop.iter_mut()) {
+            c.p2[5..7].copy_from_slice(&1000u16.to_le_bytes());
+            c.p2[8..10].copy_from_slice(&330u16.to_le_bytes());
+            c.p2[crate::coop::OFF_GROUND] &= !4;
+            c.p2[crate::coop::OFF_GROUND + 1] &= !4;
+            c.p2_on_obj = bit;
+        }
+        let mut regs = g.regs(); regs.d = d; g.set_regs(regs);
+        g.call_isolated_ret(g.hook(HOOK_CAR), TrapReturn::Rts);
+        let native_y = u16::from_le_bytes([g.coop.p2[8], g.coop.p2[9]]);
+        assert_ne!(native_y, 330, "native car did not carry/snap its P2 passenger");
+        for (i, c) in std::iter::once(&g.coop).chain(g.extra_coop.iter()).enumerate() {
+            let x = u16::from_le_bytes([c.p2[5], c.p2[6]]);
+            let y = u16::from_le_bytes([c.p2[8], c.p2[9]]);
+            eprintln!("native car carried P{} to ({x},{y})", i + 2);
+            assert_eq!(x, 1005, "P{} did not inherit native car horizontal motion", i + 2);
+            assert_eq!(y, native_y, "P{} did not inherit the same native car carry/surface snap", i + 2);
+        }
+    }
 
     /// `r2-1` (PAL): X walks right to 3912, just short of the collapsing road
     /// chunk at 3984 (`$1428` type 9); then co-op starts, P1 stands, P2 walks

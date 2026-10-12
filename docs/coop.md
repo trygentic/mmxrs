@@ -421,13 +421,16 @@ e.g. `$81:B091`, `$82:A611`); these still hit only P1.
   death action, so the stage-wide death flow (`$D3=6`, lives) can't start.
   P2 hides for `P2_DOWN_FRAMES` (was 120, now 600 or a revive, see "P2 HP
   bar and revive") and re-anchors next to P1 (now at half HP).
-- **Pits** are not decided by the player code: the camera code (`$80:E14A`,
-  listing PC, run on P1 only) kills X when `Y - $20 >= camera Y + $E0` (by
+- **Pits** are not decided by the player code: the camera code (Rev 1
+  `$80:E11E`, run on P1 only) first clamps a camera that exceeds its bottom
+  limit (`$1E5C`), then kills X when `Y - $20 >= bottom + $E0` (by
   `$84:9F2A` with `$0BCE=$7F`). P2 never ran that, and fell to the floor
   below the screen (Y 895) and stood there (B1).
 - **Left behind vertically** (B2): nothing drags P2 along a vertical scroll;
   after the Bee Blader 1 climb P2 stayed at Y 575 with the camera at 256.
-- `coop_stages::p2_lost(y, cam_y)` is the ROM's pit rule above; with P2
+- `coop_stages::p2_lost(y, camera_bottom)` uses that native bottom limit,
+  rather than the rendered camera Y, which can lag a legitimate descent
+  after a road collapse. With P2
   airborne it marks P2 down (action `$0C`, HP `$80`): hidden for
   `P2_DOWN_FRAMES`, then re-anchored next to P1, no life lost; no ROM death
   code runs for P2. Left behind (B2, or above the window) is not a death any

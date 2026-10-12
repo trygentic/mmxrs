@@ -17,6 +17,12 @@ pub const MODE_IN_STAGE: u8 = 4;
 /// `$D3=6` the frame it dies in a pit, holds it ~200 frames, then `$D3=0`).
 pub const PHASE_GAMEPLAY: u8 = 4;
 
+/// Stage actor scenes include beam-in and death, but exclude post-clear
+/// presentations and menus which reuse the same OAM and effect slots.
+pub(crate) fn stage_actor_scene(w: &Wram) -> bool {
+    b(w, ram::MODE_D2) == MODE_IN_STAGE && b(w, ram::STAGE_PHASE) <= 6
+}
+
 /// X actions (`$0BAA`) seen on the real ROM.
 pub mod act {
     /// Standing (also "pushing a wall" while right is held).
@@ -113,13 +119,15 @@ pub fn in_view_y(y: u16, cam_y: u16) -> bool {
     y >= cam_y && y < cam_y.saturating_add(224)
 }
 
-/// P2 fell into a pit: the ROM's own pit rule for X (camera code
-/// `$80:E14A`): `Y - $20 >= cam Y + $E0`, signed like its `CMP`/`BMI`; X
-/// moves several px a frame, so P1 is seen dying at `y - cam_y = 257`.
+/// P2 fell below the native level's camera floor limit. Rev 1 `$80:E11E`
+/// skips its pit test until the proposed camera Y exceeds `camera + $14`,
+/// clamps to that limit, then compares `Y - $20 >= bottom + $E0` signed.
+/// Using the currently rendered camera Y instead kills actors while the
+/// camera can still descend after a road collapse.
 /// The caller only counts it while P2 is airborne: a grounded P2 down there
 /// was left behind by a scroll (M5, Y 575 with the camera at 256), not dead.
-pub fn p2_lost(p2_y: u16, cam_y: u16) -> bool {
-    (p2_y.wrapping_sub(0x20).wrapping_sub(cam_y.wrapping_add(0xE0)) as i16) >= 0
+pub fn p2_lost(p2_y: u16, camera_bottom: u16) -> bool {
+    (p2_y.wrapping_sub(0x20).wrapping_sub(camera_bottom.wrapping_add(0xE0)) as i16) >= 0
 }
 
 /// The level's side walls: the camera's follow mode (`$80:E0DE` Rev 1,
@@ -137,14 +145,30 @@ pub fn p2_level_clamp(x: u16, left: u16, right: u16) -> u16 {
 
 /// P2's anchor is inside the 256x224 window.
 pub fn p2_on_screen(x: u16, y: u16, cam_x: u16, cam_y: u16) -> bool {
-    x.wrapping_sub(cam_x) < 256 && in_view_y(y, cam_y)
+    p2_on_screen_wide(x,y,cam_x,cam_y,0)
+}
+
+/// Horizontal visibility includes the PPU's actual widescreen margins;
+/// vertical visibility stays within the native 224-line window.
+pub fn p2_on_screen_wide(x: u16, y: u16, cam_x: u16, cam_y: u16, margin: u16) -> bool {
+    let dx = i32::from(x.wrapping_sub(cam_x) as i16);
+    let margin = i32::from(margin);
+    (-margin..256 + margin).contains(&dx) && in_view_y(y, cam_y)
 }
 
 /// P2 is a whole screen or more outside the window: warp it now.
 pub fn p2_far(x: u16, y: u16, cam_x: u16, cam_y: u16) -> bool {
-    let dx = x.wrapping_sub(cam_x) as i16;
+    p2_far_wide(x,y,cam_x,cam_y,0)
+}
+
+/// A whole rendered screen beyond the horizontal viewport triggers rescue;
+/// the native vertical rescue distances are unchanged.
+pub fn p2_far_wide(x: u16, y: u16, cam_x: u16, cam_y: u16, margin: u16) -> bool {
+    let dx = i32::from(x.wrapping_sub(cam_x) as i16);
     let dy = y.wrapping_sub(cam_y) as i16;
-    !(-256..512).contains(&dx) || !(-224..448).contains(&dy)
+    let margin = i32::from(margin);
+    let width = 256 + 2 * margin;
+    !(-margin - width..256 + margin + width).contains(&dx) || !(-224..448).contains(&dy)
 }
 
 #[cfg(test)]
@@ -257,7 +281,9 @@ mod tests {
         assert!(p2_lost(513, 256)); // where P1's pit death was seen
         assert!(p2_lost(512, 256) && !p2_lost(511, 256)); // the ROM's threshold
         assert!(!p2_lost(0x10, 0)); // signed: near the top of the level
-        assert!(p2_lost(575, 256) && !p2_lost(575, 479)); // M5: stranded below after the climb
+        assert!(!p2_lost(553, 480)); // lower road, camera still at 256 during descent
+        assert!(!p2_lost(575, 479)); // off screen below a climbing leader, not a native pit
+        assert!(p2_lost(736, 480) && !p2_lost(735, 480));
         assert!(in_view_y(256, 256) && !in_view_y(480, 256));
     }
 
@@ -270,5 +296,12 @@ mod tests {
         assert!(p2_far(1000, 367, 1300, 256) && p2_far(1812, 367, 1300, 256) && !p2_far(1811, 367, 1300, 256));
         assert!(p2_far(100, 704, 0, 256) && !p2_far(100, 703, 0, 256) && p2_far(100, 31, 0, 256));
         assert!(!p2_far(10, 367, 0xFFF0, 256)); // wraps like the ROM's words
+        assert!(p2_on_screen_wide(4696,359,4704,256,72));
+        assert!(!p2_on_screen_wide(4631,359,4704,256,72));
+        assert!(p2_on_screen_wide(5031,359,4704,256,72));
+        assert!(!p2_on_screen_wide(5032,359,4704,256,72));
+        assert!(!p2_far_wide(4232,359,4704,256,72));
+        assert!(p2_far_wide(4231,359,4704,256,72));
+        assert!(p2_far_wide(4696,704,4704,256,72)); // vertical rules unchanged
     }
 }

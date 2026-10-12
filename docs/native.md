@@ -210,11 +210,16 @@ extra CPU load can make a single-player movie diverge.
 
 `--movie-smart` (`--movie-route` is an alias) enables the Highway replay harness. It
 precomputes the movie's first-stage solo route, then steers the live players
-toward delayed waypoints and retries jumps when they get stuck. Knockback
+toward delayed waypoints and retries jumps when they get stuck. It checks live
+terrain and landing feedback for gaps and collapsed roads, holds full jumps
+independently of waypoint correction, and reserves native health pickups for
+injured companions. Knockback
 freezes the affected player's route cursor; after recovery, the harness
 reacquires a nearby normal waypoint and resets jump and attack timing. Bots
 also aim at live enemies rather than assuming the movie has killed them. It uses
-ordinary controller inputs, so collisions and damage remain live. It stops
+ordinary controller inputs, so collisions and damage remain live. At the
+intro ending, companions stage on the right while the final drivers are
+fought; X then receives the native Vile capture sequence. It stops
 at the end of the first stage; later stages are not supported by this mode.
 The default spacing is 8, 16 and 24 source frames. During movie co-op, Zero
 and Sigma replace buster fire with saber swings. Vile fires one maximum-charge X
@@ -230,7 +235,7 @@ Example with [Hetfield90's tool-assisted input movie](https://tasvideos.org/3197
 ```sh
 cargo run -p mmx-native --release -- \
   --rom "roms/Mega Man X (USA) (Rev 1).sfc" \
-  --movie movies/hetfield90v3-megamanx-100p.bk2 --movie-smart --demo-survival \
+  --movie movies/hetfield90v3-megamanx-100p.bk2 --movie-smart --movie-coop-delay 8 \
   --p1-character x --p2-character zero --p3-character sigma --p4-character vile \
   --bone-sheets roms/derived/bone_sheets --widescreen 16:9 \
   --dynamic-lighting --charge-effects

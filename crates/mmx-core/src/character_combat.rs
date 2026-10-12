@@ -233,6 +233,75 @@ mod tests {
         crate::coop::local_shot_slot_done(game);
     }
     #[test]
+    fn real_rom_character_attacks_damage_enemy_hp() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut g=Game::from_rom(rom).unwrap();
+        g.coop.enabled=true;g.set_local_players(4);crate::coop::register_coop_traps(&mut g).unwrap();
+        for (i,c) in [Character::X,Character::Zero,Character::Sigma,Character::Vile].into_iter().enumerate(){g.set_player_character(i,c);}
+        for f in 0..2400 {g.step(crate::Pads{p1:if f%90==0{crate::BTN_START}else{0},p2:0});if g.visible_extra_player_object(1).is_some()&&g.coop.p2[2]==0{break;}}
+        let enemy=0x0e68;
+        let mut spawned=false;
+        for _ in 0..300 {
+            g.step(crate::Pads{p1:crate::BTN_RIGHT,p2:0});
+            if g.wram()[enemy]!=0 && g.wram()[enemy+0x27]&0x7f==2 {spawned=true;break;}
+        }
+        assert!(spawned,"real Highway Spiky did not spawn");
+        let start=g.save_state();
+        for player in [1,2,3] {
+            g.load_state(&start).unwrap();
+            let ex=i16::from_le_bytes([g.wram()[enemy+5],g.wram()[enemy+6]]);
+            let ey=i16::from_le_bytes([g.wram()[enemy+8],g.wram()[enemy+9]]);
+            // Collision fixture placement only: attacks and enemy HP changes
+            // below use the unmodified ROM update/collision/damage routines.
+            let block=if player==1 {&mut g.coop.p2}else{&mut g.extra_coop[player-2].p2};
+            block[5..7].copy_from_slice(&ex.wrapping_sub(45).to_le_bytes());
+            block[8..10].copy_from_slice(&ey.to_le_bytes());
+            block[2]=0;block[0x11]|=0x40;block[0x1a..0x1e].fill(0);block[crate::coop::OFF_HP]=16;
+            let before=g.wram()[enemy+0x27]&0x7f;
+            let mut reduced=false;
+            for f in 0..45 {
+                let attack=if f==0 {if player==3{crate::BTN_Y}else{crate::BTN_X}}else{0};
+                g.set_extra_pads([if player==2{attack}else{0},if player==3{attack}else{0}]);
+                g.step(crate::Pads{p1:0,p2:if player==1{attack}else{0}});
+                if g.wram()[enemy]==0 || g.wram()[enemy+0x27]&0x7f<before {reduced=true;break;}
+            }
+            eprintln!("real enemy damage by {:?}: hp{}->{} active{}",g.player_characters[player],before,g.wram()[enemy+0x27]&0x7f,g.wram()[enemy]);
+            assert!(reduced,"{:?} did not damage real enemy HP",g.player_characters[player]);
+        }
+    }
+
+    #[test]
+    fn air_saber_keeps_full_native_jump_height() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut g=Game::from_rom(rom).unwrap();
+        g.coop.enabled=true; g.set_local_players(2);
+        crate::coop::register_coop_traps(&mut g).unwrap();
+        g.set_player_character(1,Character::X);
+        for f in 0..2400 { g.step(crate::Pads {p1:if f%90==0 {crate::BTN_START}else{0},p2:0});
+            if g.visible_p2_object().is_some() && g.coop.p2[2]==0 {break;} }
+        let ground=g.save_state();
+        let mut heights=Vec::new();
+        for active in [false,true] {
+            g.load_state(&ground).unwrap();
+            g.set_player_character(1,if active {Character::Zero}else{Character::X});
+            let start=i16::from_le_bytes([g.coop.p2[8],g.coop.p2[9]]);
+            let mut apex=start;
+            for f in 0..45 {
+                if active && f==1 {
+                    assert_eq!(g.coop.p2[2],0x06,"natural takeoff failed");
+                    g.coop.saber=crate::saber::Saber{t:1,air:true,..Default::default()};
+                }
+                g.step(crate::Pads{p1:0,p2:crate::BTN_B|crate::BTN_RIGHT});
+                apex=apex.min(i16::from_le_bytes([g.coop.p2[8],g.coop.p2[9]]));
+            }
+            heights.push(start-apex);
+        }
+        eprintln!("natural held jump heights: plain={} active-air-saber={}",heights[0],heights[1]);
+        assert!(heights[0] >= 50 && heights[1] >= 50);
+        assert!((heights[0] - heights[1]).abs() <= 2, "air melee truncated the natural jump arc");
+    }
+
+    #[test]
     fn demo_survival_uses_ordinary_revive_without_healing_dead_or_scripted_players() {
         let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
         let mut g = Game::from_rom(rom).unwrap();

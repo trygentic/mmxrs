@@ -140,6 +140,8 @@ pub const OFF_PREV_X: usize = 0x22;
 const CAM_MODE: u32 = 0x7E1E49;
 const CAM_LEFT: u32 = 0x7E1E56;
 const CAM_RIGHT: u32 = 0x7E1E58;
+/// Native camera floor limit (`camera + $14`), used by the ROM's pit test.
+const CAM_BOTTOM: u32 = 0x7E1E5C;
 /// `$1F19`: the object master skips the previous-position save while set.
 const FREEZE_PREV_POS: u32 = 0x7E1F19;
 pub const OFF_VEL_X: usize = 0x1A; // $0BC2 word
@@ -371,7 +373,7 @@ fn go_down(game: &mut Game) {
 /// Run the established second-player ROM slice with a separate shadow block
 /// and controller for local player 3 or 4. The live P2 state is restored even
 /// though the isolated ROM calls may enter other co-op traps.
-fn with_extra_player(game: &mut Game, index: usize, f: impl FnOnce(&mut Game)) {
+pub(crate) fn with_extra_player(game: &mut Game, index: usize, f: impl FnOnce(&mut Game)) {
     let pad_at = ix(PAD2_HELD);
     let saved_pad = [game.wram()[pad_at], game.wram()[pad_at + 1]];
     let extra_pad = game.extra_pads[index].to_le_bytes();
@@ -413,6 +415,7 @@ fn local_oam_hide(game: &mut Game) {
 }
 
 fn local_contact(game: &mut Game) {
+    if game.coop.in_contact { return; }
     contact(game);
     if game.local_slice { return; }
     for index in 0..game.local_players.saturating_sub(2).min(2) {
@@ -486,6 +489,7 @@ fn p2_update(game: &mut Game) {
     if crate::saber::uses_saber(game.player_characters[game.local_player_index]) {
         // X swings the saber; during a swing the ROM gets a masked pad.
         let duration = crate::saber::duration(game, game.local_player_index);
+        crate::saber::face_attack_start(&game.coop.saber, &mut game.coop.p2, pad);
         pad = crate::saber::update_timed(&mut game.coop.saber, &game.coop.p2, pad, duration);
         if crate::saber::whoosh(&game.coop.saber) {
             game.coop.sfx[crate::sfx::P2] = 1;
@@ -689,14 +693,19 @@ fn p2_physics(game: &mut Game) {
 /// P2 keeps its own physics while off screen (collision is not camera-
 /// streamed: idle P2 800+ px behind stands where it stood, hw-a/hw-e/r3-10).
 fn follow(game: &mut Game) {
+    // Three/four-player play is local. Online two-player peers keep their
+    // own display margins, so their shared simulation must retain the same
+    // native rescue window regardless of either peer's presentation.
+    let margin = if game.local_players > 2 { game.wide_margin() } else { 0 };
     let w = game.wram();
     let (cx, cy) = (word(w, ram::CAMERA_X), word(w, ram::CAMERA_Y));
+    let camera_bottom = word(w, CAM_BOTTOM);
     // The level's side walls are the camera's (follow mode 2 only).
     let walls = (w[ix(CAM_MODE)] == 2).then(|| (word(w, CAM_LEFT), word(w, CAM_RIGHT)));
     let p2 = &mut game.coop.p2;
     let (x, y) = (u16::from_le_bytes([p2[OFF_POS_X], p2[OFF_POS_X + 1]]), u16::from_le_bytes([p2[OFF_POS_Y], p2[OFF_POS_Y + 1]]));
     let grounded = (p2[OFF_GROUND] | p2[OFF_GROUND + 1]) & 4 != 0;
-    if coop_stages::p2_lost(y, cy) && !grounded {
+    if coop_stages::p2_lost(y, camera_bottom) && !grounded {
         // The ROM's pit death lives in the camera code (`$80:E14A`, P1 only).
         // For P2 it's just "P2 down": no life cost, no stage-wide death flow.
         p2[OFF_ACTION] = ACTION_DEATH;
@@ -706,8 +715,8 @@ fn follow(game: &mut Game) {
     let x = walls.map_or(x, |(left, right)| coop_stages::p2_level_clamp(x, left, right));
     p2[OFF_POS_X..OFF_POS_X + 2].copy_from_slice(&x.to_le_bytes());
     let c = &mut game.coop;
-    c.p2_away = if coop_stages::p2_on_screen(x, y, cx, cy) { 0 } else { c.p2_away.saturating_add(1) };
-    if c.p2_away > P2_AWAY_FRAMES || coop_stages::p2_far(x, y, cx, cy) {
+    c.p2_away = if coop_stages::p2_on_screen_wide(x, y, cx, cy, margin) { 0 } else { c.p2_away.saturating_add(1) };
+    if c.p2_away > P2_AWAY_FRAMES || coop_stages::p2_far_wide(x, y, cx, cy, margin) {
         c.p2_warp = true;
     }
 }
@@ -763,6 +772,10 @@ pub(crate) fn with_p2_swapped(game: &mut Game, f: impl FnOnce(&mut Game)) {
 /// hid would leave its old sprite behind. The game overwrites whatever of
 /// these slots it uses this frame.
 fn oam_hide(game: &mut Game) {
+    if !coop_stages::stage_actor_scene(game.wram()) {
+        clear_inactive_scene_ownership(game);
+        return;
+    }
     if !game.coop.enabled {
         return;
     }
@@ -784,6 +797,11 @@ pub(crate) fn register_display_trap(game: &mut Game) {
 }
 
 fn display_slice(game: &mut Game) {
+    if !coop_stages::stage_actor_scene(game.wram()) {
+        clear_inactive_scene_ownership(game);
+        game.bone_draws = [None;4];
+        return;
+    }
     p2_display(game);
     if !game.local_slice {
         for index in 0..game.local_players.saturating_sub(2).min(2) {
@@ -802,7 +820,7 @@ fn display_slice(game: &mut Game) {
 /// it. ponytail: P2 now sorts behind every game sprite (it used to sit
 /// between P1 and OAM lists 3-5).
 fn p2_display(game: &mut Game) {
-    if !game.coop.enabled || game.coop.p2_hidden {
+    if !game.coop.enabled || game.coop.p2_hidden || !coop_stages::p2_should_exist(game.wram()) {
         return;
     }
     let saved = game.regs();
@@ -940,6 +958,20 @@ fn p2_display(game: &mut Game) {
     crate::p2tiles::mark_p2_slots(game);
 }
 
+/// Native menu objects reuse gameplay effect/OAM slots. Their old shadow
+/// ownership must not cause them to run in a follower's player context.
+pub(crate) fn clear_inactive_scene_ownership(game: &mut Game) {
+    for state in std::iter::once(&mut game.coop).chain(game.extra_coop.iter_mut()) {
+        state.p2_hidden = true;
+        state.p2_fx = 0;
+        state.p2_items = 0;
+        state.p2_on_obj = 0;
+        state.p2_oam_count = 0;
+    }
+    game.local_oam_end = 0;
+    game.oam_slots = [0;2];
+}
+
 /// Sprites the emitter `$80:D67C` would write for object `obj` (upper bound:
 /// it skips off-screen pieces): 0 unless `+$0E` (visible), else the first
 /// byte of its frame layout (see [`LAYOUT_SETS`]); a count of 0 is 256 to
@@ -962,6 +994,7 @@ pub(crate) fn layout_len(game: &Game, obj: &[u8]) -> usize {
 /// the enemy's AI only sees P1's pass, which the ROM runs right after.
 /// ponytail: an enemy that dies on contact dies only when it touches P1.
 fn contact(game: &mut Game) {
+    if !coop_stages::p2_should_exist(game.wram()) { return; }
     let p2 = &game.coop.p2;
     // `$0C30`/`$0C32` set = P2 is hurt; the ROM would then test the ride
     // armour `$0E18` instead, which is shared, so skip.
@@ -998,6 +1031,115 @@ mod tests {
     fn coop_default_off() {
         let s = CoopState::default();
         assert!(!s.enabled && s.p2_hidden && s.zero_palette == ZERO_PALETTE);
+    }
+
+    #[test]
+    fn follower_pit_uses_native_camera_bottom_during_lower_road_descent() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut game = Game::from_rom(rom).unwrap();
+        game.wram_mut()[ix(ram::CAMERA_Y)..ix(ram::CAMERA_Y) + 2].copy_from_slice(&256u16.to_le_bytes());
+        game.wram_mut()[ix(CAM_BOTTOM)..ix(CAM_BOTTOM) + 2].copy_from_slice(&480u16.to_le_bytes());
+        game.coop.p2[OFF_HP] = 16;
+        game.coop.p2[OFF_ACTION] = 0x08;
+        game.coop.p2[OFF_POS_Y..OFF_POS_Y + 2].copy_from_slice(&553u16.to_le_bytes());
+        follow(&mut game);
+        assert_eq!(game.coop.p2[OFF_HP], 16, "legitimate lower-road descent became a pit death");
+        assert_eq!(game.coop.p2[OFF_ACTION], 0x08);
+        assert_eq!(u16::from_le_bytes([game.coop.p2[OFF_POS_Y],game.coop.p2[OFF_POS_Y + 1]]),553);
+
+        // The original late Highway pit has a bottom limit of 256. Its
+        // ordinary airborne threshold still kills, with no survival assist.
+        game.wram_mut()[ix(CAM_BOTTOM)..ix(CAM_BOTTOM) + 2].copy_from_slice(&256u16.to_le_bytes());
+        game.coop.p2[OFF_POS_Y..OFF_POS_Y + 2].copy_from_slice(&513u16.to_le_bytes());
+        follow(&mut game);
+        assert_eq!(game.coop.p2[OFF_HP], 0x80);
+        assert_eq!(game.coop.p2[OFF_ACTION], ACTION_DEATH);
+    }
+
+    #[test]
+    fn widescreen_visible_followers_do_not_rescue_but_real_separation_does() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut game = Game::from_rom(rom).unwrap();
+        game.set_local_players(4);
+        game.set_widescreen(crate::Widescreen::W16_9);
+        assert_eq!(game.wide_margin(),72);
+        for (address,value) in [(ram::CAMERA_X,4704u16),(ram::CAMERA_Y,256),(CAM_BOTTOM,512)] {
+            game.wram_mut()[ix(address)..ix(address)+2].copy_from_slice(&value.to_le_bytes());
+        }
+        for state in std::iter::once(&mut game.coop).chain(game.extra_coop.iter_mut()) {
+            state.enabled = true;
+            state.p2_hidden = false;
+            state.p2[OFF_HP] = 1;
+            state.p2[OFF_ACTION] = 8;
+            state.p2[OFF_POS_X..OFF_POS_X+2].copy_from_slice(&4696u16.to_le_bytes());
+            state.p2[OFF_POS_Y..OFF_POS_Y+2].copy_from_slice(&359u16.to_le_bytes());
+        }
+        for _ in 0..P2_AWAY_FRAMES+2 {
+            follow(&mut game);
+            for player in 0..2 { with_extra_player(&mut game,player,follow); }
+        }
+        for state in std::iter::once(&game.coop).chain(game.extra_coop.iter()) {
+            assert!(!state.p2_warp,"visible actor was queued for rescue");
+            assert_eq!(state.p2_away,0);
+            assert_eq!(state.p2[OFF_HP],1);
+            assert_eq!(u16::from_le_bytes([state.p2[OFF_POS_X],state.p2[OFF_POS_X+1]]),4696);
+        }
+        // Far beyond the actual 400-pixel viewport still rescues immediately.
+        game.extra_coop[1].p2[OFF_POS_X..OFF_POS_X+2].copy_from_slice(&4200u16.to_le_bytes());
+        with_extra_player(&mut game,1,follow);
+        assert!(game.extra_coop[1].p2_warp);
+        // Just outside the expanded viewport still rescues after the normal
+        // away timeout; visibility does not disable rescue altogether.
+        game.coop.p2[OFF_POS_X..OFF_POS_X+2].copy_from_slice(&4631u16.to_le_bytes());
+        for _ in 0..P2_AWAY_FRAMES+1 { follow(&mut game); }
+        assert!(game.coop.p2_warp);
+    }
+
+    #[test]
+    fn two_player_rescue_does_not_depend_on_peer_display_margin() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut results = Vec::new();
+        for margin in [0,72] {
+            let mut game = Game::from_rom(rom.clone()).unwrap();
+            game.set_local_players(2);
+            game.set_wide_margin(margin);
+            game.coop.enabled = true;
+            game.coop.p2_hidden = false;
+            game.coop.p2[OFF_HP] = 1;
+            game.coop.p2[OFF_ACTION] = 8;
+            game.coop.p2[OFF_POS_X..OFF_POS_X+2].copy_from_slice(&4696u16.to_le_bytes());
+            game.coop.p2[OFF_POS_Y..OFF_POS_Y+2].copy_from_slice(&359u16.to_le_bytes());
+            for (address,value) in [(ram::CAMERA_X,4704u16),(ram::CAMERA_Y,256),(CAM_BOTTOM,512)] {
+                game.wram_mut()[ix(address)..ix(address)+2].copy_from_slice(&value.to_le_bytes());
+            }
+            for _ in 0..P2_AWAY_FRAMES+1 { follow(&mut game); }
+            results.push((game.coop.p2_away,game.coop.p2_warp,game.coop.p2));
+        }
+        assert_eq!(results[0],results[1]);
+        assert!(results[0].1,"native two-player rescue was disabled");
+    }
+
+    #[test]
+    fn inactive_menu_display_preserves_native_oam_and_player_blocks() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut game = Game::from_rom(rom).unwrap();
+        game.set_local_players(4);
+        game.coop.enabled = true;
+        game.coop.p2_hidden = false;
+        game.coop.p2_oam_base = 4;
+        game.coop.p2_oam_count = 4;
+        game.coop.p2[OFF_HP] = 9;
+        game.wram_mut()[ix(ram::MODE_D2)] = 0;
+        game.wram_mut()[ix(ram::STAGE_PHASE)] = 1;
+        game.wram_mut()[ix(ram::OAM_BUF)..ix(ram::OAM_BUF)+32].fill(123);
+        let before = Box::new(*game.wram());
+        let block = game.coop.p2;
+        oam_hide(&mut game);
+        display_slice(&mut game);
+        assert_eq!(game.wram(),before.as_ref(),"co-op rendering modified native menu OAM/WRAM");
+        assert_eq!(game.coop.p2,block,"menu gating altered player HP/physics");
+        assert!(game.coop.p2_hidden);
+        assert_eq!(game.coop.p2_oam_count,0);
     }
 
     #[test]

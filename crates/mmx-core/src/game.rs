@@ -511,6 +511,63 @@ impl Game {
         self.player_characters.get(player_index).copied()
     }
 
+    /// Current melee timer and airborne mode for a local actor. A zero
+    /// timer means there is no active swing.
+    pub fn player_saber_state(&self, player_index: usize) -> Option<(u8, bool)> {
+        if player_index >= self.local_players { return None; }
+        let saber = match player_index {
+            0 => &self.coop.p1.saber,
+            1 => &self.coop.saber,
+            2 | 3 => &self.extra_coop[player_index - 2].saber,
+            _ => return None,
+        };
+        Some((saber.t, saber.air))
+    }
+
+    /// Exact native downward terrain probe relative to the actor's Y.
+    /// The player collider stores its signed Y origin and vertical radius
+    /// at offsets 6 and 8; this differs from the enemy contact rectangle.
+    pub fn player_floor_probe_offset(&self, player_index: usize) -> Option<i16> {
+        let object: &[u8] = match player_index {
+            0 => &self.wram()[crate::ram::wram_index(crate::ram::X_BASE)..][..crate::ram::X_BLOCK_LEN],
+            1 => self.visible_p2_object()?,
+            2 | 3 => self.visible_extra_player_object(player_index - 2)?,
+            _ => return None,
+        };
+        let pointer = u16::from_le_bytes([object[0x20],object[0x21]]);
+        if pointer == 0 { return None; }
+        let byte = |offset| self.collision_box_byte(pointer.wrapping_add(offset));
+        Some(i16::from(byte(6) as i8) + i16::from(byte(8)))
+    }
+
+    /// Raw local physics diagnostics `[x, y, hp, action, vy]`, including
+    /// hidden/downed actor blocks. This never alters their lifecycle.
+    pub fn player_physics_state(&self, player_index: usize) -> Option<[u16; 5]> {
+        if player_index >= self.local_players { return None; }
+        let object: &[u8] = match player_index {
+            0 => &self.wram()[crate::ram::wram_index(crate::ram::X_BASE)..][..crate::ram::X_BLOCK_LEN],
+            1 if self.coop.enabled => &self.coop.p2,
+            2 | 3 if self.extra_coop[player_index - 2].enabled => &self.extra_coop[player_index - 2].p2,
+            _ => return None,
+        };
+        let word = |offset| u16::from_le_bytes([object[offset],object[offset+1]]);
+        Some([word(5),word(8),u16::from(object[0x27]&0x7f),u16::from(object[2]),word(0x1c)])
+    }
+
+    /// Native body contact rectangle for a local actor, including stored
+    /// shadow blocks whose first byte is not an NPC active marker.
+    pub fn player_contact_bounds(&self, player_index: usize) -> Option<[i32; 4]> {
+        if player_index >= self.local_players { return None; }
+        let object: &[u8] = match player_index {
+            0 => &self.wram()[crate::ram::wram_index(crate::ram::X_BASE)..][..crate::ram::X_BLOCK_LEN],
+            1 if self.coop.enabled => &self.coop.p2,
+            2 | 3 if self.extra_coop[player_index - 2].enabled => &self.extra_coop[player_index - 2].p2,
+            _ => return None,
+        };
+        let pointer = u16::from_le_bytes([object[0x20],object[0x21]]);
+        self.contact_bounds_for_object(object,pointer)
+    }
+
     pub(crate) fn current_shadow_is_zero(&self) -> bool {
         self.zero_set.is_some()
             && self.player_characters[self.local_player_index] == crate::character::Character::Zero
@@ -1188,6 +1245,75 @@ impl Game {
         self.rom[off % self.rom.len()]
     }
 
+    /// Native object contact rectangle in world pixels, with exclusive
+    /// right/bottom edges. This reads the same bank-$86 box as $84:9C0E;
+    /// sprite rendering offsets do not move the collision rectangle.
+    pub fn object_contact_bounds(&self, base: u16) -> Option<[i32; 4]> {
+        let b = usize::from(base);
+        let object = self.wram().get(b..b + 0x22)?;
+        let pointer = u16::from_le_bytes([object[0x20], object[0x21]]);
+        self.object_contact_bounds_with_box(base,pointer)
+    }
+
+    /// The same native contact geometry with an explicitly selected box.
+    /// Enemy attacks sometimes select a larger box only during their contact
+    /// call, then restore their resting box before the frame finishes.
+    pub fn object_contact_bounds_with_box(&self, base: u16, pointer: u16) -> Option<[i32; 4]> {
+        let b = usize::from(base);
+        let object = self.wram().get(b..b + 0x22)?;
+        if object[0] == 0 { return None; }
+        self.contact_bounds_for_object(object,pointer)
+    }
+
+    fn contact_bounds_for_object(&self, object: &[u8], pointer: u16) -> Option<[i32; 4]> {
+        if pointer == 0 { return None; }
+        let byte = |offset| self.collision_box_byte(pointer.wrapping_add(offset));
+        let dx = i32::from(byte(0) as i8);
+        let dy = i32::from(byte(1) as i8);
+        let x = i32::from(u16::from_le_bytes([object[5], object[6]]))
+            + if object[0x11] & 0x40 != 0 { -dx } else { dx };
+        let y = i32::from(u16::from_le_bytes([object[8], object[9]])) + dy;
+        let half_w = i32::from(byte(2));
+        let half_h = i32::from(byte(3));
+        Some([x - half_w, y - half_h, x + half_w + 1, y + half_h + 1])
+    }
+
+    fn collision_box_byte(&self, address: u16) -> u8 {
+        // Low bank-$86 addresses mirror WRAM, including injected saber boxes.
+        if address < 0x2000 { self.wram()[usize::from(address)] }
+        else { self.rom_read(0x860000 | u32::from(address)) }
+    }
+
+    /// Live native terrain collision byte at a world pixel. The ROM's
+    /// floor dispatch uses the low six bits; upper bits carry tile flags.
+    /// This includes road collapse changes to the map, but not solid actors
+    /// such as cars, whose rectangles are available separately.
+    pub fn terrain_collision(&self, x: i32, y: i32) -> Option<u8> {
+        if !(0..8192).contains(&x) || !(0..8192).contains(&y) { return None; }
+        let (x, y) = (x as usize, y as usize);
+        let w = self.wram();
+        let screen = usize::from(w[0xe800 + (y >> 8) * 32 + (x >> 8)]);
+        let at = (0x2000 + screen * 0x200 + ((y >> 4) & 15) * 32 + ((x >> 4) & 15) * 2) & 0x1ffff;
+        let map = u32::from(u16::from_le_bytes([w[at], w[(at + 1) & 0x1ffff]]));
+        let pointer = u32::from_le_bytes([w[0xb92], w[0xb93], w[0xb94], 0]);
+        if pointer == 0 { return None; }
+        let address = pointer.wrapping_add(map) & 0xffffff;
+        Some(match address >> 16 {
+            0x7e | 0x7f => w[(address as usize - 0x7e0000) & 0x1ffff],
+            _ => self.rom_read(address),
+        })
+    }
+
+    /// Flat, non-damaging native player floor surface containing this pixel.
+    /// Slopes and special terrain return None rather than guessing a height.
+    /// Classes 0/$0F/$10 return no floor in the native handler; its player
+    /// context branch only updates special movement flags.
+    pub fn terrain_flat_floor_y(&self, x: i32, y: i32) -> Option<i32> {
+        let class = self.terrain_collision(x,y)? & 0x3f;
+        matches!(class,0x13 | 0x34 | 0x35 | 0x36 | 0x3b | 0x3c | 0x3d)
+            .then_some(y & !15)
+    }
+
     #[cfg(test)]
     pub(crate) fn save_before_current_trap(&mut self) -> Vec<u8> {
         // A test callback runs after dispatch marks the trap fired. Model the
@@ -1414,4 +1540,149 @@ fn stack_index(s: u16) -> usize {
     // ponytail: a stack above $1FFF (not WRAM) is unsupported; MMX keeps it low.
     debug_assert!(s < 0x2000, "stack pointer ${s:04X} outside low WRAM");
     usize::from(s)
+}
+
+#[cfg(test)]
+mod contact_bounds_tests {
+    use super::Game;
+
+    #[test]
+    fn physics_diagnostics_include_hidden_zero_lifecycle_blocks() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut game = Game::from_rom(rom).unwrap();
+        game.set_local_players(4);
+        game.coop.enabled = true;
+        game.wram_mut()[0x1000..0x1004].copy_from_slice(&[0,0,5,9]);
+        for state in std::iter::once(&mut game.coop).chain(game.extra_coop.iter_mut()) {
+            state.enabled = true;
+            state.p2_hidden = true;
+            state.p2[0] = 0;
+            state.p2[2] = 0x0c;
+            state.p2[5..7].copy_from_slice(&1879u16.to_le_bytes());
+            state.p2[8..10].copy_from_slice(&317u16.to_le_bytes());
+            state.p2[0x27] = 0x80;
+            state.p2[0x1c..0x1e].copy_from_slice(&(-512i16).to_le_bytes());
+            state.p2[0x20..0x22].copy_from_slice(&0x1000u16.to_le_bytes());
+        }
+        for player in 1..4 {
+            assert_eq!(game.player_physics_state(player),Some([1879,317,0,0x0c,(-512i16) as u16]));
+            assert_eq!(game.player_contact_bounds(player),Some([1874,308,1885,327]));
+        }
+        assert_eq!(game.player_physics_state(4),None);
+    }
+
+    #[test]
+    fn active_saber_contact_bounds_read_low_bank_wram_box() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut game = Game::from_rom(rom).unwrap();
+        let mut actor = [0u8;crate::ram::X_BLOCK_LEN];
+        actor[5..7].copy_from_slice(&1000u16.to_le_bytes());
+        actor[8..10].copy_from_slice(&350u16.to_le_bytes());
+        actor[0x11] = 0x40;
+        let mut shot = crate::saber::shot_bytes(&actor,false);
+        let base = 0x1228usize;
+        let pointer = (base + crate::saber::BOX_AT) as u16;
+        shot[0x20..0x22].copy_from_slice(&pointer.to_le_bytes());
+        game.wram_mut()[base..base+shot.len()].copy_from_slice(&shot);
+        let x = i32::from(u16::from_le_bytes([shot[5],shot[6]]));
+        let y = i32::from(u16::from_le_bytes([shot[8],shot[9]]));
+        let hw = i32::from(shot[crate::saber::BOX_AT+2]);
+        let hh = i32::from(shot[crate::saber::BOX_AT+3]);
+        assert_eq!(game.object_contact_bounds(base as u16),Some([x-hw,y-hh,x+hw+1,y+hh+1]));
+        // The real Bee bomb's temporary frontal attack box can be predicted
+        // without changing the object's resting collider or live state.
+        assert_eq!(game.object_contact_bounds_with_box(base as u16,0xcd5c),Some([x+11,y+2,x+42,y+11]));
+        assert_eq!(u16::from_le_bytes([game.wram()[base+0x20],game.wram()[base+0x21]]),pointer);
+    }
+
+    #[test]
+    fn native_contact_bounds_mirror_signed_x_and_ignore_sprite_offset() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut game = Game::from_rom(rom).unwrap();
+        // A box fixture uses the actual LoROM/bank-$86 lookup; no CPU is run.
+        let pointer = 0x9000u16;
+        let offset = ((0x86usize & 0x7f) << 15) | usize::from(pointer & 0x7fff);
+        game.rom[offset..offset + 4].copy_from_slice(&[(-7i8) as u8, (-11i8) as u8, 20, 13]);
+        let base = 0xe68usize;
+        let object = &mut game.wram_mut()[base..base + 0x40];
+        object[0] = 1;
+        object[5..7].copy_from_slice(&1000u16.to_le_bytes());
+        object[8..10].copy_from_slice(&350u16.to_le_bytes());
+        object[0x19] = 80;
+        object[0x20..0x22].copy_from_slice(&pointer.to_le_bytes());
+        assert_eq!(game.object_contact_bounds(base as u16), Some([973, 326, 1014, 353]));
+        game.wram_mut()[base + 0x11] = 0x40;
+        assert_eq!(game.object_contact_bounds(base as u16), Some([987, 326, 1028, 353]));
+        game.wram_mut()[base] = 0;
+        assert_eq!(game.object_contact_bounds(base as u16), None);
+        assert_eq!(game.object_contact_bounds(0xffff), None);
+        let player = crate::ram::wram_index(crate::ram::X_BASE);
+        game.wram_mut()[player + 0x20..player + 0x22].copy_from_slice(&pointer.to_le_bytes());
+        game.rom[offset + 6] = (-9i8) as u8;
+        game.rom[offset + 8] = 12;
+        assert_eq!(game.player_floor_probe_offset(0),Some(3));
+    }
+
+    #[test]
+    fn terrain_collision_reads_live_screen_map_and_collapse_changes() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut game = Game::from_rom(rom).unwrap();
+        let x = 300usize;
+        let y = 400usize;
+        let screen = 2usize;
+        let at = 0x2000 + screen * 0x200 + ((y >> 4) & 15) * 32 + ((x >> 4) & 15) * 2;
+        let w = game.wram_mut();
+        w[0xe800 + (y >> 8) * 32 + (x >> 8)] = screen as u8;
+        w[at..at + 2].copy_from_slice(&10u16.to_le_bytes());
+        // A WRAM collision table tests the same long-pointer decode while
+        // allowing a collapse to replace the live map ID.
+        w[0xb92..0xb95].copy_from_slice(&[0, 0xf0, 0x7f]);
+        w[0x1f000 + 10] = 0x80;
+        w[0x1f000 + 11] = 0x12;
+        assert_eq!(game.terrain_collision(x as i32, y as i32), Some(0x80));
+        assert_eq!(game.terrain_flat_floor_y(x as i32, y as i32),None);
+        for class in [0x00,0x0f,0x10] {
+            game.wram_mut()[0x1f000 + 10] = class;
+            assert_eq!(game.terrain_flat_floor_y(x as i32,y as i32),None);
+        }
+        for class in [0x13,0x34,0x35,0x36,0x3b,0x3c,0x3d] {
+            game.wram_mut()[0x1f000 + 10] = class;
+            assert_eq!(game.terrain_flat_floor_y(x as i32,y as i32),Some(400));
+        }
+        game.wram_mut()[at..at + 2].copy_from_slice(&11u16.to_le_bytes());
+        assert_eq!(game.terrain_collision(x as i32, y as i32), Some(0x12));
+        assert_eq!(game.terrain_flat_floor_y(x as i32,y as i32),None);
+        assert_eq!(game.terrain_collision(-1, 400), None);
+        assert_eq!(game.terrain_collision(8192, 400), None);
+    }
+
+    #[test]
+    fn real_rom_class_zero_is_empty_in_player_and_enemy_terrain() {
+        let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else { return; };
+        let mut game = Game::from_rom(rom).unwrap();
+        // This verified Rev 1 handler is shared by terrain classes0/$0F/$10.
+        if (0..3).map(|i|game.rom_read(0x84969c+i)).collect::<Vec<_>>() != [0xad,0x1c,0x1f] { return; }
+        let mut registers = game.regs();
+        registers.emulation = false;
+        registers.p = (registers.p | 0x20) & !0x10;
+        registers.d = 0;
+        registers.dbr = 0x80;
+        registers.x = crate::ram::X_BASE as u16;
+        game.set_regs(registers);
+        let y = crate::ram::wram_index(crate::ram::X_POS_Y);
+        for player_context in [true,false] {
+            let w = game.wram_mut();
+            w[y..y+2].copy_from_slice(&383u16.to_le_bytes());
+            w[0x2c..0x2e].copy_from_slice(&(crate::ram::X_BASE as u16).to_le_bytes());
+            w[8] = 0x80; // downward center floor probe
+            w[0xe] = 1; // probe is on the tile's first scanline
+            w[0x1f1c] = if player_context {0x80}else{0};
+            game.call_isolated_ret(0x84969c,crate::TrapReturn::Rts);
+            let actual = u16::from_le_bytes([game.wram()[y],game.wram()[y+1]]);
+            assert_eq!(actual,383,"empty tile moved actor in context {player_context}");
+        }
+        // Class$13's real flat handler does snap under the same probe.
+        game.call_isolated_ret(0x8496b5,crate::TrapReturn::Rts);
+        assert_eq!(u16::from_le_bytes([game.wram()[y],game.wram()[y+1]]),382);
+    }
 }

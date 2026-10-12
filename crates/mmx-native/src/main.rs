@@ -14,6 +14,8 @@ mod headless;
 mod keys;
 mod movie;
 mod movie_route;
+#[cfg(test)]
+mod movie_route_validation;
 mod netplay;
 mod video;
 mod vs_select;

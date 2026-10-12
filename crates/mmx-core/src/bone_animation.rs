@@ -241,6 +241,7 @@ fn obj_for(game: &Game, player: usize) -> Option<&[u8]> {
 /// Called after all local player OAM emitters and before the PPU uploads OAM.
 pub(crate) fn prepare(game: &mut Game) {
     game.bone_draws = [None; 4];
+    if !crate::coop_stages::stage_actor_scene(game.wram()) { return; }
     let cam = |w: &[u8; 0x20000], a: u32| u16::from_le_bytes([w[ix(a)], w[ix(a) + 1]]);
     let camera = (cam(game.wram(), ram::CAMERA_X), cam(game.wram(), ram::CAMERA_Y));
     for player in 0..game.local_players {
@@ -322,6 +323,10 @@ pub(crate) struct State {
 /// Composite decoded RGBA over the completed PPU frame, with integer pixel
 /// placement and SNES-style left/right facing. This is display-only.
 pub(crate) fn draw(game: &mut Game) {
+    if !crate::coop_stages::stage_actor_scene(game.wram()) {
+        game.bone_draws = [None;4];
+        return;
+    }
     // The larger framebuffer preserves sprite detail. Background/OAM art
     // stays on its original grid, replicated with nearest-neighbour pixels.
     let scale = game.player_characters[..game.local_players].iter()

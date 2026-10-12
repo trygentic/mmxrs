@@ -243,6 +243,18 @@ pub const fn uses_saber(character: crate::Character) -> bool {
     matches!(character, crate::Character::Zero | crate::Character::Sigma)
 }
 
+/// A grounded attack masks locomotion, but its initial direction request
+/// still chooses which way the blade swings. Keep ambiguous opposite inputs
+/// and active swings unchanged, and leave ordinary movement to the ROM.
+pub(crate) fn face_attack_start(s: &Saber, obj: &mut [u8], pad: u16) {
+    if s.t != 0 || s.btn || pad & BTN_X == 0 || !matches!(obj[2], 0x00 | 0x02 | 0x04 | 0x0A | 0x14) { return; }
+    match pad & (BTN_LEFT | BTN_RIGHT) {
+        BTN_LEFT => obj[0x11] &= !0x40,
+        BTN_RIGHT => obj[0x11] |= 0x40,
+        _ => {},
+    }
+}
+
 /// Called with the player's block and pad before its update: start /
 /// advance / end the swing, return the pad the ROM gets. Pure but for `s`.
 pub fn update(s: &mut Saber, obj: &[u8], pad: u16) -> u16 {
@@ -255,9 +267,9 @@ pub(crate) fn update_timed(s: &mut Saber, obj: &[u8], pad: u16, duration: Option
     let pressed = x && !s.btn;
     s.btn = x;
     let pad = pad & !BTN_X;
-    if s.t > 0 && (!s.air || matches!(action, 0x00 | 0x02 | 0x04 | 0x0A | 0x14)) && pad & crate::BTN_B != 0 {
-        // Jump has priority over a grounded attack. Let the original player
-        // routine perform the jump and terrain collision normally.
+    if s.t > 0 && (!s.air || matches!(action, 0x00 | 0x02 | 0x04 | 0x0A | 0x12 | 0x14)) && pad & crate::BTN_B != 0 {
+        // Ground jumps and wall kicks have priority over the attack. The original player
+        // routine performs the jump and terrain collision normally.
         s.t = 0;
         return pad;
     }
@@ -323,6 +335,7 @@ pub(crate) fn player_shot(game: &Game, player: usize, obj: &[u8], s: &Saber) -> 
 /// [`HOOK_SHOTS_DONE`]: put each swing's arc shot (a Zero P1's, P2's) into
 /// a free slot for the enemy loop.
 pub fn shots_done(game: &mut Game) {
+    if !crate::coop_stages::stage_actor_scene(game.wram()) { return; }
     if uses_saber(game.player_characters[0]) && contact(game, 0, &game.coop.p1.saber).is_some() {
         let b = ix(crate::ram::X_BASE);
         let box_ = contact(game, 0, &game.coop.p1.saber).unwrap();
@@ -387,6 +400,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ground_saber_start_faces_requested_direction_without_moving() {
+        let mut obj=[0;0x90];obj[0x11]=0x62;
+        let mut s=Saber::default();
+        face_attack_start(&s,&mut obj,BTN_LEFT|BTN_X);
+        assert_eq!(obj[0x11],0x22);
+        assert_eq!(update_timed(&mut s,&obj,BTN_LEFT|BTN_X,Some(49)),0);
+        face_attack_start(&s,&mut obj,BTN_RIGHT|BTN_X);
+        assert_eq!(obj[0x11],0x22,"active swing direction was changed");
+    }
+
+    #[test]
     fn ground_saber_jump_cancel_preserves_jump_direction_and_air_rules() {
         let mut obj = [0; 0x90];
         obj[2] = 0;
@@ -399,6 +423,10 @@ mod tests {
         assert_eq!(update_timed(&mut air, &obj, jump, Some(49)), BTN_RIGHT);
         assert_eq!(air.t, 21, "air swing should retain its existing input mask");
         obj[2] = 0; // A landed air swing is grounded again.
+        assert_eq!(update_timed(&mut air, &obj, jump, Some(49)), jump);
+        assert_eq!(air.t, 0);
+        air = Saber { t: 20, air: true, ..Saber::default() };
+        obj[2] = 0x12; // A real wall slide must permit a fresh wall-kick input.
         assert_eq!(update_timed(&mut air, &obj, jump, Some(49)), jump);
         assert_eq!(air.t, 0);
     }

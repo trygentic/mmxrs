@@ -421,7 +421,8 @@ fn p1_emitter(game: &mut Game) {
 }
 
 fn p1_custom_art(game: &Game) -> bool {
-    game.coop.p1.on || game.player_character(0).and_then(|c| game.boss_sets.get(&c)).is_some()
+    crate::coop_stages::stage_actor_scene(game.wram())
+        && (game.coop.p1.on || game.player_character(0).and_then(|c| game.boss_sets.get(&c)).is_some())
 }
 
 fn emit_p1_boss(game: &mut Game, set: &BossSet) {
@@ -437,13 +438,16 @@ fn emit_p1_boss(game: &mut Game, set: &BossSet) {
 /// X starts a swing; during one the pad is masked as for P2 (Start and
 /// Select pass). `$A7` (held) and `$AB` (pressed) are edited in place.
 fn p1_pad(game: &mut Game) {
-    if !crate::saber::uses_saber(game.player_characters[0]) || game.isolated_depth > 0 {
+    if !crate::coop_stages::stage_actor_scene(game.wram())
+        || !crate::saber::uses_saber(game.player_characters[0]) || game.isolated_depth > 0 {
         return;
     }
     let w = game.wram();
     let held = u16::from_le_bytes([w[ix(ram::PAD1_HELD)], w[ix(ram::PAD1_HELD) + 1]]);
     let b = ix(ram::X_BASE);
-    let obj: [u8; ram::X_BLOCK_LEN] = w[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
+    let mut obj: [u8; ram::X_BLOCK_LEN] = w[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
+    crate::saber::face_attack_start(&game.coop.p1.saber, &mut obj, held);
+    game.wram_mut()[b + 0x11] = obj[0x11];
     let keep = held & (crate::BTN_START | crate::BTN_SELECT);
     let duration = crate::saber::duration(game, 0);
     let pad = crate::saber::update_timed(&mut game.coop.p1.saber, &obj, held, duration) | keep;
@@ -569,6 +573,10 @@ fn p2_flash_end(game: &mut Game) {
 /// [`HOOK_OAM_BUILD`]: P2's palette, and a fresh P2 slot mask for this frame.
 fn oam_build(game: &mut Game) {
     crate::p2tiles::clear_slots(game);
+    if !crate::coop_stages::stage_actor_scene(game.wram()) {
+        crate::coop::clear_inactive_scene_ownership(game);
+        return;
+    }
     write_palette(game);
     if game.coop.p1.on && game.zero_set.is_some() && !game.boss_sets.contains_key(&crate::Character::Zero) {
         lift_p1_sparkles(game);
@@ -581,6 +589,7 @@ fn oam_build(game: &mut Game) {
 /// palettes on stage load, fades and weapon swaps, so the check doubles as a
 /// repair).
 pub fn write_palette(game: &mut Game) {
+    if !crate::coop_stages::stage_actor_scene(game.wram()) { return; }
     if let Some(set) = game.player_character(0).and_then(|c| game.boss_sets.get(&c)).cloned() {
         put_palette(game, X_SPRITE_PALETTE, &set.palette);
     }
