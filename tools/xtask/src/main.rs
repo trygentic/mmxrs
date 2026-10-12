@@ -12,12 +12,13 @@ use mmx_verify::{movie_bk2, CompareOpts, Lockstep};
 
 const USAGE: &str = "usage: cargo xtask <command>
   verify [--movie F.bk2|F.lsmv|F.smv] [--frames N] [--no-frame] [--coop-off] [--tap F,..] [--hold HEX] [--p2-hold HEX]
-  trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..] [--calls] [--pcs FILE]   bank histogram of frame N's opcode fetches (--pcs: every PC to FILE)
+  trace --frames N [--tap F,..] [--hold HEX] [--find HEX,..] [--calls] [--pcs FILE] [--load STATE] [--movie F [--movie-offset N]] [--poke ..] [--watch ADDR[:LEN],..]
+       bank histogram of frame N's opcode fetches (--pcs: every PC to FILE; --watch: each instruction that changed those WRAM bytes)
   cooptrace --frame F [script] [--phase 2] [--dump PREFIX]   P1 vs P2 player update (phase 2: terrain phase $81:9D67); --dump: PREFIX.p1/.p2 PCs
   lagdiff --frames N [script] [--refill] [--untrap HEX,..] [--dump A-B]   solo vs co-op (P2 idle): first real-time
        opcode fetch where P1's PC or master clock differs; --dump writes both frames' traces (PC, mclk) to target/
   dump --frames N --out DIR [--at F,F,...] [--movie F] [--tap F,F,...] [--hold HEX] [--p2-hold HEX] [--coop]
-       [--rom-any PATH] [--x3 PATH] [--poke ADDR=VAL@A[-B],..] [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..] [--wav PATH] [--apu] [--mute HEX]  start from / write a save state (P2 restored
+       [--rom-any PATH] [--x3 PATH] [--x1-zero] [--poke ADDR=VAL@A[-B],..] [--load STATE] [--save F=PATH,..] [--wram] [--refill] [--to F] [--untrap HEX,..] [--wav PATH] [--apu] [--mute HEX] [--zero] [--players N] [--pN-character ID]  start from / write a save state (P2 restored
        from the state's co-op data; a state saved before it re-anchors P2 on P1)
        --tap holds Start on pad 1 for 4 frames at each listed frame; --hold/--p2-hold OR a constant pad mask in
        --at A-B/S and --p1tap HEX@A-B/S[:N] take ranges; --vram also writes .vram/.oam/.cgram
@@ -38,7 +39,7 @@ const USAGE: &str = "usage: cargo xtask <command>
   ledger
   rominfo
   stateinfo PATH   what a save state holds (frame count, tile pages, co-op data, P2); docs/savestates.md
-  zerosheet [--x3 PATH [--wave|--slash|--sfx]] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data; --wave: the saber wave, --slash: the slash arc) -> DIR/NN_name.png + DIR/sheet.png; --sfx: his X3 sounds -> DIR/swing.wav
+  zerosheet [--x3 PATH [--wave|--slash|--sfx] | --boss NAME [--budget N]] --out DIR   X1 (or X3) Zero's frames (mmx_core::zero_data; --wave: the saber wave, --slash: the slash arc) -> DIR/NN_name.png + DIR/sheet.png; --sfx: his X3 sounds -> DIR/swing.wav
   netsim [--mode rollback|lockstep] [--rtt MS] [--jitter MS] [--loss PCT] [--delay N] [--prediction N] [--frames N]
        [--load STATE] [--x3 PATH] [--zero] [--timing ntsc|pal] [--seed N] [--report F.json] [--record PREFIX] [--no-smoothing]
        [--wide-gameplay|--wide-gameplay-host] [--overclock off|1.5|2] [--overclock-host F] [script]
@@ -145,7 +146,20 @@ fn game_scripted(args: &[String]) -> Game {
         let rom = std::fs::read(&p).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
         g.set_x3_rom(&rom).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
     }
+    // `--x1-zero`: Zero's X1 sprite set, as mmxrs loads it without an X3 ROM.
+    if args.iter().any(|a| a == "--x1-zero") {
+        let rom = g.rom_bytes().to_vec();
+        let rom = if rom.len() % 0x8000 == 512 { &rom[512..] } else { &rom[..] };
+        let set = mmx_core::boss_data::extract_x1(rom, mmx_core::Character::Zero).unwrap_or_else(|e| die(&format!("X1 Zero: {e}")));
+        g.set_boss_set(mmx_core::Character::Zero, set);
+    }
     g.set_overclock(overclock(args));
+    // `--pN-character ID` (the roster, mmx_core::Character ids: x, zero, ...).
+    for i in 0..4 {
+        if let Some(id) = flag(args, &format!("--p{}-character", i + 1)) {
+            g.set_player_character(i, mmx_core::Character::parse(id).unwrap_or_else(|| die(&format!("unknown character {id:?}"))));
+        }
+    }
     g
 }
 
@@ -331,11 +345,23 @@ fn bench(args: &[String]) -> i32 {
     }
     let script = scripted(args);
     let mut g = game_scripted(args);
-    if args.iter().any(|a| a == "--coop") {
+    let players = num(args, "--players").unwrap_or(1);
+    if args.iter().any(|a| a == "--coop") || players > 1 {
         g.coop.enabled = true;
+        g.set_local_players(players.max(2));
         mmx_core::coop::register_coop_traps(&mut g).unwrap_or_else(|e| die(&e));
     }
+    // Without an X3 ROM, Zero is drawn from the X1 ROM's sprite set, as mmxrs does.
+    if g.zero_set().is_none() {
+        let rom = rom();
+        let art = if rom.len() % 0x8000 == 512 { &rom[512..] } else { &rom[..] };
+        let set = mmx_core::boss_data::extract_x1(art, mmx_core::Character::Zero).unwrap_or_else(|e| die(&format!("Zero sprites: {e}")));
+        g.set_boss_set(mmx_core::Character::Zero, set);
+    }
     if args.iter().any(|a| a == "--zero") {
+        if g.zero_set().is_none() {
+            g.set_player_character(0, mmx_core::Character::Zero);
+        }
         g.set_p1_zero(true).unwrap_or_else(|e| die(&format!("--zero: {e}")));
     }
     g.set_audio_rate(48_000);
@@ -479,8 +505,11 @@ fn dump(args: &[String]) -> i32 {
     let script = scripted(args);
     let saves = saves(args);
     let mut g = game_scripted(args);
-    if args.iter().any(|a| a == "--coop") {
+    // `--players N`: local players (2-4 imply `--coop`).
+    let players = num(args, "--players").unwrap_or(1);
+    if args.iter().any(|a| a == "--coop") || players > 1 {
         g.coop.enabled = true;
+        g.set_local_players(players.max(2));
         mmx_core::coop::register_coop_traps(&mut g).unwrap_or_else(|e| die(&e));
         // `--untrap HEX,..`: A/B one co-op hook at a time.
         for a in flag(args, "--untrap").map(|s| s.split(',').collect::<Vec<_>>()).unwrap_or_default() {
@@ -643,6 +672,10 @@ fn write_wav(path: &Path, s: &[(f32, f32)], rate: u32) -> std::io::Result<()> {
     std::fs::write(path, v)
 }
 
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect()
+}
+
 /// `trace --frames N [--tap ..] [--hold HEX] [--find HEX,HEX]`: run N-1 frames,
 /// trace frame N, print the bank histogram and hit counts for `--find` PCs.
 fn trace(args: &[String]) -> i32 {
@@ -659,10 +692,38 @@ fn trace(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--zero") {
         g.set_p1_zero(true).unwrap_or_else(|e| die(&format!("--zero: {e}")));
     }
+    let inputs = movie(args);
+    let pad = |f: usize| script(f, inputs.get(f - 1).copied().unwrap_or_default());
+    let pokes = Pokes::parse(args);
     for f in 1..frames {
-        g.step(script(f, Pads::default()));
+        pokes.apply(&mut g, f);
+        g.step(pad(f));
     }
-    let pcs = g.trace_frame(script(frames, Pads::default()));
+    pokes.apply(&mut g, frames);
+    // `--watch ADDR[:LEN],..`: every instruction that changed those WRAM bytes
+    // (the change shows at the next fetch; DMA is charged to the instruction it ran after).
+    if let Some(w) = flag(args, "--watch") {
+        let ranges: Vec<(usize, usize)> = w
+            .split(',')
+            .map(|t| {
+                let (a, n) = t.split_once(':').unwrap_or((t, "1"));
+                let a = u32::from_str_radix(a.trim_start_matches('$'), 16).unwrap_or_else(|_| die("--watch"));
+                (ram::wram_index(a), usize::from_str_radix(n, 16).unwrap_or_else(|_| die("--watch")))
+            })
+            .collect();
+        let snap = |w: &[u8; 0x20000]| ranges.iter().flat_map(|&(a, n)| w[a..a + n].to_vec()).collect::<Vec<u8>>();
+        let (mut last, mut prev_pc) = (snap(g.wram()), 0u32);
+        g.trace_frame_each(pad(frames), |pc, w| {
+            let now = snap(w);
+            if now != last {
+                println!("  ${prev_pc:06X} wrote {} -> {}", hex(&last), hex(&now));
+                last = now;
+            }
+            prev_pc = pc;
+        });
+        return 0;
+    }
+    let pcs = g.trace_frame(pad(frames));
     let mut banks = std::collections::BTreeMap::new();
     for &pc in &pcs {
         *banks.entry(pc >> 16).or_insert(0usize) += 1;
@@ -838,7 +899,23 @@ fn zerosheet(args: &[String]) -> i32 {
     const DIG: [u16; 10] = [0x7B6F, 0x2C97, 0x73E7, 0x73CF, 0x5BC9, 0x79CF, 0x79EF, 0x7249, 0x7BEF, 0x7BCF];
     let out = PathBuf::from(flag(args, "--out").unwrap_or_else(|| die("zerosheet needs --out DIR")));
     std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&format!("{}: {e}", out.display())));
+    // `--boss NAME`: a selectable X1 boss's playable set (`boss_data::extract_x1`).
+    let boss = flag(args, "--boss").map(|name| {
+        let c = mmx_core::Character::parse(name).unwrap_or_else(|| die(&format!("unknown character {name}")));
+        mmx_core::boss_data::extract_x1(game(rom()).rom_bytes(), c).unwrap_or_else(|e| die(&e))
+    });
     let (z, (cw, ch, ox, oy)) = match flag(args, "--x3") {
+        _ if boss.is_some() => {
+            let mut b = boss.unwrap();
+            // `--budget N`: only the pieces `zero::emit_boss` keeps under an
+            // N-entry OAM allowance (16 with four local players).
+            if let Some(n) = flag(args, "--budget").and_then(|n| n.parse().ok()) {
+                for f in 0..b.frames.len() {
+                    b.frames[f].sprites = b.sprites_within(f, n);
+                }
+            }
+            (zero_data::ZeroSet { tiles: b.tiles, palette: b.palette, frames: b.frames, ..Default::default() }, (128, 112, 64, 64))
+        }
         Some(p) => {
             let mut b = std::fs::read(p).unwrap_or_else(|e| die(&format!("{p}: {e}")));
             if b.len() % 0x8000 == 512 {

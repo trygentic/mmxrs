@@ -72,7 +72,8 @@ async function loadRom(file) {
     let refused = '';
     try { e.set_coop(coop); } catch (err) { refused = ` (${err})`; }
     if (x3) e.set_x3_rom(x3);
-    if (x3 && zero) e.set_p1_zero(true);
+    if (spritePack) e.import_sprite_pack(spritePack);
+    if ((x3 || spritePack) && zero) e.set_p1_zero(true);
     e.set_widescreen(widescreen);
     e.set_wide_gameplay(wideGame);
     e.set_overclock(overclockNow());
@@ -112,12 +113,29 @@ addEventListener('drop', (e) => {
   if (f) loadRom(f);
 });
 
-// Play as Zero (P1): needs the X3 ROM; unchecks itself without one.
+// Custom Zero sprite pack (docs/sprite-packs.md): body art only, replaces
+// the X3 set's; kept for the next ROM load and netplay like the X3 bytes.
+let spritePack = null;
+$('spritepack').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    emu?.import_sprite_pack(bytes);
+    spritePack = bytes;
+    msg = 'Sprite pack loaded: Zero wears it';
+  } catch (err) {
+    msg = `Sprite pack rejected: ${err}`;
+  }
+  status();
+});
+
+// Play as Zero (P1): needs the X3 ROM or a sprite pack; unchecks itself without one.
 let zero = false;
 $('zero').addEventListener('change', (e) => {
-  zero = e.target.checked && !!x3;
+  zero = e.target.checked && !!(x3 || spritePack);
   e.target.checked = zero;
-  if (!zero && !x3) msg = 'Play as Zero needs the Mega Man X3 ROM: load it first';
+  if (!zero && !x3 && !spritePack) msg = 'Play as Zero needs the Mega Man X3 ROM or a sprite pack: load one first';
   emu?.set_p1_zero(zero);
   status();
 });
@@ -135,7 +153,8 @@ $('coop').addEventListener('change', (e) => {
 // --- keyboard ----------------------------------------------------------------
 addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement && e.target.type === 'file') return;
-  actx?.state === 'suspended' && actx.resume();
+  unlockAudio();
+  if (e.code === 'F2') { e.preventDefault(); showFps = !showFps; speed(); return; } // display only, fine online
   if (net && ['F5', 'F7', 'Tab'].includes(e.code)) { e.preventDefault(); return; } // would desync
   if (e.code === 'F5') { e.preventDefault(); if (emu) { slot = emu.save_state(); msg = 'saved'; status(); } return; }
   if (e.code === 'F7') { e.preventDefault(); if (emu && slot) { emu.load_state(slot); msg = 'loaded'; status(); } return; }
@@ -156,7 +175,15 @@ addEventListener('blur', () => { pads[0] = pads[1] = 0; ff = false; });
 let actx = null;
 let node = null;
 let queued = 0; // worklet's last report, in stereo frames
-let postedSince = 0; // frames posted since that report
+let received = 0; // frames the worklet had taken in at that report
+let posted = 0; // frames posted so far
+// Frames the worklet holds or has in flight. A report generated before a
+// chunk arrived still counts the chunk: `posted - received` is what it has
+// not seen. (A per-report "posted since" counter forgot the chunks posted
+// while stale reports were queued; and it was read after the transfer, so
+// it was 0: the loop paced on stale reports alone, posted a long tick's 4
+// frames twice over, the worklet dropped the excess and the game ran 2x.)
+const inFlight = () => queued + (posted - received);
 let underruns = 0;
 
 async function startAudio() {
@@ -165,22 +192,44 @@ async function startAudio() {
       actx = new AudioContext({ latencyHint: 'interactive' });
       await actx.audioWorklet.addModule(new URL('./worklet.js', import.meta.url));
       node = new AudioWorkletNode(actx, 'mmx-ring', { outputChannelCount: [2] });
-      node.port.onmessage = (e) => { queued = e.data.queued; underruns = e.data.underruns; postedSince = 0; };
+      // `?? posted`: a stale cached worklet.js without `received` (it has taken in everything posted).
+      node.port.onmessage = (e) => { queued = e.data.queued; received = e.data.received ?? posted; underruns = e.data.underruns; };
       node.connect(actx.destination);
+      actx.onstatechange = soundBadge;
     }
     emu.set_audio_rate(actx.sampleRate);
-    await actx.resume();
+    // Autoplay policy: a ROM picked from the file dialog or dropped may not
+    // count as a gesture, and then this stays suspended until the badge's
+    // click or a key (`unlockAudio`). Don't wait on it.
+    actx.resume().then(soundBadge, () => {});
   } catch (err) {
+    audioErr = `${err}`;
     msg += `\naudio off: ${err}`;
   }
+  soundBadge();
 }
 const audioLive = () => node && actx.state === 'running';
+let audioErr = '';
+function unlockAudio() {
+  if (actx?.state === 'suspended') actx.resume().then(soundBadge, () => {});
+}
+// "Click or press a key to enable sound" over the picture while the browser
+// holds audio back; gone once it runs. Hidden before a ROM is loaded.
+function soundBadge() {
+  const b = $('soundBadge');
+  b.hidden = !emu || (!audioErr && (!actx || actx.state === 'running'));
+  b.textContent = audioErr ? '\u{1F507} Sound unavailable in this browser' : '\u{1F507} Click or press a key to enable sound';
+}
+$('soundBadge').addEventListener('click', unlockAudio);
+addEventListener('pointerdown', unlockAudio);
 
 function pushAudio() {
   const pcm = emu.audio_take(); // always drain, even when muted
   if (!audioLive() || ff || !pcm.length) return;
+  // Count before the transfer: it empties `pcm` (so the old `postedSince`
+  // was always 0, and the loop paced on stale reports alone).
+  posted += pcm.length >> 1;
   node.port.postMessage(pcm, [pcm.buffer]);
-  postedSince += pcm.length >> 1;
 }
 
 // --- frame loop --------------------------------------------------------------
@@ -220,7 +269,7 @@ function loop(t) {
   } else if (audioLive()) {
     // Audio clock: keep ~TARGET_MS queued in the worklet, at most 4 frames/tick.
     const want = (actx.sampleRate * TARGET_MS) / 1000;
-    while (queued + postedSince < want && n < 4) { stepOne(); n++; }
+    while (inFlight() < want && n < 4) { stepOne(); n++; }
     acc = 0;
   } else {
     // Fallback: wall-clock accumulator at the game's rate (PAL ROM: 50 fps).
@@ -248,7 +297,7 @@ function netFrame(dt) {
   let shown = 0;
   if (audioLive() && !ff) {
     const want = (actx.sampleRate * TARGET_MS) / 1000;
-    for (let k = 0; queued + postedSince < want && k < 4; k++) {
+    for (let k = 0; inFlight() < want && k < 4; k++) {
       shown += emu.net_tick_audio(pads[0], now);
       pushAudio();
     }
@@ -315,10 +364,27 @@ setInterval(() => {
 }, 250);
 
 function status() {
-  const a = audioLive() ? `audio ${underruns} underruns` : 'audio off (press a key)';
+  const a = audioLive() ? `audio ${underruns} underruns` : 'sound off: click the game or press a key';
   $('status').textContent = `${msg}\n${a}${coop ? ' · co-op' : ''}`;
 }
 setInterval(() => emu && status(), 1000);
+
+// F2 or ?fps=1: frames emulated per second and the share of the game's own
+// rate (emu.fps(), 50 on PAL), from frame_count so every pacing path counts.
+let showFps = new URLSearchParams(location.search).get('fps') === '1';
+let fpsT = 0, fpsFrame = 0;
+function speed() {
+  const el = $('fps');
+  el.hidden = !showFps || !emu;
+  if (el.hidden) return;
+  const t = performance.now(), f = Number(emu.frame_count()); // u64: a BigInt
+  if (fpsT && t > fpsT) {
+    const fps = ((f - fpsFrame) * 1000) / (t - fpsT);
+    el.textContent = `${fps.toFixed(0)} fps ${((fps / emu.fps()) * 100).toFixed(0)}%`;
+  }
+  fpsT = t; fpsFrame = f;
+}
+setInterval(speed, 1000);
 
 // --- automation --------------------------------------------------------------
 // window.mmx: drive the page from devtools / Playwright. `pause(true)` stops
@@ -340,4 +406,5 @@ window.mmx = {
   wram() { return emu.wram(); },
   info() { return JSON.parse(emu.rom_info_json()); },
   async loadRomBytes(bytes) { await loadRom(new Blob([bytes])); },
+  get audio() { return { queued, posted, received, inFlight: inFlight(), underruns, rate: actx?.sampleRate, state: actx?.state }; },
 };

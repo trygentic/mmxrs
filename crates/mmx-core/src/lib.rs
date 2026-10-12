@@ -3,6 +3,7 @@
 //! Contract: see `docs/PLAN.md`. std-only, no fs, no clock; builds on wasm32.
 #![forbid(unsafe_code)]
 
+pub mod capsule;
 pub mod coop;
 pub mod boss_data;
 pub mod bone_animation;

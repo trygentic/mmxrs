@@ -62,6 +62,32 @@ pub fn palette_for(x: &[u16; 16]) -> [u16; 16] {
     p
 }
 
+/// X's own palette (`$85:B700`, sprite palette 1 at the Highway start, no
+/// weapon): a second X's source while P1 wears Zero's colours in slot 1.
+pub const X_ROM: [u16; 16] = [
+    0x35AF, 0x739C, 0x239D, 0x091E, 0x7B6F, 0x7A8A, 0x5963, 0x7E00, 0x7900, 0x40C4, 0x42DF, 0x2597, 0x1110,
+    0x739C, 0x4210, 0x0C63,
+];
+
+/// A second X (`--p2-character x`): X's blue ramp 7-9 (`7E00 7900 40C4`:
+/// helmet, arms, boots) turned green (blue and green swapped), the rest
+/// kept. ponytail: one fixed tint; a picker is the upgrade.
+const P2_X_TINT: [(usize, u16); 3] = [(7, 0x43E0), (8, 0x23C0), (9, 0x1A04)];
+
+/// X's 16 colours -> a second X's. Pure.
+pub fn p2_x_palette(x: &[u16; 16]) -> [u16; 16] {
+    let mut p = *x;
+    for (i, c) in P2_X_TINT {
+        p[i] = c;
+    }
+    p
+}
+
+/// The shadow player now (P2, or 3/4 in their slices) plays as X.
+fn shadow_is_x(game: &Game) -> bool {
+    game.player_character(game.local_player_index) == Some(crate::Character::X)
+}
+
 /// Byte offset of sprite palette `pal` (0-7) in the `$0300` mirror.
 pub fn sprite_palette_offset(pal: u8) -> usize {
     CGRAM_BUF + 2 * (128 + 16 * usize::from(pal & 7))
@@ -113,14 +139,16 @@ pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
     let p2 = game.coop.p2;
     let attr = p2[0x11] & 0x30 | (pal & 7) << 1;
     let saber = game.coop.saber;
-    let mut e = match x3_frame(&p2, &saber) {
-        Some(_) => slash_entries(game, set, &p2, &saber, 0, attr),
-        None => Vec::new(),
-    };
-    let n_fx = e.len();
+    let k = game.local_player_index;
+    let mut e = wave_entries(game, set, &game.waves[k].clone(), k, attr);
+    let n_wave = e.len();
+    if x3_frame(&p2, &saber).is_some() {
+        e.extend(slash_entries(game, set, &p2, &saber, 0, attr));
+    }
+    let n_fx = e.len() - n_wave;
     if let Some(f) = x3_frame(&p2, &saber) {
         if game.coop.zero_frame != f as u16 {
-            crate::p2tiles::fill_page(game, 0, &set.page(f));
+            crate::p2tiles::fill_page(game, usize::from(crate::p2tiles::body_page(game)) * crate::p2tiles::SHADOW_WORDS, &set.page(f));
             game.coop.zero_frame = f as u16;
         }
         e.extend(frame_entries(game, set, &p2, f, attr));
@@ -139,11 +167,13 @@ pub fn emit_x3(game: &mut Game, set: &ZeroSet, first: u8, pal: u8) -> u8 {
     let last = write_entries(game, first, e);
     let mask = |a: usize, b: usize| (a..b).fold(0u128, |m, s| m | 1 << s);
     let f = usize::from(first) + n_sp.min(e.len());
-    let w = n_fx.min(e.len().saturating_sub(n_sp));
-    game.add_p2_tile_slots(mask(f, f + w), 2);
-    game.add_p2_tile_slots(mask(f + w, usize::from(last)), 0);
-    // Arc and body in P2's own palette; the sparkles keep the ROM's.
-    game.add_p2_palette_slots(mask(f, usize::from(last)));
+    let v = n_wave.min(e.len().saturating_sub(n_sp));
+    let w = n_fx.min(e.len().saturating_sub(n_sp + v));
+    game.add_p2_tile_slots(mask(f, f + v), 3);
+    game.add_p2_tile_slots(mask(f + v, f + v + w), 2);
+    game.add_p2_tile_slots(mask(f + v + w, usize::from(last)), crate::p2tiles::body_page(game));
+    // Wave, arc and body in P2's own palette; the sparkles keep the ROM's.
+    add_shadow_palette_slots(game, mask(f, usize::from(last)));
     last
 }
 
@@ -264,24 +294,36 @@ fn frame_entries(game: &Game, set: &ZeroSet, obj: &[u8], f: usize, attr: u8) -> 
     set.frames[f].sprites.iter().filter_map(|s| oam_entry(s, (ox, oy + X3_Y_OFFSET), right, attr)).collect()
 }
 
-/// A boss uses its own ROM layout. X actions without a matching boss pose
-/// retain the first (idle) frame.
-fn boss_frame(obj: &[u8], set: &BossSet, tick: u64) -> Option<usize> {
+/// A boss uses its own ROM layout. In the air it takes its jump or fall
+/// pose when it has one; moving on the ground cycles its run poses; other X
+/// actions retain the idle frame.
+pub(crate) fn boss_frame(obj: &[u8], set: &BossSet, tick: u64) -> Option<usize> {
     if obj[0x0E] == 0 || set.frames.is_empty() { return None }
+    let last = set.frames.len() - 1;
     let velocity = i16::from_le_bytes([obj[0x1A], obj[0x1B]]);
-    if velocity != 0 && obj[0x02] != 0x0C && !set.run_frames.is_empty() {
-        return Some(set.run_frames[(tick as usize / 6) % set.run_frames.len()].min(set.frames.len() - 1));
+    let air = match obj[0x02] {
+        0x06 | 0x10 => set.jump_frame.or(set.fall_frame),
+        0x08 | 0x12 => set.fall_frame.or(set.jump_frame),
+        _ => None,
+    };
+    if let Some(f) = air {
+        return Some(f.min(last));
     }
-    Some(set.idle_frame.min(set.frames.len() - 1))
+    let airborne = matches!(obj[0x02], 0x06 | 0x08 | 0x10 | 0x12);
+    if velocity != 0 && obj[0x02] != 0x0C && !airborne && !set.run_frames.is_empty() {
+        return Some(set.run_frames[(tick as usize / 6) % set.run_frames.len()].min(last));
+    }
+    Some(set.idle_frame.min(last))
 }
 
-fn boss_entries(game: &Game, set: &BossSet, obj: &[u8], f: usize, attr: u8) -> Vec<([u8; 4], u8)> {
+
+fn boss_entries(game: &Game, set: &BossSet, obj: &[u8], sprites: &[Sprite], attr: u8) -> Vec<([u8; 4], u8)> {
     let w = game.wram();
     let cam = |a: u32| u16::from_le_bytes([w[ix(a)], w[ix(a) + 1]]);
     let (ox, oy) = screen_origin(obj, cam(ram::CAMERA_X), cam(ram::CAMERA_Y));
     let origin = (ox, oy + set.y_offset);
     let right = obj[0x11] & 0x40 != 0;
-    set.frames[f].sprites.iter().filter_map(|s| oam_entry(s, origin, right, attr)).collect()
+    sprites.iter().filter_map(|s| oam_entry(s, origin, right, attr)).collect()
 }
 
 /// Draw a selected X1 boss in an isolated local-player display slice.
@@ -292,9 +334,9 @@ pub fn emit_boss(game: &mut Game, set: &BossSet, first: u8, pal: u8, page: u8) -
     // the frame, and a saved state can restore older page contents.
     crate::p2tiles::fill_page(game, usize::from(page) * crate::p2tiles::SHADOW_WORDS, &set.page(f));
     let attr = obj[0x11] & 0x30 | (pal & 7) << 1;
-    let entries = boss_entries(game, set, &obj, f, attr);
     let budget = if game.local_players >= 4 { FOUR_PLAYER_ART_SLOTS } else { usize::MAX };
-    let entries = &entries[..entries.len().min(128 - usize::from(first)).min(budget)];
+    let entries = boss_entries(game, set, &obj, &set.sprites_within(f, budget), attr);
+    let entries = &entries[..entries.len().min(128 - usize::from(first))];
     let last = write_entries(game, first, entries);
     let mask = crate::display::slots(first.into(), last.into());
     game.add_p2_tile_slots(mask, page);
@@ -308,6 +350,38 @@ pub fn emit_boss(game: &mut Game, set: &BossSet, first: u8, pal: u8, page: u8) -
 /// greens 12 (`2388`) and 1 (`1284`, the same) and dark 15 (`1084`). No
 /// CGRAM sprite palette is free with co-op on (docs/zero.md).
 pub const SLASH_ON_ZERO: [u8; 16] = [0, 4, 12, 12, 12, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 15];
+
+/// The wave's colours on Zero's palette: it draws with 1 (white) and 6-9
+/// (greens `5394 338C 2308 2288`); Zero's has white 4 (`639C`) and greens
+/// 12 (`2388`) and 1 (`1284`).
+pub const WAVE_ON_ZERO: [u8; 16] = [0, 4, 0, 0, 0, 0, 12, 12, 1, 1, 0, 0, 0, 0, 0, 0];
+/// Shadow page 3 columns of each wave (by player: P1, P2): 6 columns x 2
+/// rows, around the HUD icon's cells 6, 7, 22, 23 (coop_hud.rs).
+const WAVE_COLS: [usize; 2] = [0, 8];
+
+/// Sprites `wave` draws now (slot planning).
+pub fn thrown_len(set: &ZeroSet, wave: &crate::saber::Wave) -> usize {
+    wave.at().and_then(|(_, _, f, _)| set.wave.frames.get(f)).map_or(0, |f| f.sprites.len())
+}
+
+/// `wave` (`which`: the player, 0 P1, 1 P2) as OAM entries at its own place, mirrored
+/// by its facing at the throw; its tiles into shadow page 3 every frame.
+fn wave_entries(game: &mut Game, set: &ZeroSet, wave: &crate::saber::Wave, which: usize, attr: u8) -> Vec<([u8; 4], u8)> {
+    let Some((x, y, f, _)) = wave.at().filter(|w| w.2 < set.wave.frames.len()) else { return Vec::new() };
+    let Some(&col) = WAVE_COLS.get(which) else { return Vec::new() };
+    let page = set.wave.page(f, &WAVE_ON_ZERO);
+    for (slot, t) in page.as_chunks::<32>().0.iter().enumerate().filter(|(s, _)| s % 16 < 6) {
+        crate::p2tiles::fill_page(game, 3 * crate::p2tiles::SHADOW_WORDS + (slot + col) * 16, t);
+    }
+    let w = game.wram();
+    let cam = |a: u32| u16::from_le_bytes([w[ix(a)], w[ix(a) + 1]]);
+    let origin = (x.wrapping_sub(cam(ram::CAMERA_X)) as i16, y.wrapping_sub(cam(ram::CAMERA_Y)) as i16);
+    set.wave.frames[f]
+        .sprites
+        .iter()
+        .filter_map(|s| oam_entry(&Sprite { tile: s.tile + col as u8, ..*s }, origin, wave.right, attr))
+        .collect()
+}
 
 /// Sprites the slash arc of `saber` draws now (upper bound for slot
 /// planning; the name is from the wave it replaced).
@@ -430,7 +504,7 @@ fn emit_p1_boss(game: &mut Game, set: &BossSet) {
     let obj: [u8; ram::X_BLOCK_LEN] = game.wram()[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
     let Some(f) = boss_frame(&obj, set, game.frame_count()) else { return };
     crate::p2tiles::fill_page(game, crate::p2tiles::SHADOW_WORDS, &set.page(f));
-    let entries = boss_entries(game, set, &obj, f, obj[0x11] & 0x3E);
+    let entries = boss_entries(game, set, &obj, &set.frames[f].sprites, obj[0x11] & 0x3E);
     write_p1_entries(game, &entries, 1);
 }
 
@@ -450,7 +524,9 @@ fn p1_pad(game: &mut Game) {
     game.wram_mut()[b + 0x11] = obj[0x11];
     let keep = held & (crate::BTN_START | crate::BTN_SELECT);
     let duration = crate::saber::duration(game, 0);
-    let pad = crate::saber::update_timed(&mut game.coop.p1.saber, &obj, held, duration) | keep;
+    let armed = crate::saber::armed(game, 0);
+    let pad = crate::saber::update_timed(&mut game.coop.p1.saber, &obj, held, duration, armed) | keep;
+    crate::saber::wave_for(game, 0);
     if crate::saber::whoosh(&game.coop.p1.saber) {
         game.coop.sfx[crate::sfx::P1] = 1;
     }
@@ -474,10 +550,11 @@ pub fn emit_p1(game: &mut Game) {
     let obj: [u8; ram::X_BLOCK_LEN] = game.wram()[b..b + ram::X_BLOCK_LEN].try_into().unwrap();
     let saber = game.coop.p1.saber;
     let attr = obj[0x11] & 0x3E;
-    let mut e = match x3_frame(&obj, &saber) {
-        Some(_) => slash_entries(game, &set, &obj, &saber, 1, attr),
-        None => Vec::new(),
-    };
+    let mut e = wave_entries(game, &set, &game.waves[0].clone(), 0, attr);
+    let n_wave = e.len();
+    if x3_frame(&obj, &saber).is_some() {
+        e.extend(slash_entries(game, &set, &obj, &saber, 1, attr));
+    }
     let n_fx = e.len();
     if let Some(f) = x3_frame(&obj, &saber) {
         if game.coop.p1.frame != f as u16 {
@@ -487,14 +564,20 @@ pub fn emit_p1(game: &mut Game) {
         e.extend(frame_entries(game, &set, &obj, f, attr));
     }
     let w = game.wram_mut();
-    let (mut body, mut fx) = (0u128, 0u128);
+    let (mut body, mut fx, mut wave) = (0u128, 0u128, 0u128);
     for (k, (e, h)) in e.iter().enumerate() {
         let slot = usize::from(w[OAM_CURSOR] & 0x7F);
         if slot >= 127 {
             break;
         }
         w[ix(ram::OAM_BUF) + slot * 4..][..4].copy_from_slice(e);
-        *if k < n_fx { &mut fx } else { &mut body } |= 1 << slot;
+        *if k < n_wave {
+            &mut wave
+        } else if k < n_fx {
+            &mut fx
+        } else {
+            &mut body
+        } |= 1 << slot;
         w[OAM_HI_ACC] = w[OAM_HI_ACC] >> 2 | h << 6;
         w[OAM_CURSOR] += 1;
         if w[OAM_CURSOR] & 3 == 0 {
@@ -504,6 +587,7 @@ pub fn emit_p1(game: &mut Game) {
     }
     game.add_p2_tile_slots(body, 1);
     game.add_p2_tile_slots(fx, 2);
+    game.add_p2_tile_slots(wave, 3);
 }
 
 fn write_p1_entries(game: &mut Game, entries: &[([u8; 4], u8)], page: u8) {
@@ -546,6 +630,7 @@ pub fn register_zero_traps(game: &mut Game) {
     game.traps.register(game.hook(crate::coop::INPUT_REMAP), "zero_p1_pad", TrapReturn::Observe, p1_pad);
     game.traps.register(game.hook(HookId::PaletteLoadAt), "zero_p2_flash", TrapReturn::Observe, p2_flash_load);
     game.traps.register(game.hook(HookId::PaletteLoad), "zero_p2_flash_end", TrapReturn::Observe, p2_flash_end);
+    game.traps.register(game.hook(HookId::HadoukenCheck), "zero_no_hadouken", TrapReturn::Observe, no_hadouken);
     crate::p2tiles::register(game);
 }
 
@@ -555,7 +640,25 @@ pub fn register_zero_traps(game: &mut Game) {
 /// loads are skipped (`RTL` by hand): the flash (`$82:8000`, `X = $10`) and
 /// X's own palette back (`$82:8011`, `Y = $100 + weapon`).
 fn in_p2_slice(game: &Game) -> bool {
-    game.coop.enabled && game.isolated_depth > 0 && game.zero_set.is_some() && game.regs().d == ram::X_BASE as u16
+    let own_flash = game.zero_set.is_some() || shadow_is_x(game); // X3 Zero's, or a second X's
+    game.coop.enabled && game.isolated_depth > 0 && own_flash && game.regs().d == ram::X_BASE as u16
+}
+
+/// The Hadouken motion check (`$81:A0EA`, `JSR`; Z set = go): a Zero with
+/// the X3 set has the wave instead (X3 has no Hadouken pose: it would show
+/// his stand frame with X's fireball), so it fails for his block (`RTS`
+/// by hand, A = 1, Z clear, as its first refusal does). A Zero P1 is the
+/// live block outside isolated calls; P2's runs isolated with `D = $0BA8`.
+fn no_hadouken(game: &mut Game) {
+    let p1 = game.coop.p1.on && game.isolated_depth == 0;
+    let p2 = game.current_shadow_is_zero() && in_p2_slice(game);
+    if game.zero_set.is_some() && (p1 || p2) {
+        let mut r = game.regs();
+        r.a = r.a & 0xFF00 | 1;
+        r.p &= !0x02;
+        game.set_regs(r);
+        game.emulate_return(false);
+    }
 }
 
 fn p2_flash_load(game: &mut Game) {
@@ -590,22 +693,99 @@ fn oam_build(game: &mut Game) {
 /// repair).
 pub fn write_palette(game: &mut Game) {
     if !crate::coop_stages::stage_actor_scene(game.wram()) { return; }
+    let mut p1_recoloured = false;
     if let Some(set) = game.player_character(0).and_then(|c| game.boss_sets.get(&c)).cloned() {
         put_palette(game, X_SPRITE_PALETTE, &set.palette);
+        p1_recoloured = true;
     }
     if let Some(z) = game.zero_set.as_ref().filter(|_| game.coop.p1.on && game.player_character(0) == Some(crate::Character::Zero) && !game.boss_sets.contains_key(&crate::Character::Zero)) {
         let b = ix(ram::X_BASE);
         let pal = charge_palette(&game.wram()[b..b + ram::X_BLOCK_LEN], &z.palette);
         put_palette(game, X_SPRITE_PALETTE, &pal);
+        p1_recoloured = true;
     }
+    lend_portrait_palette(game, p1_recoloured);
     if !game.coop.enabled || game.coop.p2_hidden {
         return;
     }
-    let src = sprite_palette_offset(X_SPRITE_PALETTE);
-    let w = game.wram();
-    let x: [u16; 16] = std::array::from_fn(|i| u16::from_le_bytes([w[src + 2 * i], w[src + 2 * i + 1]]));
-    let want = game.current_boss_set().map(|b| b.palette).unwrap_or_else(|| game.zero_set.as_ref().filter(|_| game.current_shadow_is_zero()).map_or_else(|| palette_for(&x), |z| charge_palette(&game.coop.p2, &z.palette)));
+    let want = shadow_palette(game);
     game.set_p2_palette(want);
+}
+
+/// The colours of the shadow player now in `game.coop` (P2, or 3/4 inside
+/// their slices): its boss's, X3 Zero's or `palette_for(X's)`, with the
+/// charge flash.
+fn shadow_palette(game: &Game) -> [u16; 16] {
+    let x = read_palette(game, X_SPRITE_PALETTE);
+    // A second X: its own charge flash over the green tint (its loads into
+    // slot 1 are skipped, `in_p2_slice`); X's colours from slot 1 unless P1
+    // wears another character's there (`coop.p1` is P1's only outside the
+    // P3/P4 slices, so ask the roster).
+    let p1_not_x = game.coop.p1.on || game.player_character(0).is_some_and(|c| c != crate::Character::X);
+    let second_x = || charge_palette(&game.coop.p2, &p2_x_palette(if p1_not_x { &X_ROM } else { &x }));
+    game.current_boss_set().map(|b| b.palette).unwrap_or_else(|| {
+        if shadow_is_x(game) {
+            return second_x();
+        }
+        game.zero_set.as_ref().filter(|_| game.current_shadow_is_zero()).map_or_else(|| palette_for(&x), |z| charge_palette(&game.coop.p2, &z.palette))
+    })
+}
+
+/// Draw `mask`'s slots in the current shadow player's own palette: P2's is
+/// the PPU's ninth ([`write_palette`] fills it), players 3 and 4 have their
+/// own. Their slices used to flag P2's, so a Zero P2 and X P3/P4 wore one
+/// player's colours between them.
+pub fn add_shadow_palette_slots(game: &mut Game, mask: u128) {
+    if game.local_player_index >= 2 {
+        let colours = shadow_palette(game);
+        game.add_local_palette_slots(game.local_player_index, mask, colours);
+    } else {
+        game.add_p2_palette_slots(mask);
+    }
+}
+
+/// X's text-box portrait: enemy-table object id `$3C` with graphics `$6F`
+/// (Zero's own portrait is id `$3C` with graphics `$71`, in palette 6). The
+/// ROM draws it in sprite palette 1, X's, so a P1 wearing other colours in
+/// slot 1 paints X's face in them (green Zero eyes over X's helmet in the
+/// Highway ending).
+const PORTRAIT_ID: u8 = 0x3C;
+const X_PORTRAIT_GFX: u8 = 0x6F;
+/// Where X's portrait goes instead: palette 3, X's charged shots (id `$20`,
+/// `$85:B860`), unused while the game waits on a text box.
+const PORTRAIT_PALETTE: u8 = 3;
+pub const CHARGED_SHOT_ROM: [u16; 16] = [
+    0x35D0, 0x7FFF, 0x5BED, 0x3780, 0x3720, 0x2EA0, 0x7FD8, 0x7FA6, 0x7B1F, 0x7F20, 0x38F9, 0x6E9F, 0x555F,
+    0x7E80, 0x7D80, 0x14A5,
+];
+
+/// While P1 recolours slot 1, move X's portrait to [`PORTRAIT_PALETTE`]
+/// holding X's own colours; once no portrait is up, put the charged-shot
+/// colours back if (and only if) palette 3 still holds X's.
+fn lend_portrait_palette(game: &mut Game, p1_recoloured: bool) {
+    let mut shown = false;
+    if p1_recoloured {
+        let base = ix(ram::ENEMIES_BASE);
+        let w = game.wram_mut();
+        for i in 0..ram::ENEMY_COUNT {
+            let o = base + i * ram::ENEMY_STRIDE;
+            if w[o + ram::ENEMY_ACTIVE] != 0 && w[o + ram::ENEMY_ID] == PORTRAIT_ID && w[o + 0x10] == X_PORTRAIT_GFX {
+                w[o + 0x11] = w[o + 0x11] & !0x0E | PORTRAIT_PALETTE << 1;
+                shown = true;
+            }
+        }
+    }
+    if shown {
+        put_palette(game, PORTRAIT_PALETTE, &X_ROM);
+    } else if read_palette(game, PORTRAIT_PALETTE) == X_ROM {
+        put_palette(game, PORTRAIT_PALETTE, &CHARGED_SHOT_ROM);
+    }
+}
+
+fn read_palette(game: &Game, pal: u8) -> [u16; 16] {
+    let src = sprite_palette_offset(pal);
+    let w = game.wram();
+    std::array::from_fn(|i| u16::from_le_bytes([w[src + 2 * i], w[src + 2 * i + 1]]))
 }
 
 fn put_palette(game: &mut Game, pal: u8, want: &[u16; 16]) {
@@ -627,6 +807,95 @@ fn put_palette(game: &mut Game, pal: u8, want: &[u16; 16]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bosses leap and fall in their own poses; a jump with sideways speed
+    /// used to cycle the run, and a straight jump stood in the idle pose.
+    #[test]
+    fn boss_pose_follows_x_action() {
+        let frame = crate::zero_data::Frame { name: "t", sprites: Vec::new(), tiles_used: Vec::new() };
+        let mut set = BossSet {
+            tiles: Vec::new(), palette: [0; 16], frames: vec![frame; 20],
+            idle_frame: 4, run_frames: vec![12, 13], jump_frame: Some(17), fall_frame: Some(18),
+            y_offset: 0, coverage: Vec::new(),
+        };
+        let obj = |action: u8, velocity: i16| {
+            let mut o = [0u8; 0x40];
+            o[0x0E] = 1;
+            o[0x02] = action;
+            o[0x1A..0x1C].copy_from_slice(&velocity.to_le_bytes());
+            o
+        };
+        assert_eq!(boss_frame(&obj(0x00, 0), &set, 0), Some(4));
+        assert_eq!(boss_frame(&obj(0x04, 0x100), &set, 0), Some(12));
+        assert_eq!(boss_frame(&obj(0x04, 0x100), &set, 6), Some(13));
+        for velocity in [0, 0x100] {
+            assert_eq!(boss_frame(&obj(0x06, velocity), &set, 0), Some(17), "jump");
+            assert_eq!(boss_frame(&obj(0x10, velocity), &set, 0), Some(17), "wall jump");
+            assert_eq!(boss_frame(&obj(0x08, velocity), &set, 0), Some(18), "fall");
+            assert_eq!(boss_frame(&obj(0x12, velocity), &set, 0), Some(18), "wall slide");
+        }
+        // Without air poses: idle in the air, never the run cycle.
+        set.jump_frame = None;
+        set.fall_frame = None;
+        assert_eq!(boss_frame(&obj(0x06, 0x100), &set, 0), Some(4));
+        assert_eq!(boss_frame(&obj(0x08, 0x100), &set, 0), Some(4));
+        let mut gone = obj(0x00, 0);
+        gone[0x0E] = 0;
+        assert_eq!(boss_frame(&gone, &set, 0), None);
+    }
+
+    /// `highway-start` with the Hadouken, full HP 32: down, down-forward,
+    /// forward + Y. X does the Hadouken (action `$42`, its shot id 4); a
+    /// Zero with the X3 set does not (his move is the wave).
+    #[test]
+    fn zero_has_no_hadouken() {
+        let (Some(x1), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
+            return eprintln!("MMX_ROM / MMX_X3_ROM not set; skipping");
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/highway-start.state");
+        let Ok(state) = std::fs::read(st) else { return eprintln!("{st} missing; skipping") };
+        let run = |zero: bool| {
+            let mut g = Game::from_rom(std::fs::read(&x1).unwrap()).unwrap();
+            g.set_x3_rom(&std::fs::read(&x3).unwrap()).unwrap();
+            g.load_state(&state).unwrap();
+            g.set_p1_zero(zero).unwrap();
+            let mut acts = Vec::new();
+            for f in 1..=60 {
+                let w = g.wram_mut();
+                w[ix(ram::HADOUKEN)] = ram::HADOUKEN_BIT;
+                w[ix(ram::MAX_HP)] = 0x20;
+                w[ix(ram::X_HP)] = 0x20;
+                let p1 = match f {
+                    20..=22 => crate::BTN_DOWN,
+                    23..=25 => crate::BTN_DOWN | crate::BTN_RIGHT,
+                    26..=27 => crate::BTN_RIGHT,
+                    28..=29 => crate::BTN_RIGHT | crate::BTN_Y,
+                    _ => 0,
+                };
+                g.step(crate::Pads { p1, p2: 0 });
+                acts.push(g.wram()[ix(ram::X_ACTION)]);
+            }
+            acts
+        };
+        assert!(run(false).contains(&0x42), "X's Hadouken");
+        let z = run(true);
+        assert!(!z.contains(&0x42), "{z:02X?}");
+    }
+
+    /// A second X: only the blue ramp 7-9 changes, to green; `X_ROM` is X's.
+    #[test]
+    fn p2_x_tints_the_blue_ramp() {
+        assert_eq!(X_ROM, X);
+        let p = p2_x_palette(&X);
+        for i in 0..16 {
+            if (7..=9).contains(&i) {
+                let (r, g, b) = rgb(p[i]);
+                assert!(g > b && g > r, "slot {i}: {:04X}", p[i]);
+            } else {
+                assert_eq!(p[i], X[i], "slot {i}");
+            }
+        }
+    }
 
     /// X's stage palette, `$85:B700`.
     const X: [u16; 16] = [
@@ -847,5 +1116,101 @@ mod tests {
             g.step(crate::Pads { p1: if f % 60 < 30 { crate::BTN_RIGHT } else { 0 }, p2: 0 });
             assert_eq!(pal1(&g), want, "frame {f}: CGRAM sprite palette 1 is not Zero's");
         }
+    }
+
+    /// X's portrait in the Highway-ending text box ("I guess I'm not
+    /// powerful enough") with P1 as Zero: drawn in X's own colours from
+    /// palette 3 while Zero keeps slot 1, and palette 3 back to the charged
+    /// shots' once the box closes. X1 Zero (boss set) and X3 Zero both
+    /// recolour slot 1. State `states/highway-x-portrait.state`: the 100%
+    /// movie to frame 6300 (Vile), then B every 30 frames for 2400.
+    #[test]
+    fn zero_p1_x_portrait_keeps_x_colours() {
+        let Some(rom) = std::env::var_os("MMX_ROM") else {
+            return eprintln!("MMX_ROM not set; skipping");
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/highway-x-portrait.state");
+        let Ok(state) = std::fs::read(st) else { return eprintln!("{st} missing; skipping") };
+        let rom = std::fs::read(rom).unwrap();
+        let x3 = std::env::var_os("MMX_X3_ROM").map(|p| std::fs::read(p).unwrap());
+        let setups: [(&str, bool); 2] = [("X1 Zero", false), ("X3 Zero", true)];
+        for (name, use_x3) in setups {
+            let mut g = Game::from_rom(rom.clone()).unwrap();
+            let zero = if use_x3 {
+                let Some(x3) = &x3 else { eprintln!("MMX_X3_ROM not set; {name} skipped"); continue };
+                g.set_x3_rom(x3).unwrap();
+                g.zero_set().unwrap().palette
+            } else {
+                let set = crate::boss_data::extract_x1(&rom, crate::Character::Zero).unwrap();
+                let pal = set.palette;
+                g.set_boss_set(crate::Character::Zero, set);
+                g.set_player_character(0, crate::Character::Zero);
+                pal
+            };
+            g.load_state(&state).unwrap();
+            g.set_p1_zero(true).unwrap();
+            let pal = |g: &Game, n: usize| -> [u16; 16] { std::array::from_fn(|i| g.cgram()[128 + 16 * n + i]) };
+            let mut seen = false;
+            for f in 0..700 {
+                g.step(crate::Pads { p1: if f % 30 < 2 { crate::BTN_B } else { 0 }, p2: 0 });
+                let w = g.wram();
+                let portrait = (0..ram::ENEMY_COUNT).map(|i| ix(ram::ENEMIES_BASE) + i * ram::ENEMY_STRIDE).find(|&o| {
+                    w[o] != 0 && w[o + ram::ENEMY_ID] == PORTRAIT_ID && w[o + 0x10] == X_PORTRAIT_GFX
+                });
+                if let Some(o) = portrait.filter(|_| f > 2) {
+                    seen = true;
+                    assert_eq!(w[o + 0x11] >> 1 & 7, PORTRAIT_PALETTE, "{name} frame {f}: portrait palette");
+                    assert_eq!(pal(&g, 3), X_ROM, "{name} frame {f}: portrait colours");
+                }
+                if f > 2 {
+                    assert_eq!(pal(&g, 1), zero, "{name} frame {f}: slot 1 is not Zero's");
+                }
+            }
+            assert!(seen, "{name}: X's portrait never shown");
+            assert_eq!(pal(&g, 3), CHARGED_SHOT_ROM, "{name}: palette 3 not restored");
+        }
+    }
+
+    /// Four local players, P2 as X3 Zero, P3 and P4 as X, all moving: P2's
+    /// body page (0) holds Zero's frame after every frame. P3/P4's X tile
+    /// streams used to land on the same page, so Zero drew with X's tiles
+    /// (and P3/P4 with Zero's).
+    #[test]
+    fn zero_p2_page_survives_four_players() {
+        let (Some(rom), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
+            return eprintln!("MMX_ROM / MMX_X3_ROM not set; skipping");
+        };
+        let mut g = Game::from_rom(std::fs::read(rom).unwrap()).unwrap();
+        g.set_x3_rom(&std::fs::read(x3).unwrap()).unwrap();
+        g.coop.enabled = true;
+        g.set_local_players(4);
+        crate::coop::register_coop_traps(&mut g).unwrap();
+        g.set_player_character(1, crate::Character::Zero);
+        g.set_player_character(2, crate::Character::X);
+        g.set_player_character(3, crate::Character::X);
+        let playing = |g: &Game| g.wram()[ix(ram::MODE_D2)] == 4 && g.wram()[ix(ram::STAGE_PHASE)] == 4;
+        let mut f = 0usize;
+        while !playing(&g) {
+            f += 1;
+            assert!(f < 4000, "intro stage not reached");
+            let start = f % 200 < 4 && f >= 200;
+            g.step(crate::Pads { p1: if start { crate::BTN_START } else { 0 }, p2: 0 });
+        }
+        let z = g.zero_set().unwrap().clone();
+        let mut checked = 0;
+        for f in 0..300 {
+            let walk = |phase: usize| if (f + phase) % 80 < 40 { crate::BTN_RIGHT } else { crate::BTN_LEFT };
+            g.set_extra_pads([walk(20) | if f % 50 < 10 { crate::BTN_B } else { 0 }, walk(40)]);
+            g.step(crate::Pads { p1: 0, p2: walk(0) });
+            let zf = g.coop.zero_frame;
+            if f < 30 || usize::from(zf) >= z.frames.len() {
+                continue;
+            }
+            let want: Vec<u16> = z.page(usize::from(zf)).chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+            let page = &g.p2_tile_page_mut()[..want.len()];
+            assert_eq!(page, &want[..], "frame {f}: P2's page is not Zero's frame {zf}");
+            checked += 1;
+        }
+        assert!(checked > 200, "Zero's frame checked on {checked} frames");
     }
 }

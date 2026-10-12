@@ -28,8 +28,10 @@ use crate::{Timing, coop, Game, Overclock, Pads, RomError};
 /// CGRAM (`$0300` sprite palette 3 is the game's again) into the PPU, and
 /// the save state's `P2T6` tail carries it. 7: emulated timing changed (APU
 /// clock ratio, IRQ/NMI edges, DMA end alignment, APU port reads, CPU start
-/// delay; docs/oracle.md).
-const NET_REVISION: u64 = 7;
+/// delay; docs/oracle.md). 8: the saber needs the arm part, the wave (the
+/// state's `WAVE` tail), the capsule dialog (docs/zero-upgrades.md), and
+/// the loaded Zero art in the id (sprite packs, docs/sprite-packs.md).
+const NET_REVISION: u64 = 8;
 
 /// Rollback save state: [`Game::save_state`] (co-op state included).
 pub fn net_save(game: &Game) -> Vec<u8> {
@@ -63,9 +65,13 @@ pub fn trapset_id(game: &Game) -> u64 {
     } else {
         Vec::new()
     };
+    // ponytail: the art's Debug text, hashed once per handshake; a digest
+    // field on ZeroSet if this ever shows up in a profile.
+    let art = game.zero_set().map(|s| format!("{s:?}")).unwrap_or_default();
     hash_state(&[
         &NET_REVISION.to_le_bytes(),
         &bytes,
+        art.as_bytes(),
         &[u8::from(game.zero_set().is_some()), u8::from(game.p1_zero()), game.timing() as u8, game.overclock() as u8],
         &wide,
     ])
@@ -1085,6 +1091,9 @@ mod tests {
         let plain = trapset_id(&g);
         g.set_zero_set(Some(ZeroSet::default()));
         assert_ne!(trapset_id(&g), plain);
+        let first_art = trapset_id(&g);
+        g.set_zero_set(Some(ZeroSet { palette: [1; 16], ..Default::default() }));
+        assert_ne!(trapset_id(&g), first_art, "a different pack must refuse to connect");
     }
 
     #[test]

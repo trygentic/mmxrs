@@ -1,0 +1,14 @@
+[package]
+name = "mmx-bridge"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Frame-stepping game bridge for external drivers: NDJSON over stdio (load/save state, step with pads, typed observation)"
+publish = false
+
+[dependencies]
+mmx-core = { path = "../../crates/mmx-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+png = "0.18" # frame_png op (video renders of recorded runs)

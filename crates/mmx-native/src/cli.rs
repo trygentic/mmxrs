@@ -5,9 +5,10 @@ use mmx_core::{netgame::Mode, Character};
 pub const DEFAULT_MOVIE_COOP_DELAY: u16 = 20;
 
 pub const USAGE: &str = "\
-usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [--coop-local|--players 1..4] [--vs] [--vs-bots] [--vs-stage ID] [--pads]
+usage: mmxrs [--rom PATH] [--x3-rom PATH] [--sprite-pack PATH] [--zero] [--scale N] [--fullscreen] [--show-fps] [--coop-local|--players 1..4] [--vs] [--vs-bots] [--vs-stage ID] [--pads]
              [--p1-character ID] [--p2-character ID] [--p3-character ID] [--p4-character ID]
              [--dynamic-lighting] [--charge-effects] [--bone-sheets DIR] [--vile-sprite PNG]
+             [--pad-map 'South=B,East=A,...'] [--timing ntsc|pal]
              [--demo-bots] [--showcase-characters] [--demo-survival]
              [--movie PATH.bk2|PATH.lsmv|PATH.smv] [--movie-coop-delay N] [--movie-smart]
              [--widescreen off|16:10|16:9|21:9|auto|N] [--wide-gameplay] [--overclock off|1.5|2]
@@ -17,7 +18,8 @@ usage: mmxrs [--rom PATH] [--x3-rom PATH] [--zero] [--scale N] [--fullscreen] [-
        mmxrs --headless --frames N [--rom PATH] [--dump-at F=out.png,...]
              [--hold P1MASK] [--p2-hold MASK] [--coop-local]
 ROM defaults to $MMX_ROM. Zero uses X1 ROM art by default; explicit --x3-rom
-(Mega Man X3 USA) selects X3 Zero art and saber hooks. Masks are
+(Mega Man X3 USA) selects X3 Zero art and saber hooks; --sprite-pack replaces Zero's
+body art with a JSON pack (docs/sprite-packs.md). Masks are
 SNES pad words (hex 0x.. or decimal).
 --widescreen draws extra scenery left and right (N = 8-px tiles per side, 0-24; auto follows
 the window's shape so a maximized or fullscreen window is filled; F10 cycles the presets and
@@ -25,7 +27,12 @@ auto; docs/widescreen.md). --wide-gameplay spawns enemies at the wide edges (136
 past the original ones whatever the preset; changes the game, online both players need it).
 --overclock runs the SNES CPU 1.5x or 2x as fast, which removes the game's own slowdown with
 many enemies (changes the game: online both players need the same); default 2, off restores
-the original slowdown. --pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
+the original slowdown. --show-fps (or F2 in game) draws frames per second and % of full speed in the corner.
+--pads (or MMX_PAD_DEBUG=1) logs connected gamepads and every pad bit change to stderr.
+--pad-map rebinds gamepad buttons: comma-separated PAD=BUTTON with gilrs pad names (South, East,
+West, North, LeftTrigger, RightTrigger, LeftTrigger2, RightTrigger2, Start, Select, DPadUp/Down/Left/Right,
+LeftThumb, RightThumb) and SNES buttons (A, B, X, Y, L, R, Start, Select, Up, Down, Left, Right, or none);
+unlisted pad buttons keep the default positional layout.
 --demo-bots enables four local players, drives a repeatable Highway run, and restores critically low health for recording.
 --movie replays recorded inputs from power-on (overclock off by default).
 --movie-coop-delay N enables four players copying P1 at 0/N/2N/3N frame delays during gameplay.
@@ -36,7 +43,7 @@ It resynchronizes after hits (--movie-route is an alias); safety maneuvers can t
 and restarts each round after a 90-frame winner display. Also supports --headless --frames N.
 --bone-sheets loads private Blender or bone animation sprites; high-resolution packs preserve game size.
 Vile uses the private on-foot PNG at roms/derived/bone_sheets/user_sources/vile_idle.png
-when no animated Vile sheet is loaded; --vile-sprite overrides its location.
+when no animated Vile sheet is loaded (ROM poses without it); --vile-sprite overrides its location.
 Online: both players pass the same --mode (default rollback). --delay is the input delay
 in frames, host's wins: rollback 0-3 (default 2), lockstep 0-8 (default 3). On a
 same-region link --mode lockstep --delay 3 plays smoothest; across continents use
@@ -49,6 +56,8 @@ pub struct Args {
     pub rom: Option<String>,
     /// Mega Man X3 image for P2's Zero art (docs/zero.md "Playing as Zero").
     pub x3_rom: Option<String>,
+    /// `--sprite-pack`: custom Zero body art (docs/sprite-packs.md).
+    pub sprite_pack: Option<String>,
     /// `--zero`: player 1 plays as Zero (needs the X3 ROM).
     pub zero: bool,
     pub scale: u32,
@@ -66,6 +75,8 @@ pub struct Args {
     pub characters: [Character; 4],
     pub dynamic_lighting: bool,
     pub charge_effects: bool,
+    /// `--show-fps` / F2: fps and % of full speed drawn over the picture.
+    pub show_fps: bool,
     /// Private Bone Animation Editor sheet pack root (optional).
     pub bone_sheets: Option<String>,
     /// Override for the private, transparent on-foot Vile idle crop.
@@ -78,6 +89,8 @@ pub struct Args {
     pub showcase_characters: bool,
     /// `--pads`: log gamepads and pad bit changes to stderr.
     pub pads: bool,
+    /// `--pad-map`: gamepad button rebinding spec (see `keys::PadMap::parse`).
+    pub pad_map: Option<String>,
     pub headless: bool,
     pub frames: u64,
     /// (frame number after stepping, png path)
@@ -165,6 +178,7 @@ impl Default for Args {
         Args {
             rom: None,
             x3_rom: None,
+            sprite_pack: None,
             zero: false,
             scale: 3,
             fullscreen: false,
@@ -176,12 +190,14 @@ impl Default for Args {
             characters: [Character::X, Character::Zero, Character::X, Character::X],
             dynamic_lighting: false,
             charge_effects: false,
+            show_fps: false,
             bone_sheets: None,
             vile_sprite: None,
             demo_bots: false,
             demo_survival: false,
             showcase_characters: false,
             pads: false,
+            pad_map: None,
             headless: false,
             frames: 0,
             dump_at: Vec::new(),
@@ -228,6 +244,7 @@ pub fn parse<I: IntoIterator<Item = String>>(
         match flag.as_str() {
             "--rom" => a.rom = Some(val("--rom")?),
             "--x3-rom" => a.x3_rom = Some(val("--x3-rom")?),
+            "--sprite-pack" => a.sprite_pack = Some(val("--sprite-pack")?),
             "--scale" => {
                 let v = val("--scale")?;
                 a.scale = v.parse().map_err(|_| format!("bad --scale {v:?}"))?;
@@ -254,12 +271,14 @@ pub fn parse<I: IntoIterator<Item = String>>(
             }
             "--dynamic-lighting" => a.dynamic_lighting = true,
             "--charge-effects" => a.charge_effects = true,
+            "--show-fps" => a.show_fps = true,
             "--bone-sheets" => a.bone_sheets = Some(val("--bone-sheets")?),
             "--vile-sprite" => a.vile_sprite = Some(val("--vile-sprite")?),
             "--demo-bots" => a.demo_bots = true,
             "--demo-survival" => a.demo_survival = true,
             "--showcase-characters" => a.showcase_characters = true,
             "--pads" => a.pads = true,
+            "--pad-map" => a.pad_map = Some(val("--pad-map")?),
             "--headless" => a.headless = true,
             "--frames" => {
                 let v = val("--frames")?;
@@ -527,7 +546,8 @@ mod tests {
 
     #[test]
     fn full_windowed() {
-        let a = p("--rom x.sfc --x3-rom x3.sfc --scale 5 --fullscreen --coop-local --zero --pads").unwrap();
+        let a = p("--rom x.sfc --x3-rom x3.sfc --sprite-pack zero.json --scale 5 --fullscreen --coop-local --zero --pads").unwrap();
+        assert_eq!(a.sprite_pack.as_deref(), Some("zero.json"));
         assert!(a.zero && a.pads);
         assert_eq!(a.rom.as_deref(), Some("x.sfc"));
         assert_eq!(a.x3_rom.as_deref(), Some("x3.sfc"));

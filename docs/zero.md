@@ -735,15 +735,21 @@ T=$(seq 10 40 1190 | awk '{printf "8000@%d:20,0040@%d:2,", $1, $1+8}' | sed 's/,
 x --load states/hw-bee2.state --frames 1200 --out target/z/bee --at 50-1200/50 --refill --coop --p2tap "$T" --wram
 ```
 
-### The green wave (not used by the swing)
+### The green wave (Zero's Hadouken, X3 only)
 
-**Not drawn and not thrown any more**: the user meant the slash arc above,
-not a projectile. The extraction (`ZeroSet.wave`, `x3_wave_step`) and its
-test stay. ponytail: the wave exists in the ROM (set `$4D`, below) and
-could become a charged-saber move later (X3 throws it on the charge
-release, act `$4A`/`$4E`).
+**Update 2026-10-11: back, as the Armadillo capsule's upgrade**
+(docs/zero-upgrades.md "The wave"). The plain swing draws the slash arc
+only, as before; a swing **started with a full charge while the Hadouken
+is owned** (`$1F7E` bit 7) consumes the charge and throws the wave on the
+arc's first frame. Its shot is the Hadouken's id 4 and pierces like the
+Hadouken's; the ROM's Hadouken motion check fails for a Zero with the X3
+set. State `Game::waves` (the state's `WAVE` tail), tiles in shadow page 3 (columns 0-5 P1,
+8-13 P2, around the HUD icon). Tests `saber_wave_spawns_on_arc_and_flies`,
+`saber_wave_hits_spiky_from_afar`, `saber_no_wave_without_hadouken`,
+`zero_has_no_hadouken`.
 
-What follows is the earlier port, kept for the measurements.
+The user had meant the slash arc above, not a projectile, so the first
+port (below) was removed from the plain swing.
 
 **In X3** (`states/x3-zero-stand.state`, hold Y 150 frames, release; states
 `x3-zero-wave` = that run's frame 173, wave in flight):
@@ -775,7 +781,7 @@ with a crescent head and a ringed tail, not the fan sheet's 48 x 32 arcs.
 Test `zero_data_extract_x3_wave` (decode == VRAM `$6380`/`$6480` in
 `x3-zero-wave`).
 
-**In the port (removed).** `Saber.wave` (`saber.rs`, so rollback carries it): the
+**In the first port (since replaced by the gated one above).** `Saber.wave` (`saber.rs`, so rollback carries it): the
 first frame of the arc pose (88 / 97) throws it from Zero's drawn origin,
 then it follows `x3_wave_step` for `WAVE_FRAMES` = 31 frames, past the end
 of the swing; a new arc replaces it. Drawn by `zero::wave_entries` in front
@@ -791,7 +797,7 @@ five colours map onto it (`zero::WAVE_ON_ZERO`: 1 -> 4 `639C`, 6/7 -> 12
 `2388`, 8/9 -> 1 `1284`) and it draws with its wearer's palette (P1: 1, P2:
 its own). No CGRAM writes.
 
-**Damage (removed).** The wave was its own shot (`saber::wave_shot_bytes`, slot
+**Damage (first port; now id 4, piercing).** The wave was its own shot (`saber::wave_shot_bytes`, slot
 `Saber::wave_slot`, same insert/take-back as the blade's): id 2, position =
 the box centre, box `$86:BDC1` (`00 00 04 04`) on t0 and `$86:D381` (`00 00
 10 09`, X3's 32 x 18) after. One hit per swing, blade and wave together:
@@ -970,6 +976,9 @@ xtask dump --load states/hw-spiky.state --zero --frames 150 --out target/sfx/dum
 
 ## Playing as Zero
 
+Custom body art for Zero: a sprite pack (`--sprite-pack`, docs/sprite-packs.md)
+takes the X3 set's place (body art only: no slash arc, wave or sounds).
+
 Supply your own Mega Man X3 (USA) image (CRC32 `FA0FE671`, copier header
 ok); it is only read, never stored, and like the X1 ROM it stays out of the
 repository:
@@ -982,8 +991,10 @@ repository:
 
 What changes: P2 is drawn with X3 Zero's frames and palette (walk, jump,
 dash, wall, hurt, beam-in, ...) instead of X's tiles in Zero's colours, and
-P2's X swings the saber (above). Physics, HP, hit boxes and the buster are
-X's. Netplay: both peers must load it; the handshake id includes "X3 loaded",
+P2's X swings the saber (above) once the arm part is found: **the Z-Saber
+is the arm part** (Flame Mammoth's capsule, `$1F99` bit `$02`, shared by
+both players, carried by the password; docs/zero-upgrades.md). Before it X
+does nothing. Physics, HP, hit boxes and the buster are X's. Netplay: both peers must load it; the handshake id includes "X3 loaded",
 so a mismatch refuses to start (docs/netplay.md).
 
 ### The HUD icon
@@ -1059,12 +1070,31 @@ Controls:
 | P2 keyboard | WASD | G | H | F | T |
 | pad | d-pad | B (South) | A (East) | Y (West) | X (North) |
 
+The saber column needs the arm part (`$1F99 & $02`); the dash needs the
+legs (`$08`), as for X. Scripted runs from states without the parts poke
+them: `--poke 7E1F99=02@1-N` (or `0A` for both). With the Hadouken
+(Armadillo's hidden capsule, `$1F7E` bit 7) a swing started on a full
+charge (hold buster to the full charge, then saber) throws the green wave
+instead of the charged shot; a Zero with the X3 ROM has no Hadouken.
+Dr. Light's capsule dialog has Zero's own lines (docs/zero-upgrades.md).
+
+**X's text-box portrait.** X's face in a text box ("I guess I'm not powerful
+enough" in the Highway ending) is an enemy-table object, id `$3C`, graphics
+`$6F`, `+11 = $72`: sprite palette 1, X's. A P1 who wears other colours in
+slot 1 (Zero, X1 or X3, or a boss) painted it in theirs: X's helmet in Zero's
+red with his green gem colour over the face. `zero::write_palette` moves that
+object to palette 3 (X's charged shots, idle while a text box waits) holding
+X's own colours (`X_ROM`), and writes the charged-shot colours (`$85:B860`)
+back once no portrait is up and palette 3 still holds X's. Test
+`zero_p1_x_portrait_keeps_x_colours` (`states/highway-x-portrait.state`: the
+100% movie to frame 6300, then B every 30 frames for 2400).
+
 Checked on the real ROMs (PNG strips in `target/z1/`, `x` = `xtask dump --x3 PATH`):
 
 ```
 x --load states/highway-start.state --frames 130 --out target/z1/walk --at 10,40,58,96,110,120 --hold 0100 --p1tap 8000@90:20 --zero   # stand, walk, jump, fall; in front of the truck
 x --load states/highway-start.state --frames 120 --out target/z1/act --at 44,48,62,66,100,118 --poke 7E1F99=08@1-120 --p1tap 0080@38:12,4000@60:1,4000@70:48 --zero   # dash, buster from the cannon, charge
 x --load states/hw-c.state --frames 440 --out target/z1/wall --at 320-440/8 --hold 0100 --p1tap "$T" --refill --zero   # T = coop-qa's m5 route: wall slide 39/40, kick 43
-x --load states/hw-spiky.state --frames 50 --out target/z1/saber26 --at 24-50/2 --p1tap 0100@1:26,0040@28:2 --zero   # arc (88) takes the Spiky 2 -> 1 (test saber_p1_hits_spiky)
-x --load states/highway-start.state --frames 130 --out target/z1/coop --at 30,60,100,120 --hold 0100 --p2-hold 0100 --p2tap 8000@90:20,0040@112:2 --p1tap 0040@50:2 --coop --zero   # both Zeros, both sabers
+x --load states/hw-spiky.state --frames 50 --out target/z1/saber26 --at 24-50/2 --poke 7E1F99=02@1-50 --p1tap 0100@1:26,0040@28:2 --zero   # arc (88) takes the Spiky 2 -> 1 (test saber_p1_hits_spiky)
+x --load states/highway-start.state --frames 130 --out target/z1/coop --at 30,60,100,120 --hold 0100 --p2-hold 0100 --poke 7E1F99=02@1-130 --p2tap 8000@90:20,0040@112:2 --p1tap 0040@50:2 --coop --zero   # both Zeros, both sabers
 ```

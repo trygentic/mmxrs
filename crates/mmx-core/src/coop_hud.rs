@@ -250,6 +250,10 @@ fn hud(game: &mut Game) {
     let base = if c.p2_oam_count > 0 { c.p2_oam_base } else { used.min(start) };
     let bar = bar_entries(game, hp);
     let pal = game.coop.zero_palette;
+    let zero = game.player_character(1) == Some(crate::Character::Zero);
+    // A second X: X's emblem in the HUD palette (2), whatever P1's slot 0
+    // wears (a Zero P1's is palette 1).
+    let icon_pal = if zero { pal } else { 2 };
     // Down marker: the bar's icon at the fall spot, blinking.
     let marker = match game.coop.revive.spot {
         Some((sx, sy)) if game.coop.down_frames > 0 && game.coop.down_frames & 8 == 0 => {
@@ -273,24 +277,24 @@ fn hud(game: &mut Game) {
             e[3] ^= u8::from(k > 0) << 7;
         }
         // The pieces keep X's attr (`$34`: the HUD palette, 2), so they are
-        // X's colours; only the icon is Zero's.
+        // X's colours; only the icon is Zero's (a second X keeps X's emblem).
         if k == 0 {
-            coop::set_oam_palette(e, pal);
+            coop::set_oam_palette(e, icon_pal);
         }
     }
     let e = &mut w[oam + (start + BAR_SLOTS) * 4..][..4];
     match marker {
         Some(m) => {
             e.copy_from_slice(&m);
-            coop::set_oam_palette(e, pal);
+            coop::set_oam_palette(e, icon_pal);
         }
         None => e[1] = OAM_HIDDEN_Y,
     }
     let icons = 1 << start | u128::from(marker.is_some()) << (start + BAR_SLOTS);
-    if put_icon(game) {
+    if zero && put_icon(game) {
         game.add_p2_tile_slots(icons, ICON_PAGE);
+        game.add_p2_palette_slots(icons);
     }
-    game.add_p2_palette_slots(icons);
     // Widescreen: the bar goes to the wide picture's left edge with X's (the
     // marker stays where P2 fell).
     game.margin.p2_bar = crate::display::slots(start, start + BAR_SLOTS);

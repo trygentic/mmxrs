@@ -3243,6 +3243,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmx-bridge"
+version = "0.1.0"
+dependencies = [
+ "mmx-core",
+ "png",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "mmx-core"
 version = "0.1.0"
 dependencies = [
@@ -3251,6 +3262,8 @@ dependencies = [
  "getrandom 0.4.3",
  "jgenesis-common",
  "mmx-net",
+ "serde",
+ "serde_json",
  "sha2",
  "snes-config",
  "snes-core",

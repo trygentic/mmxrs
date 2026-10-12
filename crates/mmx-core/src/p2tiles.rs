@@ -95,14 +95,28 @@ fn stream_exit(game: &mut Game) {
         .map(|i| decode_entry(&w[DMA_QUEUE + i..DMA_QUEUE + i + 8]))
         .collect();
     let window = game.obsel().0.wrapping_add(u16::from(w[ix(ram::X_BASE) + OFF_TILE_BASE]) * 16);
+    let page = usize::from(body_page(game)) * SHADOW_WORDS;
     let w = game.wram_mut();
     w[DMA_INDEX] = start;
     w[DMA_BUDGET..DMA_BUDGET + 2].copy_from_slice(&budget.to_le_bytes());
     for e in entries {
         if let Some(o) = page_offset(&e, window).filter(|_| !zero) {
             let bytes: Vec<u8> = (0..u32::from(e.size)).map(|i| game.rom_read(e.src + i)).collect();
-            fill_page(game, o, &bytes);
+            fill_page(game, page + o, &bytes);
         }
+    }
+}
+
+/// The shadow page the current local player's body draws from: P2's is
+/// page 0, players 3 and 4 have pages 4 and 5, whatever the character (X's
+/// streamed tiles, X3 Zero's frames, a boss's). One shared page let the
+/// last slice's tiles show on every player flagged for it: four players
+/// with a Zero P2 drew him with P3/P4's X tiles.
+pub fn body_page(game: &Game) -> u8 {
+    match game.local_player_index {
+        2 => 4,
+        3 => 5,
+        _ => 0,
     }
 }
 
@@ -135,7 +149,8 @@ pub fn mark_p2_slots(game: &mut Game) {
             mask |= 1 << slot;
         }
     }
-    game.add_p2_tile_slots(mask, 0);
+    let page = body_page(game);
+    game.add_p2_tile_slots(mask, page);
 }
 
 #[cfg(test)]

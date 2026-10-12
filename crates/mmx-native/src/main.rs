@@ -17,6 +17,8 @@ mod movie_route;
 #[cfg(test)]
 mod movie_route_validation;
 mod netplay;
+mod osd;
+mod pad_slots;
 mod video;
 mod vs_select;
 mod vs_bots;
@@ -41,7 +43,7 @@ fn main() {
     });
     // X3 Zero is an explicit opt-in; an inherited environment variable must
     // not silently replace the X1 art selected in the launcher.
-    let x3 = args.x3_rom.clone().map(|p| {
+    let mut x3 = args.x3_rom.clone().map(|p| {
         let bytes = std::fs::read(&p).unwrap_or_else(|e| {
             eprintln!("{p}: {e}");
             std::process::exit(1);
@@ -52,6 +54,14 @@ fn main() {
             std::process::exit(1);
         })
     });
+    // A sprite pack is Zero's art like the X3 set is (same handshake field),
+    // minus X3's effects (slash arc, wave, sounds, HUD icon).
+    if let Some(p) = &args.sprite_pack {
+        x3 = Some(std::fs::read(p).map_err(|e| e.to_string()).and_then(|b| mmx_core::zero_data::import_sprite_pack(&b)).unwrap_or_else(|e| {
+            eprintln!("{p}: {e}");
+            std::process::exit(2);
+        }));
+    }
     let net = args.net.as_ref().map(|(host, room)| {
         netplay::connect(&rom, *host, room, &args.signal, args.ice.as_deref(), args.mode, args.net_delay(), args.prediction, x3.as_ref(), args.zero, args.timing, args.wide_gameplay, args.overclock(), args.net_record.as_deref())
             .unwrap_or_else(|e| {
@@ -123,10 +133,10 @@ fn main() {
     if (args.showcase_characters || args.vs_mode || args.characters[..active_count].contains(&mmx_core::Character::Vile))
         && !game.has_bone_sheet(mmx_core::Character::Vile) {
         let sprite = bone_sheets::vile_sprite_path(args.vile_sprite.as_deref(), std::path::Path::new(&rom_path));
-        bone_sheets::install_static_vile(&mut game, &sprite).unwrap_or_else(|e| {
-            eprintln!("Vile's on-foot sprite is required at {}: {e}", sprite.display());
-            std::process::exit(2);
-        });
+        // Optional art: without the crop Vile keeps his X1 ROM poses.
+        if let Err(e) = bone_sheets::install_static_vile(&mut game, &sprite) {
+            eprintln!("vile: no on-foot sprite at {} ({e}); using his ROM poses", sprite.display());
+        }
     }
     game.coop.enabled = args.coop_local || args.players > 1 || net.is_some();
     game.set_local_players(usize::from(args.players.max(if args.coop_local { 2 } else { 1 })));

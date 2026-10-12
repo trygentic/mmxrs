@@ -81,7 +81,26 @@ pub const SUB_TANKS: u32 = 0x7E1F83;
 pub const SUB_TANK_COUNT: usize = 4;
 /// Weapon `i` energy at `WEAPON_ENERGY + 2 * i`.
 pub const WEAPON_ENERGY: u32 = 0x7E1F88;
+/// Armour parts, one shared byte (password-encoded, `$80:F065`/`$80:F20D`;
+/// the high nibble holds the sub-tanks). Granted by the capsule (`$87:D0AF`:
+/// `TSB` of `$86:D379[$86:D306[level]]`). Measured by poke (docs/zero-upgrades.md).
 pub const ARMOR: u32 = 0x7E1F99;
+/// Helmet (Storm Eagle's capsule). unverified by poke: from the capsule's
+/// level -> bit table (the helmet text, message `$0C`, is level 5's) and
+/// the terrain code's `BIT #$01` (`$81:9EA5`).
+pub const ARMOR_HEAD: u8 = 0x01;
+/// Arm (Flame Mammoth's): the charge reaches the third level (`+5B = 1`) only
+/// with it (`$81:97DD BIT #$02`); a Zero's Z-Saber.
+pub const ARMOR_ARM: u8 = 0x02;
+/// Body (Sting Chameleon's): contact damage halved, rounded up (`$84:9D44 BIT #$04`).
+pub const ARMOR_BODY: u8 = 0x04;
+/// Legs (Chill Penguin's): the dash.
+pub const ARMOR_LEGS: u8 = 0x08;
+/// Bit 7: the Hadouken (granted by Armored Armadillo's hidden capsule,
+/// `$87:D0D9`; read by the motion check `$81:A0FC`; in the password).
+/// Bits 0-6: that capsule's appearance counter (`$87:CA8D`, not saved).
+pub const HADOUKEN: u32 = 0x7E1F7E;
+pub const HADOUKEN_BIT: u8 = 0x80;
 pub const HEART_TANKS: u32 = 0x7E1F9C;
 pub const BOSS_PTR: u32 = 0x7E1F0E;
 pub const OAM_BUF_LEN: usize = 544;

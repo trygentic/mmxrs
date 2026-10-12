@@ -329,8 +329,11 @@ fn save_state_carries_coop_state() {
     assert!(Game::state_info(old).unwrap().coop.is_none());
     fresh.load_state(old).unwrap();
     assert_eq!(fresh.coop, CoopState { enabled: true, ..CoopState::default() });
-    // A cut tail is an error, not a silent default.
-    assert!(fresh.load_state(&s[..s.len() - 1]).is_err());
+    // A cut tail is an error, not a silent default: the `COOP` tail, before
+    // the `WAVE` suffix (waves, their `u32` length, the magic).
+    assert!(s.ends_with(b"WAVE"));
+    let n = u32::from_le_bytes(s[s.len() - 8..s.len() - 4].try_into().unwrap()) as usize;
+    assert!(fresh.load_state(&s[..s.len() - 8 - n - 1]).is_err());
 }
 
 #[test]

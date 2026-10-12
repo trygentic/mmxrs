@@ -39,6 +39,7 @@ fn main() -> eframe::Result {
                 roms: Default::default(),
                 child: None,
                 status: String::new(),
+                failure: None,
                 log: Vec::new(),
                 log_at: Instant::now(),
             }))
@@ -72,8 +73,15 @@ struct App {
     roms: [RomCheck; 2],
     child: Option<Child>,
     status: String,
+    /// Last run's failure: plain explanation (if one matched) and exit status.
+    failure: Option<Failure>,
     log: Vec<String>,
     log_at: Instant,
+}
+
+struct Failure {
+    explanation: Option<String>,
+    exit: String,
 }
 
 fn log_path() -> PathBuf {
@@ -119,7 +127,8 @@ fn rom_row(ui: &mut egui::Ui, label: &str, path: &mut String, check: &mut RomChe
 
 impl App {
     fn launch(&mut self) {
-        let args = match build_args(&self.s) {
+        self.failure = None;
+        let args = match build_args(&self.s).and_then(|a| preflight(&self.s).map(|()| a)) {
             Ok(a) => a,
             Err(e) => return self.status = e,
         };
@@ -128,9 +137,20 @@ impl App {
         match spawn(&bin, &args, &log_path()) {
             Ok(c) => {
                 self.status = format!("running: {}", format_command(&bin.to_string_lossy(), &args));
+                self.log.clear();
                 self.child = Some(c);
             }
-            Err(e) => self.status = format!("could not start {}: {e}", bin.display()),
+            Err(e) => {
+                self.status.clear();
+                self.failure = Some(Failure {
+                    explanation: Some(format!(
+                        "Could not start the game program {} ({e}). Keep mmxrs{} in the same folder as the launcher.",
+                        bin.display(),
+                        std::env::consts::EXE_SUFFIX
+                    )),
+                    exit: String::new(),
+                });
+            }
         }
     }
 
@@ -139,8 +159,20 @@ impl App {
             match c.try_wait() {
                 Ok(None) => ctx.request_repaint_after(Duration::from_millis(500)),
                 Ok(Some(st)) => {
-                    self.status = format!("game exited ({st})");
                     self.child = None;
+                    if st.success() {
+                        self.status = "game closed".into();
+                    } else {
+                        let text = std::fs::read_to_string(log_path()).unwrap_or_default();
+                        self.status.clear();
+                        self.failure = Some(Failure {
+                            explanation: diagnose(&text, &self.s),
+                            exit: match st.code() {
+                                Some(code) => format!("The game stopped with exit code {code}."),
+                                None => format!("The game stopped ({st})."),
+                            },
+                        });
+                    }
                 }
                 Err(e) => {
                     self.status = format!("lost the game process: {e}");
@@ -150,7 +182,8 @@ impl App {
             if self.log_at.elapsed() > Duration::from_millis(400) || self.child.is_none() {
                 self.log_at = Instant::now();
                 let text = std::fs::read_to_string(log_path()).unwrap_or_default();
-                self.log = last_lines(&text, 8).into_iter().map(String::from).collect();
+                let n = if self.failure.is_some() { 14 } else { 8 };
+                self.log = last_lines(&text, n).into_iter().map(String::from).collect();
             }
         }
     }
@@ -209,7 +242,43 @@ impl App {
             .on_hover_text("enemies spawn, act and leave 136-160 px further out on both sides, whatever the widescreen setting; online, both players must tick it");
         ui.checkbox(&mut s.dynamic_lighting, "Multiply style dynamic lighting");
         ui.checkbox(&mut s.charge_effects, "Buster charge lighting and particles");
-        ui.checkbox(&mut s.bone_sheets, "60 FPS generated character sprites");
+        ui.collapsing("Controller buttons", |ui| {
+            ui.weak("Pad buttons are positional (South is the bottom face button). \"default\" keeps the game's layout, \"none\" unbinds.");
+            ui.weak("The mapping applies to every player's controller, P1 to P4. Each controller joins on its first press as the next player the keyboard isn't playing.");
+            egui::Grid::new("pad-map").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+                for pad in mmx_launcher::PAD_BUTTONS {
+                    ui.label(pad);
+                    let current = s.pad_map.get(pad).cloned().unwrap_or_default();
+                    let mut chosen = current.clone();
+                    egui::ComboBox::from_id_salt(("pad", pad))
+                        .selected_text(if chosen.is_empty() { "default" } else { chosen.as_str() })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut chosen, String::new(), "default");
+                            for b in mmx_launcher::GAME_BUTTONS {
+                                ui.selectable_value(&mut chosen, b.to_string(), b);
+                            }
+                            ui.selectable_value(&mut chosen, "none".to_string(), "none");
+                        });
+                    if chosen != current {
+                        if chosen.is_empty() {
+                            s.pad_map.remove(pad);
+                        } else {
+                            s.pad_map.insert(pad.to_string(), chosen);
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.horizontal(|ui| {
+                for (name, map) in mmx_launcher::pad_map_presets() {
+                    if ui.button(name).clicked() {
+                        s.pad_map = map;
+                    }
+                }
+            });
+        });
+        ui.checkbox(&mut s.bone_sheets, "60 FPS generated character sprites")
+            .on_hover_text("Needs a separate sprite pack folder, not included in the download. Without one the game uses the ROM sprites.");
         if s.bone_sheets {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut s.bone_sheets_path).desired_width(ui.available_width() - 92.0));
@@ -219,7 +288,16 @@ impl App {
                     }
                 }
             });
-            ui.weak("Blender or bone animation sheet pack. Other characters keep their existing art; missing clips use the pack's idle pose.");
+            match bone_pack(&s.bone_sheets_path) {
+                Ok(found) => {
+                    let names: Vec<_> = found.iter().map(|c| c.label()).collect();
+                    ui.weak(format!("Pack found: {} characters ({}).", found.len(), names.join(", ")))
+                        .on_hover_text("Other characters keep their ROM art; missing clips use the pack's idle pose.");
+                }
+                Err(e) => {
+                    ui.colored_label(ui.visuals().warn_fg_color, e);
+                }
+            }
         }
         ui.separator();
 
@@ -232,8 +310,14 @@ impl App {
         if !s.online {
             ui.add(egui::Slider::new(&mut s.local_players, 1..=4).text("local players"));
             s.coop_local = s.local_players > 1;
-            ui.checkbox(&mut s.vs_mode, "VS arena match")
-                .on_hover_text("Choose 2-4 fighters and an arena in a Street Fighter style selection screen.");
+            let vs_missing = Character::ALL.iter().find_map(|&c| character_unavailable(s, c));
+            if vs_missing.is_some() { s.vs_mode = false; }
+            ui.add_enabled(vs_missing.is_none(), egui::Checkbox::new(&mut s.vs_mode, "VS arena match"))
+                .on_hover_text("Choose 2-4 fighters and an arena in a Street Fighter style selection screen.")
+                .on_disabled_hover_text(format!(
+                    "VS mode offers every fighter, including Bass and Proto Man. {}",
+                    vs_missing.unwrap_or_default()
+                ));
             if s.vs_mode && s.local_players < 2 {
                 s.local_players = 2;
                 s.coop_local = true;
@@ -247,16 +331,29 @@ impl App {
                 let selected = Character::parse(&s.characters[i])
                     .map(|character| character.label().to_owned())
                     .unwrap_or_else(|| s.characters[i].clone());
+                let blocked: Vec<_> = Character::ALL.iter().map(|&c| character_unavailable(s, c)).collect();
                 let response = egui::ComboBox::from_id_salt(("character", i)).selected_text(selected).show_ui(ui, |ui| {
-                    for &character in Character::ALL {
-                        ui.selectable_value(&mut s.characters[i], character.id().to_string(), character.label());
+                    for (&character, why) in Character::ALL.iter().zip(&blocked) {
+                        let label = if why.is_some() { format!("{} (needs sprite pack)", character.label()) } else { character.label().to_string() };
+                        let r = ui.add_enabled(why.is_none(), egui::Button::selectable(s.characters[i] == character.id(), label));
+                        if let Some(why) = why {
+                            r.on_disabled_hover_text(why);
+                        } else if r.clicked() {
+                            s.characters[i] = character.id().to_string();
+                        }
                     }
                 });
+                if let Some(why) = Character::parse(&s.characters[i]).and_then(|c| character_unavailable(s, c)) {
+                    ui.colored_label(ui.visuals().warn_fg_color, "⚠").on_hover_text(why);
+                }
                 if i == 0 && response.response.changed() { s.zero = false; }
             });
         }
+        if let Some(warning) = coop_art_warning(s) {
+            ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {warning}"));
+        }
         if s.characters.iter().take(usize::from(player_count)).any(|c| c == "vile") {
-            ui.label("Vile on-foot sprite");
+            ui.label("Vile on-foot sprite (optional)");
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut s.vile_sprite_path).desired_width(ui.available_width() - 92.0));
                 if ui.button("Browse…").clicked() {
@@ -265,12 +362,28 @@ impl App {
                     }
                 }
             });
-            ui.weak("Used for Vile even when 60 FPS bone animation sheets are off.");
+            if std::path::Path::new(s.vile_sprite_path.trim()).is_file() {
+                ui.weak("Used for Vile even when 60 FPS bone animation sheets are off.");
+            } else {
+                ui.weak("Optional, not included in the download. Without it Vile uses his ROM poses.");
+            }
         }
         if s.characters.iter().take(usize::from(player_count)).any(|c| c == "zero") {
             ui.weak("Zero uses his X1 sprites by default. Add X3 for alternate art and saber attacks.");
+            ui.horizontal(|ui| {
+                ui.label("Custom Zero sprite pack (optional, body art only)");
+                ui.text_edit_singleline(&mut s.sprite_pack);
+                if ui.button("Browse…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Sprite pack", &["json"]).pick_file() {
+                        s.sprite_pack = p.to_string_lossy().into_owned();
+                    }
+                }
+                if ui.button("Clear").clicked() {
+                    s.sprite_pack.clear();
+                }
+            });
         }
-        if s.characters.iter().take(usize::from(player_count)).any(|c| Character::parse(c).is_some_and(|character| !matches!(character, Character::X | Character::Zero))) {
+        if s.characters.iter().take(usize::from(player_count)).any(|c| Character::parse(c).is_some_and(|character| !matches!(character, Character::X | Character::Zero) && !needs_bone_sheet(character))) {
             ui.weak("Bosses use their X1 ROM sprites. Missing movement poses use their idle animation.");
         }
         if s.online {
@@ -331,7 +444,7 @@ impl App {
         }
         ui.separator();
 
-        let args = build_args(s);
+        let args = build_args(s).and_then(|a| preflight(s).map(|()| a));
         let can = x_ok && (s.x3_rom.trim().is_empty() || x3_ok) && args.is_ok() && self.child.is_none();
         let x3_invalid = !s.x3_rom.trim().is_empty() && !x3_ok;
         ui.horizontal(|ui| {
@@ -345,12 +458,28 @@ impl App {
             }
         });
         if let Err(e) = &args {
-            ui.weak(e.as_str());
+            ui.colored_label(ui.visuals().warn_fg_color, e.as_str());
         } else if x3_invalid {
-            ui.weak("the selected X3 ROM is invalid");
+            ui.colored_label(ui.visuals().warn_fg_color, "the selected X3 ROM is invalid: clear it or pick Mega Man X3 (USA)");
         }
         if !self.status.is_empty() {
             ui.label(&self.status);
+        }
+        if let Some(f) = &self.failure {
+            let error = ui.visuals().error_fg_color;
+            egui::Frame::group(ui.style()).stroke(egui::Stroke::new(1.0, error)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.colored_label(error, egui::RichText::new("The game could not run").strong());
+                if let Some(e) = &f.explanation {
+                    ui.label(e);
+                }
+                if !f.exit.is_empty() {
+                    ui.weak(&f.exit);
+                }
+                if !self.log.is_empty() {
+                    ui.weak(format!("Game output ({}):", log_path().display()));
+                }
+            });
         }
         if !self.log.is_empty() {
             egui::Frame::group(ui.style()).show(ui, |ui| {

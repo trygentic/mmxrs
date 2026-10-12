@@ -17,11 +17,35 @@ pub struct BossSet {
     pub idle_frame: usize,
     /// ROM pose indices cycled while the character moves horizontally.
     pub run_frames: Vec<usize>,
+    /// ROM poses for rising and falling; `None` keeps the idle pose.
+    pub jump_frame: Option<usize>,
+    pub fall_frame: Option<usize>,
     /// Align the selected sprite's bottom with X's standing bottom (+16).
     pub y_offset: i16,
+    /// Per frame, sprite indices ranked by how many visible pixels each adds
+    /// to those ranked before it (`coverage_order`). Under an OAM allowance
+    /// smaller than the frame, the top pieces keep the most of the body.
+    pub coverage: Vec<Vec<usize>>,
 }
 
 impl BossSet {
+    /// Fill `coverage` once the frames are final.
+    fn ranked(mut self) -> Self {
+        self.coverage = (0..self.frames.len()).map(|f| coverage_order(&self.page(f), &self.frames[f].sprites)).collect();
+        self
+    }
+
+    /// Frame `f`'s sprites limited to `n`, keeping the best-covering pieces
+    /// in their original (draw priority) order.
+    pub fn sprites_within(&self, f: usize, n: usize) -> Vec<Sprite> {
+        let sprites = &self.frames[f].sprites;
+        if sprites.len() <= n { return sprites.clone() }
+        let order = self.coverage.get(f).map_or(&[][..], Vec::as_slice);
+        let mut keep: Vec<usize> = order.iter().copied().take(n).collect();
+        keep.sort_unstable();
+        keep.into_iter().filter_map(|i| sprites.get(i).copied()).collect()
+    }
+
     pub fn page(&self, frame: usize) -> Vec<u8> {
         let mut page = vec![0; PAGE_TILES * 32];
         if let Some(f) = self.frames.get(frame) {
@@ -35,6 +59,53 @@ impl BossSet {
         }
         page
     }
+}
+
+/// Greedy cover: repeatedly take the sprite adding the most opaque pixels not
+/// yet covered (ties: earlier OAM entry). Overlay pieces that only repaint a
+/// covered area sink to the end. Pixels in the pose's bottom rows count
+/// four times: without its feet a character floats. A piece must touch what
+/// is already chosen to score, so the cover grows as one body and a cut
+/// list never leaves a blade tip hanging in the air.
+/// Rows above a pose's lowest pixel that count as its feet.
+const FEET_ROWS: i16 = 6;
+
+fn coverage_order(page: &[u8], sprites: &[Sprite]) -> Vec<usize> {
+    let pixels: Vec<Vec<(i16, i16)>> = sprites.iter().map(|s| {
+        let n = if s.big { 16 } else { 8 };
+        let mut out = Vec::new();
+        for yy in 0..n {
+            for xx in 0..n {
+                let slot = usize::from(s.tile) + xx / 8 + 16 * (yy / 8);
+                let Some(tile) = page.get(slot * 32..slot * 32 + 32) else { continue };
+                if pixel(tile, xx % 8, yy % 8) != 0 {
+                    // Tiles are stored unflipped; the flip moves where they land.
+                    let (dx, dy) = (if s.hflip { n - 1 - xx } else { xx }, if s.vflip { n - 1 - yy } else { yy });
+                    out.push((i16::from(s.x) + dx as i16, i16::from(s.y) + dy as i16));
+                }
+            }
+        }
+        out
+    }).collect();
+    let bottom = pixels.iter().flatten().map(|p| p.1).max().unwrap_or(0);
+    let weight = |p: &(i16, i16)| if p.1 >= bottom - FEET_ROWS { 4 } else { 1 };
+    let mut covered = std::collections::HashSet::new();
+    let mut left: Vec<usize> = (0..sprites.len()).collect();
+    let mut order = Vec::with_capacity(sprites.len());
+    while !left.is_empty() {
+        let (pos, _) = left.iter().enumerate()
+            .map(|(pos, &i)| {
+                let touches = covered.is_empty() || pixels[i].iter().any(|&(x, y)|
+                    [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| covered.contains(&(x + dx, y + dy))));
+                let gain = pixels[i].iter().filter(|p| !covered.contains(*p)).map(weight).sum::<usize>();
+                (pos, if touches { gain } else { 0 })
+            })
+            .fold((0, 0), |best, (pos, gain)| if gain > best.1 { (pos, gain) } else { best });
+        let i = left.remove(pos);
+        covered.extend(pixels[i].iter().copied());
+        order.push(i);
+    }
+    order
 }
 
 fn off(a: u32) -> usize { (((a >> 16) & 0x7f) * 0x8000 + (a & 0x7fff)) as usize }
@@ -238,7 +309,7 @@ fn wolf_sigma(rom: &[u8], table: u32) -> Result<BossSet, String> {
             });
         }
     }
-    Ok(BossSet { tiles, palette: colors, frames: vec![Frame { name: "wolf sigma", sprites, tiles_used: used }], idle_frame: 0, run_frames: vec![0], y_offset: 0 })
+    Ok(BossSet { tiles, palette: colors, frames: vec![Frame { name: "wolf sigma", sprites, tiles_used: used }], idle_frame: 0, run_frames: vec![0], jump_frame: None, fall_frame: None, y_offset: 0, coverage: Vec::new() }.ranked())
 }
 
 /// Extract a boss's source graphics, palette and layouts from a headerless X1
@@ -281,57 +352,28 @@ pub fn extract_x1(rom: &[u8], character: Character) -> Result<BossSet, String> {
         let layout = long(rom, table + 3 * i as u32)?;
         frames.push(repack(rom, layout, tiles.len() / 32)?);
     }
-    if character == Character::Sigma {
-        // Four local players share OAM's 128 entries. Sigma's full battle
-        // stance has 22 pieces; the first 16 omit both feet. Keep the face,
-        // shoulder and torso overlays plus every leg piece in OAM order.
-        const BATTLE_IDLE: [usize; 16] = [0, 2, 4, 5, 6, 7, 8, 9, 12, 13, 15, 16, 17, 19, 20, 21];
-        frames[4].sprites = frames[4].sprites.iter().enumerate()
-            .filter(|(i, _)| BATTLE_IDLE.contains(i))
-            .map(|(_, sprite)| *sprite)
-            .collect();
-        // The lunge cycle also has many more pieces than the four-player
-        // OAM allowance. Keep the head, torso, sword and both legs in each
-        // pose. All five frames have the same +32 foot baseline.
-        const RUN_POSES: [(usize, &[usize; 16]); 5] = [
-            (12, &[0, 1, 2, 3, 5, 6, 11, 12, 15, 17, 19, 20, 21, 22, 24, 25]),
-            (13, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 14, 15, 16, 17, 19]),
-            (14, &[0, 1, 2, 3, 9, 10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22]),
-            (15, &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]),
-            (16, &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]),
-        ];
-        for (frame, keep) in RUN_POSES {
-            frames[frame].sprites = frames[frame].sprites.iter().enumerate()
-                .filter(|(i, _)| keep.contains(i))
-                .map(|(_, sprite)| *sprite)
-                .collect();
-        }
-    }
-    if character == Character::Vile {
-        // Keep face, torso and both feet within the four-player OAM budget.
-        const STEP_POSES: [(usize, &[usize; 16]); 2] = [
-            (2, &[0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17]),
-            (3, &[0, 2, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]),
-        ];
-        for (frame, keep) in STEP_POSES {
-            frames[frame].sprites = frames[frame].sprites.iter().enumerate()
-                .filter(|(i, _)| keep.contains(i))
-                .map(|(_, sprite)| *sprite)
-                .collect();
-        }
-    }
+    // Frames are kept whole: a hand-picked 16-piece subset per pose (for the
+    // four-player OAM allowance) left holes in the head and torso even with
+    // one player. `zero::emit_boss` now picks the pieces when the allowance
+    // actually applies.
     let run_frames = match character {
-        // X1's Sigma has no ordinary walking cycle. These are his native
-        // forward/lunge sword poses, with leg movement visible between them.
-        Character::Sigma => vec![12, 13, 14, 15, 16, 15, 14, 13],
+        // X1's Sigma has no ordinary walking cycle. His sword lunge (12-14)
+        // keeps the blade forward and strides the legs; the raised-sword
+        // poses (15, 16) made the cycle swing wildly, so they stay out.
+        Character::Sigma => vec![12, 13, 14, 13],
         Character::Vile => vec![0, 2, 3, 2],
         _ => vec![idle_frame],
+    };
+    // Sigma's leap (17: rising, legs tucked; 18: coming down).
+    let (jump_frame, fall_frame) = match character {
+        Character::Sigma => (Some(17), Some(18)),
+        _ => (None, None),
     };
     let bottom = frames[idle_frame].sprites.iter()
         .map(|s| i16::from(s.y) + if s.big { 16 } else { 8 })
         .max().unwrap_or(16);
     let y_offset = 16 - bottom;
-    Ok(BossSet { tiles, palette, frames, idle_frame, run_frames, y_offset })
+    Ok(BossSet { tiles, palette, frames, idle_frame, run_frames, jump_frame, fall_frame, y_offset, coverage: Vec::new() }.ranked())
 }
 
 /// Playable art from X1 Zero's Highway and Sigma-stage cutscenes. The X1 ROM
@@ -364,8 +406,11 @@ pub fn extract_x1_zero(rom: &[u8]) -> Result<BossSet, String> {
         frames,
         idle_frame,
         run_frames,
+        jump_frame: None,
+        fall_frame: None,
         y_offset,
-    })
+        coverage: Vec::new(),
+    }.ranked())
 }
 
 #[cfg(test)]
@@ -412,7 +457,81 @@ mod tests {
                     assert_eq!(set.run_frames, [0, 1, 2, 3]);
                     assert!(set.frames[..4].iter().all(|f| f.sprites.len() == 16));
                 }
+                if character == Character::Sigma {
+                    sigma_poses_stay_whole(&set);
+                }
             }
         }
+    }
+
+    /// Opaque pixels a frame draws with these sprites, in frame coordinates.
+    fn drawn(set: &BossSet, f: usize, sprites: &[Sprite]) -> std::collections::HashSet<(i16, i16)> {
+        let page = set.page(f);
+        let mut out = std::collections::HashSet::new();
+        for s in sprites {
+            let n = if s.big { 16 } else { 8 };
+            for yy in 0..n {
+                for xx in 0..n {
+                    let slot = usize::from(s.tile) + xx / 8 + 16 * (yy / 8);
+                    if pixel(&page[slot * 32..slot * 32 + 32], xx % 8, yy % 8) != 0 {
+                        let dx = if s.hflip { n - 1 - xx } else { xx };
+                        let dy = if s.vflip { n - 1 - yy } else { yy };
+                        out.insert((i16::from(s.x) + dx as i16, i16::from(s.y) + dy as i16));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Players saw Sigma's run "take chunks out of him": the run poses were
+    /// cut to 16 hand-picked pieces even with one player. Frames are whole
+    /// now, he has real jump/fall poses, and the four-player allowance keeps
+    /// nearly all of each pose.
+    fn sigma_poses_stay_whole(set: &BossSet) {
+        assert_eq!(set.run_frames, [12, 13, 14, 13]);
+        assert_eq!((set.jump_frame, set.fall_frame), (Some(17), Some(18)));
+        for f in [set.idle_frame, 12, 13, 14, 17, 18] {
+            let all = &set.frames[f].sprites;
+            assert!(all.len() > 16, "frame {f} was trimmed to {} pieces", all.len());
+            let full = drawn(set, f, all);
+            let kept = set.sprites_within(f, 16);
+            assert_eq!(kept.len(), 16);
+            let shown = drawn(set, f, &kept);
+            assert!(shown.len() * 100 >= full.len() * 80,
+                "frame {f}: 16 pieces show {} of {} pixels", shown.len(), full.len());
+            // Both feet: the lowest rows of the pose stay drawn.
+            let bottom = full.iter().map(|p| p.1).max().unwrap();
+            let low = |px: &std::collections::HashSet<(i16, i16)>| px.iter().filter(|p| p.1 >= bottom - FEET_ROWS).count();
+            assert!(low(&shown) * 100 >= low(&full) * 60, "frame {f} lost its feet");
+        }
+    }
+
+    fn piece(x: i8, tile: u8, big: bool) -> Sprite {
+        Sprite { x, y: 0, big, tile, hflip: false, vflip: false }
+    }
+
+    /// A page where tile 0 and tile 2 are solid and tile 1 is empty.
+    fn test_set(sprites: Vec<Sprite>) -> BossSet {
+        let mut tiles = vec![0u8; 3 * 32];
+        tiles[..32].fill(0xFF);
+        tiles[64..].fill(0xFF);
+        let mut used = vec![NO_TILE; PAGE_TILES];
+        used[..3].copy_from_slice(&[0, 1, 2]);
+        BossSet {
+            tiles, palette: [0; 16],
+            frames: vec![Frame { name: "test", sprites, tiles_used: used }],
+            idle_frame: 0, run_frames: vec![0], jump_frame: None, fall_frame: None,
+            y_offset: 0, coverage: Vec::new(),
+        }.ranked()
+    }
+
+    #[test]
+    fn budget_keeps_new_pixels_in_draw_order() {
+        // 0: solid at x 0; 1: empty tile; 2: repaints piece 0; 3: solid at x 8.
+        let set = test_set(vec![piece(0, 0, false), piece(16, 1, false), piece(0, 2, false), piece(8, 2, false)]);
+        assert_eq!(set.coverage[0], [0, 3, 1, 2]);
+        assert_eq!(set.sprites_within(0, 2), [piece(0, 0, false), piece(8, 2, false)]);
+        assert_eq!(set.sprites_within(0, 9).len(), 4, "no allowance: every piece");
     }
 }

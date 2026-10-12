@@ -162,15 +162,35 @@ position mod 1024. MMX scrolls each BG by exactly its camera, so that key is
 the BG's scroll space; one frame of camera lag between the step and the
 next frame's NMI is covered by the 32-px apron. Guards:
 
-- only in a stage (`$D2 = 4`, `$D3 != 0`); elsewhere (title, intro, stage
-  select, ...) the margins are VRAM as is: those 32/64-column maps wrap,
-  which reads well (the title's ribbons simply continue);
+- only in a stage (`$D2 = 4`, `$D3 != 0`); elsewhere (boot, copyright,
+  intro, title, stage select, game over, ...) the margins are black
+  (pillarbox, below): those screens are 256 px wide, and their 32/64-column
+  maps wrap into the margins as cut-off copies of the text;
 - only for a BG whose decoded on-screen cells match VRAM (`agreement`
   >= 90%), so a stage or scene that uses BG1/BG2 some other way falls back
   to VRAM instead of drawing nonsense;
-- off the 8192x8192 layout (left of x 0 at a stage's start) BG1 is blank
-  and BG2 is VRAM's wrap. The camera never shows those areas, the margins
-  do: you see the backdrop past the stage's first wall.
+- off the 8192x8192 layout (left of x 0 at a stage's start) BG1 and BG2 are
+  blank and the margin is black. The camera never shows those areas, the
+  margins do; VRAM's wrap there is some other part of the stage.
+
+### Pillarbox (`MarginBlank`)
+
+With the margin tiles, `update_margin_tiles` decides what the next rendered
+frame's margins black out (`MarginBlank::for_state`; `Game::step` applies it
+to the frame after rendering, as the frame a step renders shows the scroll
+the previous step's state computed):
+
+- **all** of both margins outside a stage, while paused (`$1F24`: the
+  weapon menu is 256 px), and when BG1's layout does not match VRAM
+  (`agreement` < 90: an in-stage screen that is not the stage);
+- otherwise the px of each margin that lie off the layout (`m - camX` on
+  the left at a stage's start, past x 8192 on the right), and only their
+  backdrop pixels (per line, the colour of the outermost pixel), so the HUD
+  at the wide edge stays. Mid-stage (camera X >= the margin) nothing changes.
+
+Display only: the frame buffer, after the PPU. The title's ribbons no longer
+continue into the margins; widening the menus properly would need their
+art, so they are pillarboxed like the rest.
 
 The margins show the layout as data, including areas past the camera's
 limits (a boss door's far side, the next section) the game never scrolls
@@ -772,7 +792,18 @@ body under its trap name, exclusive of nested traps (`mmx_core::profile`,
 off until the host installs a clock, so the core stays clock-free for wasm),
 `margin sprites`, `wide tiles`, `ppu margins` (`render_wide_margins`,
 `snes_core::prof`), `emulator` (the rest of the step: CPU/PPU/APU ticks,
-trap dispatch) and `take_audio`.
+trap dispatch) and `take_audio`. Like mmxrs, bench draws Zero from the X1
+ROM's sprite set unless `--x3` is given; `--zero` plays P1 as Zero, `--coop`
+or `--players N` adds local players.
+
+Zero vs X (Rev 1, boot + Highway with the start taps and steady fire, 2400
+frames, instructions retired from `/usr/bin/time -l` because wall time is
+noise on a loaded machine): X 100.6, X1 Zero 100.6, X3 Zero 101.3 M per
+frame at the default 2x overclock; co-op X + X1 Zero 101.2, X + X 101.4,
+four players 102.1. Emulated lag frames are the same for X and Zero (149 /
+150 off, 138 / 138 at 2x). Zero adds nothing measurable; the cost is the
+emulator itself, and 2x overclock is +60% over off (63 M). `make dist`
+(fat LTO, one codegen unit) brings 2x to 91.3 M, output identical.
 
 Rev 1 + X3, script `--hold 0100 --p1tap 4000@1-900/20:6 --p2-hold 0100
 --p2tap 4000@5-900/25:6`, 900 frames, M-series Mac. "full" is the user's

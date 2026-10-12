@@ -122,6 +122,72 @@ pub fn hud_slots(wram: &[u8; 0x20000], p2_bar: u128) -> (u128, u128) {
     (crate::display::slots(0, 16) | p2_bar, if boss { crate::display::slots(16, 24) } else { 0 })
 }
 
+/// What the margins of the next rendered frame black out, set by
+/// [`update_margin_tiles`] after each step: the frame a step renders shows
+/// the scroll the NMI at its start uploaded, the one the previous step's
+/// game state computed. `all`: both margins, every pixel (no stage on
+/// screen: boot, copyright, title, stage select, pause menu, ...).
+/// Otherwise `left` / `right` px from each outer edge lie off the stage
+/// layout (left of x 0 at a stage's start): only their backdrop pixels go
+/// black, so the HUD and anything else drawn there stays. Display only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MarginBlank {
+    pub all: bool,
+    pub left: u16,
+    pub right: u16,
+}
+
+impl MarginBlank {
+    /// The margins for game state `g` with margin `m`. Pure.
+    pub fn for_state(g: &Game, m: u16) -> Self {
+        if m == 0 {
+            return Self::default();
+        }
+        let w = g.wram();
+        let in_stage = w[ram::wram_index(ram::MODE_D2)] == 4 && w[ram::wram_index(ram::STAGE_PHASE)] != 0;
+        // The pause / weapon menu redraws the BGs; `agreement` catches it and
+        // any other in-stage scene that is not the layout (weapon get, ...).
+        let paused = w[ram::wram_index(ram::PAUSE)] != 0;
+        if !in_stage || paused || agreement(g, 0) < 90 {
+            return Self { all: true, left: m, right: m };
+        }
+        let (cx, _) = camera(g, 0);
+        let mi = i32::from(m);
+        let left = (mi - cx).clamp(0, mi) as u16;
+        let right = (cx + 256 + mi - 8192).clamp(0, mi) as u16;
+        Self { all: false, left, right }
+    }
+
+    /// Black out the margins of a `width` x `height` frame (0x00RRGGBB, the
+    /// 256-px picture centred). Off the layout, per line, a pixel is the
+    /// backdrop when it has the colour of the line's outermost pixel (no
+    /// object or HUD piece reaches the outer edge there: the HUD keeps an
+    /// 8-px inset, and objects do not exist left of x 0).
+    pub fn apply(self, px: &mut [u32], width: usize, height: usize) {
+        let m = width.saturating_sub(256) / 2;
+        if m == 0 || (!self.all && self.left == 0 && self.right == 0) {
+            return;
+        }
+        for row in px.chunks_exact_mut(width).take(height) {
+            if self.all {
+                row[..m].fill(0);
+                row[width - m..].fill(0);
+                continue;
+            }
+            let l = usize::from(self.left).min(m);
+            if l > 0 {
+                let bg = row[0];
+                row[..l].iter_mut().filter(|p| **p == bg).for_each(|p| *p = 0);
+            }
+            let r = usize::from(self.right).min(m);
+            if r > 0 {
+                let bg = row[width - 1];
+                row[width - r..].iter_mut().filter(|p| **p == bg).for_each(|p| *p = 0);
+            }
+        }
+    }
+}
+
 /// After each step with widescreen on: give the PPU the stage layout's
 /// tiles around the camera for BG1 and BG2 (keyed by level position mod
 /// 1024, which is BG scroll space: MMX scrolls each BG by its camera), so
@@ -133,6 +199,7 @@ pub fn update_margin_tiles(g: &mut Game) {
     let w = g.wram();
     let in_stage = w[ram::wram_index(ram::MODE_D2)] == 4 && w[ram::wram_index(ram::STAGE_PHASE)] != 0;
     let m = i32::from(g.wide_margin());
+    g.margin.blank = MarginBlank::for_state(g, g.wide_margin());
     if !in_stage {
         g.set_margin_sprites(Vec::new()); // no stage, no margin objects
     }
@@ -151,14 +218,61 @@ pub fn update_margin_tiles(g: &mut Game) {
         for y in ((cy - 32) & !7..cy + 256).step_by(8) {
             for x in ((cx - m - 32) & !7..cx + 256 + m + 32).step_by(8) {
                 let cell = ((y & 1023) / 8) as usize * n + ((x & 1023) / 8) as usize;
-                // Off the map: BG1 (terrain) blank, BG2 (backdrop) whatever VRAM wraps to.
+                // Off the map both are blank (VRAM's wrap there is some
+                // other part of the stage); `MarginBlank` blacks it out.
                 cells[cell] = match layout_entry(g, bg, x, y) {
                     Some(e) => 0x1_0000 | u32::from(e),
-                    None if bg == 0 => 0x1_0000,
-                    None => 0,
+                    None => 0x1_0000,
                 };
             }
         }
         g.set_margin_tiles(bg, Some(&cells));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MarginBlank;
+
+    const W: usize = 256 + 2 * 16;
+
+    fn frame() -> Vec<u32> {
+        // Backdrop 0x404080, a HUD pixel at x 8 and a stage pixel at x 20.
+        let mut px = vec![0x40_40_80; W * 2];
+        for row in px.chunks_exact_mut(W) {
+            row[8] = 0xFF_FF_FF;
+            row[20] = 0x00_80_00;
+            row[W - 1 - 8] = 0xFF_00_00;
+        }
+        px
+    }
+
+    #[test]
+    fn all_blacks_out_both_margins_only() {
+        let mut px = frame();
+        MarginBlank { all: true, left: 16, right: 16 }.apply(&mut px, W, 2);
+        for row in px.chunks_exact(W) {
+            assert!(row[..16].iter().chain(&row[W - 16..]).all(|&p| p == 0));
+            assert!(row[16..W - 16].iter().all(|&p| p != 0));
+        }
+    }
+
+    #[test]
+    fn off_layout_keeps_hud_and_stage() {
+        let mut px = frame();
+        MarginBlank { all: false, left: 12, right: 0 }.apply(&mut px, W, 2);
+        for row in px.chunks_exact(W) {
+            assert!(row[..8].iter().chain(&row[9..12]).all(|&p| p == 0));
+            assert_eq!(row[8], 0xFF_FF_FF, "HUD kept");
+            assert_eq!(row[12], 0x40_40_80, "on the layout: untouched");
+            assert_eq!(row[W - 1], 0x40_40_80, "right side untouched");
+        }
+    }
+
+    #[test]
+    fn nothing_without_a_margin() {
+        let mut px = vec![7u32; 256 * 2];
+        MarginBlank { all: true, left: 0, right: 0 }.apply(&mut px, 256, 2);
+        assert!(px.iter().all(|&p| p == 7));
     }
 }

@@ -163,7 +163,13 @@ impl Emu {
         self.game.set_x3_rom(rom).map_err(|e| JsValue::from_str(&e))
     }
 
-    /// Player 1 plays as Zero (needs [`Emu::set_x3_rom`] first). Before a
+    /// Custom Zero body art (docs/sprite-packs.md): replaces the X3 set,
+    /// body art only. Before a netplay connect, like the X3 ROM.
+    pub fn import_sprite_pack(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
+        self.game.import_sprite_pack(bytes).map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Player 1 plays as Zero (needs [`Emu::set_x3_rom`] or a sprite pack first). Before a
     /// netplay connect: both peers must agree.
     pub fn set_p1_zero(&mut self, on: bool) -> Result<(), JsValue> {
         self.game.set_p1_zero(on).map_err(|e| JsValue::from_str(&e))

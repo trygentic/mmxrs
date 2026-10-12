@@ -24,9 +24,16 @@ The window:
   particles (`--charge-effects`). The optional 60 FPS bone animation sheet
   toggle selects a private `bae-sheet` folder (`--bone-sheets DIR`); it starts
   at `roms/derived/bone_sheets` and missing action clips use idle or the ROM
-  sprite. Bass and Proto Man require sheets from that folder. Four-player HP
+  sprite. Bass and Proto Man require sheets from that folder. The pack is
+  private art, not part of a release download: with the option ticked the
+  launcher says whether the folder is a usable pack (and which characters it
+  has) and refuses to launch with a missing or empty one; the game itself keeps
+  the ROM sprites when the folder or the selected characters' sheets are
+  missing, and only stops for Bass or Proto Man. Four-player HP
   meters run vertically along the screen sides. No overclock control: the game's default
   (2x) applies; `mmxrs --overclock off` from a terminal restores the slowdown.
+* **Sprite pack**: shown when a player is Zero: a path to a custom Zero
+  sprite pack (`--sprite-pack`, docs/sprite-packs.md), with Browse and Clear.
 * **Players**: 1–4 local controller slots (`--players N`) or two-player online
   co-op, with a character dropdown for each active player. X and Zero have
   playable art from the X1 ROM. Zero uses his X1 standing and dash poses by
@@ -38,8 +45,12 @@ The window:
   player-sized sprite, and Rangda Bangda uses its ROM sprite component.
   Selecting Vile loads the private on-foot PNG from
   `roms/derived/bone_sheets/user_sources/vile_idle.png` even when animated
-  sheets are off; its path can be changed in the Vile sprite field.
-  Each local player has its own sprite page and palette.
+  sheets are off; its path can be changed in the Vile sprite field. The PNG is
+  optional and not in a release: without it Vile uses his ROM poses.
+  Each local player has its own sprite page and palette. In co-op (two or more
+  players, or online) the launcher warns, without blocking, when a player is
+  anyone but X or X3-ROM Zero and the enabled 60 FPS pack has no sheet for
+  them: X1 Zero and the bosses use rough X1 sprite art.
   For online co-op,
   the online controls show only for Online co-op: Host/Join (`--coop-host`/`--coop-join ROOM`), room with a
   random 8-char button, signal URL (default `wss://signal.z2rs.com`), mode,
@@ -47,9 +58,18 @@ The window:
   game default, `none` allowed). Host and guest need identical ROM dumps and
   the same mode.
 * **Launch / Stop**: Launch is disabled while the X ROM is missing or has the
-  wrong header. The game's stdout +
+  wrong header, or while a file the game would refuse is missing (X3 ROM,
+  sprite pack, bone sheet folder); the reason shows under the
+  button. Bass and Proto Man have no ROM art: their dropdown entries are greyed
+  out (hover for why) until the bone sheet folder holds
+  `<id>/<id>.sheet.json` for them, and VS mode stays off until every fighter
+  has its art. The game's stdout +
   stderr go to `<data-dir>/last-game.log` (a file, so the game survives the
-  launcher closing); the last lines show under the button.
+  launcher closing); the last lines show under the button. When the game
+  exits with an error, a red panel names the exit code and, for the known
+  causes (no ROM, unreadable ROM, missing bone sheets or Vile sprite, netplay
+  connect failure, launcher/game version mismatch), says what to fix; the raw
+  output stays visible below it.
 
 Game program: `mmxrs` next to the launcher, else `./target/release/mmxrs`,
 else `mmxrs` on PATH. Settings: `<data-dir>/launcher.json`, where data-dir is

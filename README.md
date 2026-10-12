@@ -83,11 +83,17 @@ mmxrs --help
 
 Player 1 uses the keyboard: arrow keys to move, Z jump, X shoot, C dash, V
 saber (with the X3 ROM). Player 2 on the keyboard: WASD, G jump, F shoot,
-H dash, T saber. Players 3 and 4 need gamepads. A gamepad joins the first free
-slot when you press a button on it.
+H dash, T saber. Player 3: IJKL to move, N jump, M shoot, comma dash, B
+saber. Player 4: numpad 8/4/5/6 to move, numpad 1 jump, 2 shoot, 3 dash, 0
+saber. A gamepad joins the first player slot that has neither a gamepad nor
+the keyboard when you press a button on it.
 
 Esc quits, F11 toggles fullscreen, F10 cycles widescreen, F5 and F7 save and
-load a state, and the number keys pick the save slot.
+load a state, and the number keys pick the save slot. F2 shows the frame rate
+and the percentage of full speed (also `--show-fps`).
+
+Sound plays on your default output device. If there is none, the game says so
+on screen and keeps running without sound.
 
 ## Online co-op
 
@@ -112,7 +118,9 @@ for it in `MMX_ROM` and skip when it is unset.
 ## Reporting problems
 
 Open an issue on this repository. Say which build you used, which ROM dump
-(the launcher shows its SHA-256), what you did and what happened.
+(the launcher shows its SHA-256), what you did and what happened. If the game
+fails to start, the launcher shows the reason; please paste it. For slowdown,
+press F2 and include the numbers it shows.
 
 ## License
 

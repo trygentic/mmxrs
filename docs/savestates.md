@@ -15,6 +15,10 @@ writes, in order:
    initializing and which extra player owns its pending callback. A frame
    can end between the ROM shot update and its completion hook; these fields
    keep shoulder launches and owner-block restoration deterministic after load.
+7. Last: bincode `Game::waves` (each player's charged-saber wave), its
+   length as `u32` LE, then `WAVE` (read from the end, so the tails above,
+   which ignore trailing bytes, are unchanged; a state without it loads
+   with no wave; `NET_REVISION` 8).
 
 Loading keeps the frontend's settings in `CoopState` (co-op on/off, P1 as
 Zero, P2's palette) and takes everything else from the state. Not saved: the

@@ -2,7 +2,9 @@
 // chunks from app.js. Shrunk from z2rs z2-web/site/worklet.js: the queue IS
 // the latency, so past MAX_MS we drop the oldest audio back to TARGET_MS, and
 // after a full drain we re-prime to TARGET_MS before playing again. Reports
-// {queued (frames), underruns} every quantum so app.js can pace on it.
+// {queued (frames), received (frames ever taken in), underruns} every
+// quantum so app.js can pace on it: queued + (posted - received) is the
+// depth whatever order the report and the chunks crossed in.
 
 const TARGET_MS = 50;
 const MAX_MS = 90;
@@ -15,6 +17,7 @@ class MmxRing extends AudioWorkletProcessor {
     this.queue = []; // Float32Array chunks, interleaved L,R
     this.off = 0; // read offset (samples, not frames) into queue[0]
     this.pending = 0; // unplayed frames
+    this.received = 0; // frames ever taken in, for app.js's in-flight count
     this.underruns = 0;
     this.priming = true;
     this.port.onmessage = (e) => {
@@ -22,6 +25,7 @@ class MmxRing extends AudioWorkletProcessor {
       if (!c || !c.length) return;
       this.queue.push(c);
       this.pending += c.length >> 1;
+      this.received += c.length >> 1;
       if (this.pending > this.max) this.drop(this.pending - this.target);
     };
   }
@@ -39,7 +43,7 @@ class MmxRing extends AudioWorkletProcessor {
     const n = l.length;
     if (this.priming && this.pending < this.target) {
       l.fill(0); if (r) r.fill(0);
-      this.port.postMessage({ queued: this.pending, underruns: this.underruns });
+      this.port.postMessage({ queued: this.pending, received: this.received, underruns: this.underruns });
       return true;
     }
     this.priming = false;
@@ -60,7 +64,7 @@ class MmxRing extends AudioWorkletProcessor {
     }
     // ponytail: a message per 128-frame quantum (~375/s) is cheap enough and
     // saves the page from guessing the depth.
-    this.port.postMessage({ queued: this.pending, underruns: this.underruns });
+    this.port.postMessage({ queued: this.pending, received: this.received, underruns: this.underruns });
     return true;
   }
 }

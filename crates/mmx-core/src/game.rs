@@ -64,6 +64,9 @@ const P2_TILES_MAGIC_V2: &[u8; 4] = b"P2T2";
 /// (P2 hidden: it re-anchors beside P1 when it next shows).
 const COOP_MAGIC: &[u8; 4] = b"COOP";
 const EXTRA_COOP_MAGIC: &[u8; 4] = b"XTRA";
+/// The state's last 4 bytes when it carries [`Game::waves`]: the bincode
+/// waves, their length (`u32` LE), then this magic.
+const WAVE_MAGIC: &[u8; 4] = b"WAVE";
 const VS_MAGIC: &[u8; 4] = b"VS01";
 // Pending shot callbacks can cross a rendered frame boundary. Optional v1 tail.
 const SHOT_PENDING_MAGIC: &[u8; 4] = b"SHP1";
@@ -93,6 +96,10 @@ pub struct Game {
     pub(crate) active_shot_extra: Option<usize>,
     pub(crate) active_shot_initial: bool,
     pub(crate) player_characters: [crate::character::Character; 4],
+    /// Each player's charged-saber wave (saber.rs; P1, P2, 3, 4). Saved as
+    /// the state's last tail, [`WAVE_MAGIC`], so `CoopState` keeps its
+    /// encoding and states saved before it load with no wave.
+    pub(crate) waves: [crate::saber::Wave; 4],
     pub(crate) vs_state: Option<crate::vs::VsState>,
     pub(crate) vs_arena: Option<crate::vs_stages::Arena>,
     /// Debug: when `Some`, every opcode fetched inside `call_isolated*` is
@@ -330,6 +337,7 @@ impl Game {
                 crate::character::Character::X,
                 crate::character::Character::X,
             ],
+            waves: Default::default(),
             vs_state: None,
             vs_arena: None,
             emu,
@@ -606,6 +614,15 @@ impl Game {
         self.zero_set.as_deref()
     }
 
+    /// Replace Zero's art with a custom pack (docs/sprite-packs.md): body
+    /// art only (no slash arc, wave, sounds or HUD icon; the saber itself
+    /// still swings, `saber::armed`). Static art, part of the netplay
+    /// handshake like the X3 set.
+    pub fn import_sprite_pack(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.set_zero_set(Some(crate::zero_data::import_sprite_pack(bytes)?));
+        Ok(())
+    }
+
     /// Enable Zero's X3 combat behavior for player 1 when X3 art is loaded.
     /// Authentic X1 Zero art can instead be supplied through `set_boss_set`.
     pub fn set_p1_zero(&mut self, on: bool) -> Result<(), String> {
@@ -616,6 +633,11 @@ impl Game {
             coop::register_coop_traps(self)?;
         }
         self.coop.p1 = crate::zero::ZeroP1 { on, ..Default::default() };
+        if on {
+            // The roster's view of player 1 (`write_palette` and the capsule
+            // dialog read it), so callers that only say "P1 is Zero" agree.
+            self.player_characters[0] = crate::character::Character::Zero;
+        }
         Ok(())
     }
 
@@ -683,6 +705,10 @@ impl Game {
                 .expect("frontend sinks are infallible and there is no SRAM");
             rendered |= effect == TickEffect::FrameRendered;
         }
+        if self.wide_margin() > 0 {
+            let blank = self.margin.blank;
+            blank.apply(&mut self.video.pixels, self.video.width, self.video.height);
+        }
         if let Some(s) = self.zero_set.as_ref().and_then(|z| z.sounds.as_ref()) {
             let _t = crate::profile::scope("sfx mix");
             let fps = self.emu.target_fps();
@@ -702,6 +728,27 @@ impl Game {
     /// opcode fetched (traps still fire). Big (~100k entries per frame).
     pub fn trace_frame(&mut self, pads: Pads) -> Vec<u32> {
         self.trace_frame_mclk(pads).into_iter().map(|(pc, _)| pc).collect()
+    }
+
+    /// [`Game::trace_frame`] calling `each(pc, wram)` at every opcode fetch
+    /// (research: `xtask trace --watch`, which bytes an instruction wrote).
+    pub fn trace_frame_each(&mut self, pads: Pads, mut each: impl FnMut(u32, &[u8; 0x20000])) {
+        let inputs = SnesInputs { p1: joypad(pads.p1), p2: joypad(pads.p2) };
+        let mut rendered = false;
+        while !(rendered && self.emu.at_instruction_boundary()) {
+            self.dispatch_traps();
+            if self.emu.at_instruction_boundary() && self.emu.next_tick_fetches_opcode() {
+                each(self.regs().pbr_pc(), self.emu.wram());
+            }
+            let effect = self
+                .emu
+                .tick(&mut self.video, &mut self.audio, &mut ConstantInputPoller(&inputs), &mut NoSave)
+                .expect("frontend sinks are infallible and there is no SRAM");
+            rendered |= effect == TickEffect::FrameRendered;
+        }
+        self.frame_count += 1;
+        crate::bone_animation::draw(self);
+        self.draw_local_health();
     }
 
     /// [`Game::trace_frame`] with the master clock at each fetch.
@@ -929,7 +976,8 @@ impl Game {
     /// The shadow sprite tile pages (pending; live on the next OAM upload):
     /// page 0 is P2's, page 1 (`P2_PAGE_WORDS..`) a Zero P1's, page 2 the
     /// saber slash arcs (P2's in columns 0-7, P1's in 8-15), page 3 the HUD
-    /// icon (`coop_hud.rs`). See `p2tiles.rs`. Part of the save state.
+    /// icon (`coop_hud.rs`), pages 4 and 5 players 3 and 4's bodies
+    /// (`p2tiles::body_page`). See `p2tiles.rs`. Part of the save state.
     pub fn p2_tile_page_mut(&mut self) -> &mut [u16; P2_PAGE_WORDS * P2_PAGES] {
         self.emu.p2_tile_page_mut()
     }
@@ -1350,7 +1398,21 @@ impl Game {
         v.extend(SHOT_PENDING_MAGIC);
         v.extend(bincode::encode_to_vec((self.active_shot_initial, self.active_shot_extra.map(|i| i as u8)), cfg)
             .expect("pending shot state encodes"));
+        // Last, read from the end: the tails above ignore trailing bytes.
+        let waves = bincode::encode_to_vec(self.waves, cfg).expect("waves encode");
+        v.extend(&waves);
+        v.extend((waves.len() as u32).to_le_bytes());
+        v.extend(WAVE_MAGIC);
         v
+    }
+
+    /// [`Game::waves`] from a state's end, `None` when it has none.
+    fn wave_tail(s: &[u8]) -> Result<Option<[crate::saber::Wave; 4]>, String> {
+        let Some(t) = s.strip_suffix(WAVE_MAGIC.as_slice()) else { return Ok(None) };
+        let n = t.len().checked_sub(4).map(|k| u32::from_le_bytes([t[k], t[k + 1], t[k + 2], t[k + 3]]) as usize).ok_or("wave tail truncated")?;
+        let body = t.len().checked_sub(4 + n).map(|k| &t[k..t.len() - 4]).ok_or("wave tail truncated")?;
+        let (w, _) = bincode::decode_from_slice(body, bincode::config::standard()).map_err(|e| format!("waves: {e}"))?;
+        Ok(Some(w))
     }
 
     /// The co-op tail right after the `P2T5` pages (`COOP`, `u32` LE length,
@@ -1519,6 +1581,7 @@ impl Game {
         for extra in &mut self.extra_coop {
             extra.enabled = enabled;
         }
+        self.waves = Self::wave_tail(s)?.unwrap_or_default();
         if self.vs_state.is_some() {
             if let Some(vs) = vs_state { self.vs_state = Some(vs); }
         }

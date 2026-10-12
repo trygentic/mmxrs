@@ -188,8 +188,19 @@ fn saber_contacts(json: &Value, character: Character, sheet_sha256: &str) -> Res
     Ok((fps as f32, boxes))
 }
 
+/// Load the selected characters' sheets. The pack is optional art: a missing
+/// folder or a pack without these characters keeps the ROM sprites (Ok(0),
+/// with a warning) unless a selected character has no ROM art (Bass, Proto
+/// Man). A sheet that is present but broken is still an error.
 pub fn install(game: &mut Game, root: &Path, characters: &[Character]) -> Result<usize, String> {
-    if !root.is_dir() { return Err(format!("bone sheet folder missing: {}", root.display())); }
+    let required = characters.iter().find(|c| matches!(c, Character::Bass | Character::ProtoMan));
+    if !root.is_dir() {
+        if let Some(c) = required {
+            return Err(format!("bone sheet folder missing: {} ({} needs it)", root.display(), c.label()));
+        }
+        eprintln!("bone sheets: folder missing: {}; using ROM sprites", root.display());
+        return Ok(0);
+    }
     let mut loaded = 0;
     let mut seen = Vec::new();
     for &character in characters {
@@ -219,7 +230,7 @@ pub fn install(game: &mut Game, root: &Path, characters: &[Character]) -> Result
         }
         loaded += 1;
     }
-    if loaded == 0 { return Err(format!("no selected character sheets found in {}", root.display())); }
+    if loaded == 0 { eprintln!("bone sheets: no sheets for the selected characters in {}; using ROM sprites", root.display()); }
     Ok(loaded)
 }
 

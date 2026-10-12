@@ -23,10 +23,137 @@
 //! The green slash arc (`zero_data::X3_SLASH_SET`, [`slash_frame`]) is
 //! drawn on Zero by `zero.rs`; the damage box ([`BOX_GROUND`], [`BOX_AIR`],
 //! carried in the shot itself) covers the blade and the arc's drawn extent.
+//!
+//! Wave (the Hadouken's counterpart, docs/zero-upgrades.md "The wave"): a
+//! swing started with a full charge (`+58 = 4`, `+5B` 2 or 1) while the
+//! Hadouken is owned (`$1F7E` bit 7) consumes the charge the ROM's way and
+//! throws X3's green wave ([`Wave`], `zero_data::x3_wave_step`) on the arc
+//! pose's first frame; it flies [`WAVE_FRAMES`] frames as its own shot of
+//! the Hadouken's id ([`WAVE_DAMAGE_ID`]), and like the Hadouken's shot it
+//! goes through what it hits (put in fresh every frame).
 
 use crate::coop::{OFF_POS_X, OFF_POS_Y};
 use crate::ram::wram_index as ix;
 use crate::{Game, BTN_LEFT, BTN_RIGHT, BTN_X};
+
+/// The Hadouken's shot id (`+0A` of the shot it spawns, measured: `4`;
+/// `$86:EEDB` row 3, the Highway enemies: 32 = one hit).
+pub const WAVE_DAMAGE_ID: u8 = 4;
+/// The wave's life in frames: X3's died after 31 (about 197 px out).
+pub const WAVE_FRAMES: u8 = 31;
+
+/// A thrown wave (`Game::waves`, one per player, saved in the state's `WAVE`
+/// tail, so rollback carries it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+pub struct Wave {
+    /// Frames since the throw + 1, 0 = none.
+    pub t: u8,
+    pub air: bool,
+    pub right: bool,
+    /// Zero's drawn origin at the throw, world coordinates (`+05`, `+08 +
+    /// (i8)+19 + X3_Y_OFFSET`).
+    pub x: u16,
+    pub y: u16,
+    /// The swing that started with a full charge: throw on its arc.
+    pub armed: bool,
+    /// Shot slot (0-7) this frame, `0xFF` = none.
+    pub slot: u8,
+}
+
+impl Default for Wave {
+    fn default() -> Self {
+        Self { t: 0, air: false, right: false, x: 0, y: 0, armed: false, slot: 0xFF }
+    }
+}
+
+impl Wave {
+    /// `(world x, world y, wave frame, box)` now, `None` when there is none.
+    /// Pure.
+    pub fn at(&self) -> Option<(u16, u16, usize, crate::zero_data::HitBox)> {
+        let (dx, dy, f, b) = crate::zero_data::x3_wave_step(self.t.checked_sub(1)?, self.air);
+        let dx = if self.right { dx } else { -dx };
+        Some((self.x.wrapping_add(dx as u16), self.y.wrapping_add(dy as u16), f, b))
+    }
+}
+
+/// After [`update`], with the same block (mutable: the charge is consumed),
+/// the swing and `hadouken` (`$1F7E` bit 7): arm on a swing's first frame
+/// with a full charge, throw on the arc's first frame, fly. Returns true
+/// when the charge sound must be stopped (`$17`, as `$81:97F6` does). Pure
+/// but for `w` and `obj`.
+pub fn wave_step(w: &mut Wave, s: &Saber, obj: &mut [u8], hadouken: bool) -> bool {
+    if w.t > 0 {
+        w.t = if w.t >= WAVE_FRAMES { 0 } else { w.t + 1 };
+    }
+    let mut stop = false;
+    if s.t == 1 {
+        w.armed = hadouken && obj[0x58] == 4 && matches!(obj[0x5B], 1 | 2);
+        if w.armed {
+            // The ROM's cancel (`$81:97EE`): no charged shot on the masked release.
+            stop = obj[0x87] & 0x40 != 0;
+            obj[0x87] &= !0x40;
+            obj[0x58] = 0;
+            obj[0x5A] = 0;
+            obj[0x5B] = 0;
+        }
+    }
+    if s.t == 0 {
+        w.armed = false;
+    }
+    if w.armed && whoosh(s) {
+        let o = |k: usize| u16::from_le_bytes([obj[k], obj[k + 1]]);
+        let y = o(OFF_POS_Y).wrapping_add(obj[0x19] as i8 as u16).wrapping_add(crate::zero::X3_Y_OFFSET as u16);
+        *w = Wave { t: 1, air: s.air, right: obj[0x11] & 0x40 != 0, x: o(OFF_POS_X), y, ..Wave::default() };
+    }
+    stop
+}
+
+/// The wave's shot (`+05/+08` = its box centre, the box at [`BOX_AT`]),
+/// `None` without a wave. Pure.
+pub fn wave_shot_bytes(w: &Wave) -> Option<[u8; SHOT_LEN]> {
+    let (x, y, _, (bx, by, hw, hh)) = w.at()?;
+    let bx = i16::from(bx);
+    let x = x.wrapping_add(if w.right { bx } else { -bx } as u16);
+    let mut b = [0u8; SHOT_LEN];
+    b[0x00] = 1;
+    b[0x0A] = WAVE_DAMAGE_ID;
+    b[0x05..0x07].copy_from_slice(&x.to_le_bytes());
+    b[0x08..0x0A].copy_from_slice(&y.wrapping_add(i16::from(by) as u16).to_le_bytes());
+    b[0x11] = if w.right { 0x40 } else { 0 };
+    b[BOX_AT..BOX_AT + 4].copy_from_slice(&[0, 0, hw, hh]);
+    Some(b)
+}
+
+/// Queue sound `cmd` on the game's ring (`$0B72`, as `$80:886F` does).
+fn queue_sound(game: &mut Game, cmd: u8) {
+    let w = game.wram_mut();
+    let k = usize::from(w[ix(crate::ram::SND_WRITE)] & 0x1E);
+    w[ix(crate::ram::SOUND_QUEUE) + k] = cmd;
+    w[ix(crate::ram::SOUND_QUEUE) + k + 1] = 0;
+    w[ix(crate::ram::SND_WRITE)] = (k as u8 + 2) & 0x1E;
+}
+
+/// [`wave_step`] for player `k` (0: P1, the live block; 1-3: the shadow
+/// player whose slice runs, `game.coop`), after its [`update`].
+/// ponytail: players 3 and 4 throw no wave (shadow page 3 holds two; their
+/// sabers are drawn but not yet inserted as shots either).
+pub fn wave_for(game: &mut Game, k: usize) {
+    if k > 1 {
+        return;
+    }
+    let had = game.wram()[ix(crate::ram::HADOUKEN)] & crate::ram::HADOUKEN_BIT != 0;
+    let (s, mut w) = if k == 0 { (game.coop.p1.saber, game.waves[0]) } else { (game.coop.saber, game.waves[1]) };
+    let stop = if k == 0 {
+        let b = ix(crate::ram::X_BASE);
+        wave_step(&mut w, &s, &mut game.wram_mut()[b..b + crate::ram::X_BLOCK_LEN], had)
+    } else {
+        wave_step(&mut w, &s, &mut game.coop.p2, had)
+    };
+    game.waves[k] = w;
+    if stop {
+        queue_sound(game, 0x17);
+    }
+}
 
 /// The instruction after the object master's `JSR $80:D3B2` (the shot loop,
 /// at `$80:D1FC`); the enemy loops follow. Confirmed by `trace --calls`.
@@ -255,13 +382,26 @@ pub(crate) fn face_attack_start(s: &Saber, obj: &mut [u8], pad: u16) {
     }
 }
 
-/// Called with the player's block and pad before its update: start /
-/// advance / end the swing, return the pad the ROM gets. Pure but for `s`.
-pub fn update(s: &mut Saber, obj: &[u8], pad: u16) -> u16 {
-    update_timed(s, obj, pad, None)
+/// May `player` start a swing now. Zero's saber is the arm part
+/// (docs/zero-upgrades.md; `$1F99` is shared by every player), whatever
+/// art he wears (the slash arc and sounds are X3's; X1 art and sprite
+/// packs swing without them). Sigma's attack is his own.
+pub(crate) fn armed(game: &Game, player: usize) -> bool {
+    game.player_characters[player] != crate::Character::Zero || game.wram()[ix(crate::ram::ARMOR)] & crate::ram::ARMOR_ARM != 0
 }
 
-pub(crate) fn update_timed(s: &mut Saber, obj: &[u8], pad: u16, duration: Option<u8>) -> u16 {
+/// Called with the player's block, pad and the armour byte `$1F99` before
+/// its update: start / advance / end the swing, return the pad the ROM
+/// gets. A swing starts only while `parts` has [`crate::ram::ARMOR_ARM`]
+/// (the saber is the arm part); without it X starts nothing (and still
+/// never reaches the ROM). Pure but for `s`.
+pub fn update(s: &mut Saber, obj: &[u8], pad: u16, parts: u8) -> u16 {
+    update_timed(s, obj, pad, None, parts & crate::ram::ARMOR_ARM != 0)
+}
+
+/// [`update`] with a bone sheet's attack length (`duration`, else the X3
+/// poses') and whether a swing may start ([`armed`]).
+pub(crate) fn update_timed(s: &mut Saber, obj: &[u8], pad: u16, duration: Option<u8>, armed: bool) -> u16 {
     let action = obj[0x02];
     let x = pad & BTN_X != 0;
     let pressed = x && !s.btn;
@@ -278,7 +418,7 @@ pub(crate) fn update_timed(s: &mut Saber, obj: &[u8], pad: u16, duration: Option
         if action == 0x0E || action == 0x0C || duration.map_or_else(|| pose_index(s.t, s.air).is_none(), |length| s.t > length) {
             s.t = 0; // hurt / dead / done
         }
-    } else if pressed {
+    } else if pressed && armed {
         // stand, ready, walk, land, dash / jump, fall. Not on walls, not hurt.
         let (ground, air) = (matches!(action, 0x00 | 0x02 | 0x04 | 0x0A | 0x14), matches!(action, 0x06 | 0x08));
         if ground || air {
@@ -359,6 +499,11 @@ pub fn shots_done(game: &mut Game) {
             game.extra_coop[index].saber.slot = put_shot(game, &shot);
         }
     }
+    for k in 0..2 {
+        if let Some(shot) = wave_shot_bytes(&game.waves[k]) {
+            game.waves[k].slot = put_shot(game, &shot);
+        }
+    }
 }
 
 /// Into the first free slot; the slot, or `0xFF` when the table is full.
@@ -393,10 +538,18 @@ pub fn take_back(game: &mut Game) {
     game.coop.saber = p2;
     game.extra_coop[0].saber = p3;
     game.extra_coop[1].saber = p4;
+    // The wave pierces, like the Hadouken's shot: no hit bookkeeping.
+    for k in 0..2 {
+        let s = std::mem::replace(&mut game.waves[k].slot, 0xFF);
+        if s != 0xFF {
+            let o = ix(SHOTS) + usize::from(s) * SHOT_LEN;
+            game.wram_mut()[o..o + SHOT_LEN].fill(0);
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -405,7 +558,7 @@ mod tests {
         let mut s=Saber::default();
         face_attack_start(&s,&mut obj,BTN_LEFT|BTN_X);
         assert_eq!(obj[0x11],0x22);
-        assert_eq!(update_timed(&mut s,&obj,BTN_LEFT|BTN_X,Some(49)),0);
+        assert_eq!(update_timed(&mut s,&obj,BTN_LEFT|BTN_X,Some(49),true),0);
         face_attack_start(&s,&mut obj,BTN_RIGHT|BTN_X);
         assert_eq!(obj[0x11],0x22,"active swing direction was changed");
     }
@@ -416,18 +569,18 @@ mod tests {
         obj[2] = 0;
         let mut ground = Saber { t: 20, air: false, ..Saber::default() };
         let jump = crate::BTN_B | BTN_RIGHT;
-        assert_eq!(update_timed(&mut ground, &obj, jump, Some(49)), jump);
+        assert_eq!(update_timed(&mut ground, &obj, jump, Some(49), true), jump);
         assert_eq!(ground.t, 0);
         let mut air = Saber { t: 20, air: true, ..Saber::default() };
         obj[2] = 0x06;
-        assert_eq!(update_timed(&mut air, &obj, jump, Some(49)), BTN_RIGHT);
+        assert_eq!(update_timed(&mut air, &obj, jump, Some(49), true), BTN_RIGHT);
         assert_eq!(air.t, 21, "air swing should retain its existing input mask");
         obj[2] = 0; // A landed air swing is grounded again.
-        assert_eq!(update_timed(&mut air, &obj, jump, Some(49)), jump);
+        assert_eq!(update_timed(&mut air, &obj, jump, Some(49), true), jump);
         assert_eq!(air.t, 0);
         air = Saber { t: 20, air: true, ..Saber::default() };
         obj[2] = 0x12; // A real wall slide must permit a fresh wall-kick input.
-        assert_eq!(update_timed(&mut air, &obj, jump, Some(49)), jump);
+        assert_eq!(update_timed(&mut air, &obj, jump, Some(49), true), jump);
         assert_eq!(air.t, 0);
     }
 
@@ -478,13 +631,13 @@ mod tests {
             b
         };
         let mut s = Saber::default();
-        assert_eq!(update(&mut s, &blk(0x00), 0x0100), 0x0100);
+        assert_eq!(update(&mut s, &blk(0x00), 0x0100, 0x02), 0x0100);
         assert_eq!(frame(&s), None);
-        assert_eq!(update(&mut s, &blk(0x04), BTN_X | 0x0100), 0); // starts, pad masked
+        assert_eq!(update(&mut s, &blk(0x04), BTN_X | 0x0100, 0x02), 0); // starts, pad masked
         assert_eq!(frame(&s), Some(86));
         let mut seen = vec![86];
         for _ in 0..30 {
-            update(&mut s, &blk(0x00), BTN_X); // held: no restart
+            update(&mut s, &blk(0x00), BTN_X, 0x02); // held: no restart
             seen.extend(frame(&s));
         }
         // 4 + 4 + ARC_FRAMES + 4 + 4 poses
@@ -492,15 +645,76 @@ mod tests {
         assert_eq!(seen[8..8 + usize::from(ARC_FRAMES)], vec![88; usize::from(ARC_FRAMES)][..]);
         assert_eq!(s.t, 0);
         // Air: left/right pass.
-        update(&mut s, &blk(0x08), 0);
-        assert_eq!(update(&mut s, &blk(0x08), BTN_X | 0x0100 | 0x8000), 0x0100);
+        update(&mut s, &blk(0x08), 0, 0x02);
+        assert_eq!(update(&mut s, &blk(0x08), BTN_X | 0x0100 | 0x8000, 0x02), 0x0100);
         assert_eq!(frame(&s), Some(95));
         // Hurt cancels; walls don't start.
-        update(&mut s, &blk(0x0E), 0);
+        update(&mut s, &blk(0x0E), 0, 0x02);
         assert_eq!(s.t, 0);
-        update(&mut s, &blk(0x12), 0);
-        update(&mut s, &blk(0x12), BTN_X);
+        update(&mut s, &blk(0x12), 0, 0x02);
+        update(&mut s, &blk(0x12), BTN_X, 0x02);
         assert_eq!(s.t, 0);
+    }
+
+    /// The saber is the arm part: refused at `$1F99 = 0` (and with the
+    /// other three parts), taken at `$02`. X never reaches the ROM.
+    #[test]
+    fn saber_needs_arm_part() {
+        let stand = [0u8; 0x90];
+        for parts in [0x00, 0x01, 0x04, 0x08, 0x0D] {
+            let mut s = Saber::default();
+            assert_eq!(update(&mut s, &stand, BTN_X | 0x0100, parts), 0x0100, "$1F99 = {parts:02X}");
+            assert_eq!(s.t, 0, "$1F99 = {parts:02X}");
+        }
+        let mut s = Saber::default();
+        assert_eq!(update(&mut s, &stand, BTN_X | 0x0100, crate::ram::ARMOR_ARM), 0);
+        assert_eq!(frame(&s), Some(86));
+    }
+
+    /// A swing with a full charge and the Hadouken arms the wave (charge
+    /// consumed, the charge sound stopped), throws it on the arc's first
+    /// frame from Zero's drawn origin, and it flies `WAVE_FRAMES`.
+    #[test]
+    fn saber_wave_spawns_on_arc_and_flies() {
+        let mut blk = [0u8; 0x90];
+        blk[OFF_POS_X..OFF_POS_X + 2].copy_from_slice(&500u16.to_le_bytes());
+        blk[OFF_POS_Y..OFF_POS_Y + 2].copy_from_slice(&367u16.to_le_bytes());
+        blk[0x11] = 0x62; // facing right
+        let charged = |b: &mut [u8; 0x90]| {
+            b[0x58] = 4;
+            b[0x5B] = 2;
+            b[0x87] = 0x40;
+        };
+        // No Hadouken: nothing armed, the charge stays for the ROM.
+        let (mut s, mut w, mut b) = (Saber::default(), Wave::default(), blk);
+        charged(&mut b);
+        update(&mut s, &b, BTN_X, 0x02);
+        assert!(!wave_step(&mut w, &s, &mut b, false));
+        assert!(!w.armed && b[0x5B] == 2);
+        // Hadouken, no charge: nothing.
+        let (mut s, mut w, mut b) = (Saber::default(), Wave::default(), blk);
+        update(&mut s, &b, BTN_X, 0x02);
+        wave_step(&mut w, &s, &mut b, true);
+        assert!(!w.armed);
+        // Both: armed, charge consumed, then thrown on the arc.
+        let (mut s, mut w, mut b) = (Saber::default(), Wave::default(), blk);
+        charged(&mut b);
+        update(&mut s, &b, BTN_X, 0x02);
+        assert!(wave_step(&mut w, &s, &mut b, true), "stop the charge sound");
+        assert!(w.armed && b[0x58] == 0 && b[0x5B] == 0 && b[0x87] == 0);
+        while w.t == 0 {
+            update(&mut s, &b, 0, 0x02);
+            wave_step(&mut w, &s, &mut b, true);
+        }
+        assert_eq!(frame(&s), Some(88), "thrown on the arc's first frame");
+        assert_eq!((w.x, w.y), (500, 367 - 8));
+        let shot = wave_shot_bytes(&w).unwrap();
+        assert_eq!((shot[0x0A], u16::from_le_bytes([shot[5], shot[6]])), (WAVE_DAMAGE_ID, 508)); // spawn: 8 in front
+        for _ in 0..WAVE_FRAMES {
+            update(&mut s, &b, 0, 0x02);
+            wave_step(&mut w, &s, &mut b, true);
+        }
+        assert_eq!(w.t, 0);
     }
 
     /// Opaque pixels of `sprites` drawn from `page` (16-wide, 32 B slots),
@@ -625,6 +839,7 @@ mod tests {
         let mut g = crate::Game::from_rom(std::fs::read(x1).unwrap()).unwrap();
         g.set_x3_rom(&std::fs::read(x3).unwrap()).unwrap();
         g.load_state(&state).unwrap();
+        give_arm(&mut g);
         if p1_zero {
             g.set_p1_zero(true).unwrap();
         } else {
@@ -632,6 +847,11 @@ mod tests {
             crate::coop::register_coop_traps(&mut g).unwrap();
         }
         Some(g)
+    }
+
+    /// The saber is the arm part; the test states have none.
+    pub(crate) fn give_arm(g: &mut crate::Game) {
+        g.wram_mut()[ix(crate::ram::ARMOR)] |= crate::ram::ARMOR_ARM;
     }
 
     /// hw-spiky, P2 swings where it stands while the Spiky walks in:
@@ -660,6 +880,82 @@ mod tests {
         let last = seen.iter().rposition(|s| s.0 == 89).expect("tail");
         assert!(seen[last].2 >= 90, "{seen:?}");
         assert!(seen.iter().all(|&(_, hp, _)| hp == 2), "{seen:?}");
+    }
+
+    /// hw-spiky, P2 swings where it stands with a full charge at frame 2:
+    /// `(Spiky HP, Spiky x - P2 x, wave frames)` per frame.
+    fn charged_swing(hadouken: bool) -> Vec<(u8, i32, u8)> {
+        let Some(mut g) = spiky(false) else { return Vec::new() };
+        if hadouken {
+            g.wram_mut()[ix(crate::ram::HADOUKEN)] |= crate::ram::HADOUKEN_BIT;
+        }
+        let mut seen = Vec::new();
+        for f in 1..=60 {
+            if f == 2 {
+                g.coop.p2[0x58] = 4; // charging, full
+                g.coop.p2[0x5B] = 2;
+            }
+            g.step(crate::Pads { p1: 0, p2: if f == 2 { BTN_X } else { 0 } });
+            let gap = i32::from(u16::from_le_bytes([g.wram()[0x0E68 + 5], g.wram()[0x0E68 + 6]]))
+                - i32::from(u16::from_le_bytes([g.coop.p2[OFF_POS_X], g.coop.p2[OFF_POS_X + 1]]));
+            seen.push((g.wram()[0x0E68 + 0x27] & 0x7F, gap, g.waves[1].t));
+        }
+        seen
+    }
+
+    /// With the Hadouken and a full charge the swing throws the wave: the
+    /// Spiky, out of the blade's reach (test `saber_misses_spiky_from_afar`),
+    /// dies to it as to X's Hadouken (measured: 2 -> 1 -> dead on two
+    /// frames running; the shot id 4 is the Hadouken's, it pierces).
+    #[test]
+    fn saber_wave_hits_spiky_from_afar() {
+        let seen = charged_swing(true);
+        if seen.is_empty() {
+            return;
+        }
+        let hit = seen.iter().position(|s| s.0 < 2).unwrap_or_else(|| panic!("the wave hits: {seen:?}"));
+        assert!(seen[hit].1 > 60 && seen[hit].2 > 0, "out of the blade's reach, by the wave: {seen:?}");
+        assert_eq!(seen[hit + 1].0, 0, "dead the next frame, as to the Hadouken: {seen:?}");
+    }
+
+    /// Save states carry each player's wave in their `WAVE` tail; a state
+    /// saved before it (hw-spiky) loads with none.
+    #[test]
+    fn saber_wave_in_save_state() {
+        let Some(mut g) = spiky(false) else { return };
+        assert_eq!(g.waves, [Wave::default(); 4]);
+        g.waves[1] = Wave { t: 5, air: true, right: true, x: 1234, y: 345, ..Wave::default() };
+        let s = g.save_state();
+        let mut h = spiky(false).unwrap();
+        h.load_state(&s).unwrap();
+        assert_eq!(h.waves, g.waves);
+    }
+
+    /// P1 as Zero (`--zero`): the same charged swing from the live block
+    /// throws P1's own wave (`waves[0]`), with the charge consumed.
+    #[test]
+    fn saber_p1_throws_the_wave() {
+        let Some(mut g) = spiky(true) else { return };
+        g.wram_mut()[ix(crate::ram::HADOUKEN)] |= crate::ram::HADOUKEN_BIT;
+        let b = ix(crate::ram::X_BASE);
+        let mut thrown = false;
+        for f in 1..=30 {
+            if f == 2 {
+                g.wram_mut()[b + 0x58] = 4;
+                g.wram_mut()[b + 0x5B] = 2;
+            }
+            g.step(crate::Pads { p1: if f == 2 { BTN_X } else { 0 }, p2: 0 });
+            thrown |= g.waves[0].t > 0;
+            assert_eq!(g.waves[1].t, 0, "P2 has none");
+        }
+        assert!(thrown && g.wram()[b + 0x5B] == 0);
+    }
+
+    /// No Hadouken: the same charged swing throws nothing.
+    #[test]
+    fn saber_no_wave_without_hadouken() {
+        let seen = charged_swing(false);
+        assert!(seen.iter().all(|s| s.2 == 0), "{seen:?}");
     }
 
     /// Swing at 19: on the arc pose (88) the Spiky is 88..74 px away; it
@@ -698,6 +994,7 @@ mod tests {
         let mut g = crate::Game::from_rom(std::fs::read(x1).unwrap()).unwrap();
         g.set_x3_rom(&std::fs::read(x3).unwrap()).unwrap();
         g.load_state(&state).unwrap();
+        give_arm(&mut g);
         g.coop.enabled = true;
         crate::coop::register_coop_traps(&mut g).unwrap();
         let w16 = |g: &crate::Game, a: usize| i32::from(u16::from_le_bytes([g.wram()[a], g.wram()[a + 1]]));
@@ -741,6 +1038,7 @@ mod tests {
         assert!(g.set_p1_zero(true).is_err(), "needs the X3 set");
         g.set_x3_rom(&std::fs::read(x3).unwrap()).unwrap();
         g.load_state(&state).unwrap();
+        give_arm(&mut g);
         g.set_p1_zero(true).unwrap();
         let hp = |g: &crate::Game| g.wram()[0x0E68 + 0x27] & 0x7F;
         let mut seen = Vec::new();
@@ -777,6 +1075,7 @@ mod tests {
             let mut g = crate::Game::from_rom(std::fs::read(&x1).unwrap()).unwrap();
             g.set_x3_rom(&std::fs::read(&x3).unwrap()).unwrap();
             g.load_state(&state).unwrap();
+            give_arm(&mut g);
             g.coop.enabled = true;
             crate::coop::register_coop_traps(&mut g).unwrap();
             g.set_p1_zero(true).unwrap(); // both Zeros: shadow pages 0 and 1

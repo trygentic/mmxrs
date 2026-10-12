@@ -76,6 +76,9 @@ impl Mode {
 pub struct Settings {
     pub rom: String,
     pub x3_rom: String,
+    /// Custom Zero sprite pack path (`--sprite-pack`), empty for none.
+    #[serde(default)]
+    pub sprite_pack: String,
     pub scale: u32,
     pub fullscreen: bool,
     pub zero: bool,
@@ -123,6 +126,44 @@ pub struct Settings {
     /// online, both players need it).
     #[serde(default)]
     pub wide_gameplay: bool,
+    /// `--pad-map`: gilrs pad button → SNES button (or `none`); unlisted pad
+    /// buttons keep the runner's positional default. Empty = send nothing.
+    #[serde(default)]
+    pub pad_map: std::collections::BTreeMap<String, String>,
+}
+
+/// Pad buttons the mapping table offers, in UI order (gilrs names; positional,
+/// `South` is the bottom face button).
+pub const PAD_BUTTONS: [&str; 10] = [
+    "South", "East", "West", "North", "LeftTrigger", "RightTrigger", "LeftTrigger2", "RightTrigger2", "Start", "Select",
+];
+/// SNES buttons a pad button may be bound to.
+pub const GAME_BUTTONS: [&str; 8] = ["A", "B", "X", "Y", "L", "R", "Start", "Select"];
+/// Named layouts: positional is the runner's own default (Switch Pro / SNES
+/// labels), Xbox labels makes the printed A B X Y match.
+pub fn pad_map_presets() -> Vec<(&'static str, std::collections::BTreeMap<String, String>)> {
+    let xbox = [("South", "A"), ("East", "B"), ("West", "X"), ("North", "Y")]
+        .into_iter()
+        .map(|(p, b)| (p.to_string(), b.to_string()))
+        .collect();
+    vec![("Positional (Switch Pro / SNES)", Default::default()), ("Xbox labels", xbox)]
+}
+/// The `--pad-map` value for a settings table, or None when it is empty.
+pub fn pad_map_spec(map: &std::collections::BTreeMap<String, String>) -> Result<Option<String>, String> {
+    let mut pairs = Vec::new();
+    for (pad, btn) in map {
+        if btn.is_empty() {
+            continue;
+        }
+        if !PAD_BUTTONS.contains(&pad.as_str()) {
+            return Err(format!("unknown pad button {pad:?} in the controller map"));
+        }
+        if btn != "none" && !GAME_BUTTONS.contains(&btn.as_str()) {
+            return Err(format!("unknown SNES button {btn:?} in the controller map"));
+        }
+        pairs.push(format!("{pad}={btn}"));
+    }
+    Ok((!pairs.is_empty()).then(|| pairs.join(",")))
 }
 
 fn default_local_players() -> u8 { 1 }
@@ -160,6 +201,7 @@ impl Default for Settings {
         Settings {
             rom: String::new(),
             x3_rom: String::new(),
+            sprite_pack: String::new(),
             scale: 3,
             fullscreen: false,
             zero: false,
@@ -183,6 +225,7 @@ impl Default for Settings {
             ice: String::new(),
             widescreen: String::new(),
             wide_gameplay: false,
+            pad_map: Default::default(),
         }
     }
 }
@@ -220,7 +263,7 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
     let rom = s.rom.trim();
     let x3 = s.x3_rom.trim();
     if rom.is_empty() {
-        return Err("choose the Mega Man X ROM".into());
+        return Err(NO_ROM_HINT.into());
     }
     let p1 = if s.zero && s.characters[0] == "x" { "zero" } else { s.characters[0].as_str() };
     let local_players = if s.coop_local { s.local_players.max(2) } else { s.local_players };
@@ -242,7 +285,10 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
             return Err(format!("unknown player {} character {character:?}", i + 1));
         }
         if matches!(Character::parse(character), Some(Character::Bass | Character::ProtoMan)) && !s.bone_sheets {
-            return Err(format!("{} needs 60 FPS bone animation sheets enabled", character));
+            return Err(format!(
+                "{} has no ROM sprites: tick \"60 FPS generated character sprites\" and pick a bone sheet pack",
+                Character::parse(character).map_or_else(|| character.clone(), |c| c.label().to_string())
+            ));
         }
     }
     if !(1..=8).contains(&s.scale) {
@@ -252,6 +298,9 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
     let mut push = |xs: &[&str]| a.extend(xs.iter().map(|x| x.to_string()));
     if !x3.is_empty() {
         push(&["--x3-rom", x3]);
+    }
+    if !s.sprite_pack.trim().is_empty() {
+        push(&["--sprite-pack", s.sprite_pack.trim()]);
     }
     push(&["--scale", &s.scale.to_string()]);
     if s.fullscreen {
@@ -276,9 +325,9 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
         push(&["--bone-sheets", path]);
     }
     if s.characters.iter().take(usize::from(player_count)).any(|id| id == "vile") {
+        // Optional: without the PNG the game keeps Vile's ROM poses.
         let path = s.vile_sprite_path.trim();
-        if path.is_empty() { return Err("choose the on-foot Vile PNG".into()); }
-        push(&["--vile-sprite", path]);
+        if !path.is_empty() { push(&["--vile-sprite", path]); }
     }
     match s.widescreen.as_str() {
         "" | "off" => {}
@@ -287,6 +336,9 @@ pub fn build_args(s: &Settings) -> Result<Vec<String>, String> {
     }
     if s.wide_gameplay {
         push(&["--wide-gameplay"]);
+    }
+    if let Some(spec) = pad_map_spec(&s.pad_map)? {
+        push(&["--pad-map", &spec]);
     }
     if s.online {
         let room = s.room.trim();
@@ -477,6 +529,169 @@ pub fn spawn(program: &Path, args: &[String], log: &Path) -> std::io::Result<Chi
         .spawn()
 }
 
+/// Characters the game refuses to start without a bone sheet for them
+/// (`main.rs`: no ROM art to fall back on).
+pub fn needs_bone_sheet(character: Character) -> bool {
+    matches!(character, Character::Bass | Character::ProtoMan)
+}
+
+/// Whether the sheet folder holds `<id>/<id>.sheet.json` for `character`, the
+/// file the game's `bone_sheets::install` loads.
+pub fn has_bone_sheet(folder: &str, character: Character) -> bool {
+    let folder = folder.trim();
+    !folder.is_empty() && Path::new(folder).join(character.id()).join(format!("{}.sheet.json", character.id())).is_file()
+}
+
+/// Characters the sheet folder has sheets for, or why it is not a usable
+/// pack. The pack is private art and is not part of a release download.
+pub fn bone_pack(folder: &str) -> Result<Vec<Character>, String> {
+    let folder = folder.trim();
+    if folder.is_empty() {
+        return Err("choose a bone animation sheet folder".into());
+    }
+    if !Path::new(folder).is_dir() {
+        return Err(format!(
+            "No 60 FPS sprite pack at {folder}. The pack is not included in the download: untick this option, \
+             or pick a folder that holds <character>/<character>.sheet.json files."
+        ));
+    }
+    let found: Vec<Character> = Character::ALL.iter().copied().filter(|&c| has_bone_sheet(folder, c)).collect();
+    if found.is_empty() {
+        return Err(format!(
+            "{folder} has no character sheets (<character>/<character>.sheet.json). Untick this option or pick the pack folder."
+        ));
+    }
+    Ok(found)
+}
+
+/// Why `character` cannot be picked with these settings, or None. Used to grey
+/// out the dropdown entry and to refuse the launch.
+pub fn character_unavailable(s: &Settings, character: Character) -> Option<String> {
+    if needs_bone_sheet(character) && !has_bone_sheet(&s.bone_sheets_path, character) {
+        return Some(format!(
+            "{} has no ROM sprites: he needs a 60 FPS bone sheet pack with {}/{}.sheet.json. \
+             Tick \"60 FPS generated character sprites\" and pick the pack folder.",
+            character.label(),
+            character.id(),
+            character.id()
+        ));
+    }
+    None
+}
+
+/// Co-op players whose art is rough: anyone but X, or Zero with the X3 ROM,
+/// who has no sheet in an enabled 60 FPS pack (X1 Zero and the bosses use
+/// partial X1 ROM sprites). Empty for single player.
+pub fn coop_rough_art(s: &Settings) -> Vec<Character> {
+    let players = if s.online { 2 } else if s.coop_local { s.local_players.max(2) } else { s.local_players };
+    if players < 2 {
+        return Vec::new();
+    }
+    let mut rough = Vec::new();
+    for c in s.characters.iter().take(usize::from(players)).filter_map(|c| Character::parse(c)) {
+        let fine = c == Character::X
+            || (c == Character::Zero && !s.x3_rom.trim().is_empty())
+            || (s.bone_sheets && has_bone_sheet(&s.bone_sheets_path, c));
+        if !fine && !rough.contains(&c) {
+            rough.push(c);
+        }
+    }
+    rough
+}
+
+/// The co-op art warning shown near the character pickers, or None. A
+/// warning only: these characters still launch.
+pub fn coop_art_warning(s: &Settings) -> Option<String> {
+    let rough = coop_rough_art(s);
+    if rough.is_empty() {
+        return None;
+    }
+    let names: Vec<_> = rough.iter().map(|c| if *c == Character::Zero { "Zero (without the X3 ROM)" } else { c.label() }).collect();
+    Some(format!(
+        "Co-op looks best with X, and Zero using the Mega Man X3 ROM. {} {} rough X1 sprite art without the \
+         60 FPS character sprite pack and may look glitchy.",
+        names.join(", "),
+        if names.len() == 1 { "uses" } else { "use" }
+    ))
+}
+
+/// File checks the game would otherwise fail on after the window closes:
+/// paths exist, the selected characters have their art. [`build_args`] stays
+/// pure so `--print-args` and its tests need no files.
+pub fn preflight(s: &Settings) -> Result<(), String> {
+    let file = |path: &str, what: &str| -> Result<(), String> {
+        let p = Path::new(path.trim());
+        if p.is_file() { Ok(()) } else { Err(format!("{what} not found: {}", path.trim())) }
+    };
+    if s.rom.trim().is_empty() {
+        return Err(NO_ROM_HINT.into());
+    }
+    file(&s.rom, "Mega Man X ROM")?;
+    if !s.x3_rom.trim().is_empty() {
+        file(&s.x3_rom, "Mega Man X3 ROM")?;
+    }
+    if !s.sprite_pack.trim().is_empty() {
+        file(&s.sprite_pack, "Zero sprite pack")?;
+    }
+    let players = if s.online { 2 } else if s.coop_local { s.local_players.max(2) } else { s.local_players };
+    let chosen: Vec<Character> = s.characters.iter().take(usize::from(players)).filter_map(|c| Character::parse(c)).collect();
+    if s.bone_sheets {
+        bone_pack(&s.bone_sheets_path)?;
+    }
+    let roster: &[Character] = if s.vs_mode { Character::ALL } else { &chosen };
+    for &c in roster {
+        if let Some(why) = character_unavailable(s, c) {
+            return Err(if s.vs_mode { format!("VS mode offers every fighter. {why}") } else { why });
+        }
+    }
+    Ok(())
+}
+
+pub const NO_ROM_HINT: &str =
+    "Select your Mega Man X (USA) .sfc ROM. It isn't bundled: browse to your own dump or drop it on this window.";
+
+/// A plain explanation of a failed game run from its log (stdout + stderr),
+/// or None when nothing known matched. The raw lines are still shown.
+pub fn diagnose(log: &str, s: &Settings) -> Option<String> {
+    let rom = s.rom.trim();
+    let x3 = s.x3_rom.trim();
+    for line in log.lines().rev().map(str::trim).filter(|l| !l.is_empty()) {
+        let msg = if line.starts_with("no ROM:") {
+            NO_ROM_HINT.to_string()
+        } else if line.starts_with("netplay:") {
+            format!(
+                "Could not connect online ({}). Check the room name and signal URL, that both players picked the \
+                 same mode, and that the host started first.",
+                line.trim_start_matches("netplay:").trim()
+            )
+        } else if line.starts_with("bone sheets:") || line.contains("need a 60 FPS bone sheet pack") {
+            format!(
+                "The 60 FPS bone sheet pack is missing or incomplete ({}). Pick a pack folder that has every \
+                 selected character, or choose X or Zero.",
+                line.trim_start_matches("bone sheets:").trim()
+            )
+        } else if line.starts_with("Vile's on-foot sprite is required") {
+            "This mmxrs build requires Vile's on-foot PNG. Set the Vile sprite path, choose another character, \
+             or update the game: newer builds use his ROM poses without it."
+                .to_string()
+        } else if line.contains(" sprites: ") {
+            format!("Could not read a boss's sprites from the X1 ROM ({line}). Check it is the Mega Man X (USA) dump.")
+        } else if !x3.is_empty() && line.starts_with(x3) {
+            format!("The X3 ROM could not be used ({}). Clear it or pick Mega Man X3 (USA).", &line[x3.len()..].trim_start_matches(':').trim())
+        } else if !rom.is_empty() && line.starts_with(rom) {
+            format!("The Mega Man X ROM could not be loaded ({}). Pick the Mega Man X (USA) .sfc dump.", &line[rom.len()..].trim_start_matches(':').trim())
+        } else if line.starts_with("unknown argument") {
+            "The game did not understand an option from the launcher. The launcher and the mmxrs program are \
+             probably from different releases: use the pair from the same download."
+                .to_string()
+        } else {
+            continue;
+        };
+        return Some(msg);
+    }
+    None
+}
+
 /// Last `n` non-empty lines of `text`.
 pub fn last_lines(text: &str, n: usize) -> Vec<&str> {
     let v: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -485,6 +700,18 @@ pub fn last_lines(text: &str, n: usize) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pad_map_is_sent_only_when_set() {
+        let mut s = Settings { rom: "/x.sfc".into(), ..Settings::default() };
+        assert!(!build_args(&s).unwrap().contains(&"--pad-map".to_string()));
+        s.pad_map = pad_map_presets()[1].1.clone();
+        let a = build_args(&s).unwrap();
+        assert!(a.windows(2).any(|w| w == ["--pad-map", "East=B,North=Y,South=A,West=X"]), "{a:?}");
+        s.pad_map.insert("Start".into(), "none".into());
+        assert!(build_args(&s).unwrap().iter().any(|x| x.contains("Start=none")));
+        s.pad_map.insert("Bogus".into(), "A".into());
+        assert!(build_args(&s).is_err());
+    }
     use super::*;
 
     fn base() -> Settings {
@@ -496,6 +723,7 @@ mod tests {
         assert_eq!(build_args(&base()).unwrap(), ["--rom", "x.sfc", "--scale", "3"]);
         let s = Settings {
             x3_rom: "x3.sfc".into(),
+            sprite_pack: "zero.json".into(),
             scale: 5,
             fullscreen: true,
             zero: true,
@@ -504,7 +732,7 @@ mod tests {
         };
         assert_eq!(
             build_args(&s).unwrap().join(" "),
-            "--rom x.sfc --x3-rom x3.sfc --scale 5 --fullscreen --zero --coop-local"
+            "--rom x.sfc --x3-rom x3.sfc --sprite-pack zero.json --scale 5 --fullscreen --zero --coop-local"
         );
     }
 
@@ -566,7 +794,7 @@ mod tests {
     fn bone_sheet_option_and_external_characters() {
         let mut s = base();
         s.characters[0] = "bass".into();
-        assert!(build_args(&s).unwrap_err().contains("bone animation sheets"));
+        assert!(build_args(&s).unwrap_err().contains("bone sheet pack"));
         s.bone_sheets = true;
         s.bone_sheets_path = "/private/sheets".into();
         assert!(build_args(&s).unwrap().windows(2).any(|w| w == ["--bone-sheets", "/private/sheets"]));
@@ -640,6 +868,103 @@ mod tests {
         let hex = |d: &[u8]| sha256(d).iter().map(|b| format!("{b:02x}")).collect::<String>();
         assert_eq!(hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
         assert_eq!(hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn diagnose_maps_game_errors() {
+        let s = Settings { rom: "/r/mmx.sfc".into(), x3_rom: "/r/x3.sfc".into(), ..base() };
+        let d = |log: &str| diagnose(log, &s).unwrap_or_default();
+        assert!(d("no ROM: pass --rom PATH or set MMX_ROM\nusage: mmxrs --rom PATH").contains("isn't bundled"));
+        assert!(d("netplay: room full").contains("connect online (room full)"));
+        assert!(d("Bass and Proto Man need a 60 FPS bone sheet pack (--bone-sheets DIR)").contains("bone sheet pack"));
+        assert!(d("bone sheets: bone sheet folder missing: /x").contains("folder missing"));
+        assert!(d("Vile's on-foot sprite is required at a.png: No such file").contains("on-foot PNG"));
+        assert!(d("/r/mmx.sfc: No such file or directory (os error 2)").contains("X ROM could not be loaded (No such file"));
+        assert!(d("/r/x3.sfc: not an X3 ROM").contains("X3 ROM could not be used (not an X3 ROM)"));
+        assert!(d("unknown argument \"--foo\"").contains("different releases"));
+        assert_eq!(diagnose("audio: no output device\nsomething odd", &s), None);
+    }
+
+    /// The window's failure path: spawn, wait, read the log, explain it.
+    #[cfg(unix)]
+    #[test]
+    fn failed_run_is_explained_from_its_log() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("mmx-launcher-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let game = dir.join("mmxrs");
+        std::fs::write(&game, "#!/bin/sh\necho 'audio: ok'\necho 'no ROM: pass --rom PATH or set MMX_ROM' >&2\necho 'usage: mmxrs' >&2\nexit 2\n").unwrap();
+        std::fs::set_permissions(&game, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let log = dir.join(LOG_FILE_NAME);
+        let status = spawn(&game, &[], &log).unwrap().wait().unwrap();
+        assert_eq!(status.code(), Some(2));
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(diagnose(&text, &base()).unwrap().contains("isn't bundled"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preflight_checks_files_and_sheet_characters() {
+        let dir = std::env::temp_dir().join(format!("mmx-launcher-pre-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("bass")).unwrap();
+        let rom = dir.join("x.sfc");
+        std::fs::write(&rom, b"rom").unwrap();
+        let mut s = Settings { rom: rom.to_string_lossy().into(), bone_sheets_path: dir.to_string_lossy().into(), ..base() };
+        assert_eq!(preflight(&s), Ok(()));
+        // The 60 FPS option with no pack (a release download) or an empty one.
+        let missing = Settings { bone_sheets: true, bone_sheets_path: "/nope/bone_sheets".into(), ..s.clone() };
+        assert!(preflight(&missing).unwrap_err().contains("not included in the download"));
+        let empty = Settings { bone_sheets: true, ..s.clone() };
+        assert!(preflight(&empty).unwrap_err().contains("has no character sheets"));
+        assert!(preflight(&Settings { rom: String::new(), ..s.clone() }).unwrap_err().contains("isn't bundled"));
+        assert!(preflight(&Settings { rom: "/nope.sfc".into(), ..s.clone() }).unwrap_err().contains("not found"));
+        s.characters[0] = "bass".into();
+        s.bone_sheets = true;
+        assert!(character_unavailable(&s, Character::Bass).is_some());
+        assert!(preflight(&s).unwrap_err().contains("has no character sheets"));
+        assert!(preflight(&Settings { bone_sheets: false, ..s.clone() }).unwrap_err().contains("Bass has no ROM sprites"));
+        std::fs::write(dir.join("bass/bass.sheet.json"), b"{}").unwrap();
+        assert_eq!(character_unavailable(&s, Character::Bass), None);
+        assert_eq!(preflight(&s), Ok(()));
+        assert_eq!(bone_pack(&s.bone_sheets_path), Ok(vec![Character::Bass]));
+        assert!(character_unavailable(&s, Character::ProtoMan).is_some());
+        assert_eq!(character_unavailable(&s, Character::Zero), None);
+        s.characters[0] = "vile".into();
+        // The on-foot PNG is optional art: Vile launches on ROM poses without it.
+        s.vile_sprite_path = "/nope/vile.png".into();
+        assert_eq!(preflight(&s), Ok(()));
+        s.vile_sprite_path.clear();
+        assert!(!build_args(&s).unwrap().contains(&"--vile-sprite".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn coop_art_warning_only_for_rough_coop_characters() {
+        let dir = std::env::temp_dir().join(format!("mmx-launcher-coop-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("zero")).unwrap();
+        std::fs::write(dir.join("zero/zero.sheet.json"), b"{}").unwrap();
+        // Default co-op: X + X1 Zero warns; the X3 ROM fixes Zero.
+        let mut s = Settings { local_players: 2, ..base() };
+        assert_eq!(coop_rough_art(&s), [Character::Zero]);
+        assert!(coop_art_warning(&s).unwrap().contains("Zero (without the X3 ROM)"));
+        s.x3_rom = "x3.sfc".into();
+        assert_eq!(coop_art_warning(&s), None);
+        // Single player never warns.
+        s.characters[0] = "sigma".into();
+        assert_eq!(coop_art_warning(&Settings { local_players: 1, ..s.clone() }), None);
+        assert_eq!(coop_rough_art(&s), [Character::Sigma]);
+        // An enabled pack with the character's sheet clears it; Sigma has none here.
+        s.x3_rom.clear();
+        s.characters[0] = "x".into();
+        s.bone_sheets = true;
+        s.bone_sheets_path = dir.to_string_lossy().into();
+        assert_eq!(coop_art_warning(&s), None);
+        s.characters[1] = "vile".into();
+        assert_eq!(coop_rough_art(&s), [Character::Vile]);
+        // Online is co-op too.
+        let online = Settings { online: true, local_players: 1, characters: ["x".into(), "zero".into(), "x".into(), "x".into()], ..base() };
+        assert_eq!(coop_rough_art(&online), [Character::Zero]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

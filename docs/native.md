@@ -34,7 +34,7 @@ after a round to fight again. `--vs-stage ID` presets the arena cursor; IDs
 are `highway`, `octopus`, `chameleon`, `armadillo`, `mammoth`, `eagle`,
 `mandrill`, `kuwanger`, and `penguin`. VS is local only; players 3 and 4 need
 gamepads. The animation sheets include Bass and Proto Man, who have no X1 ROM
-sprites. Vile also needs the on-foot PNG described below.
+sprites. Vile looks best with the on-foot PNG described below.
 For an unattended match, add `--vs-bots`: the configured fighters and
 `--vs-stage` arena start directly. Bots use normal movement and attack
 inputs, show the round winner for 90 frames, then start the next round.
@@ -57,9 +57,10 @@ vertically on the left and right screen edges. Online co-op currently keeps
 player 2 as Zero.
 Vile uses the private on-foot crop at
 `roms/derived/bone_sheets/user_sources/vile_idle.png` even without
-`--bone-sheets`; `--vile-sprite PNG` overrides that path. A selected Vile
-cannot start if the crop is missing, so the ROM's incorrect large boss sprite
-is never shown as a substitute.
+`--bone-sheets`; `--vile-sprite PNG` overrides that path. The crop is private
+art and not part of a release: without it the game prints a note and Vile
+keeps his X1 ROM poses (the boss sprite, larger and with the wrong
+silhouette on foot) rather than refusing to start.
 
 For a repeatable recording, pass `--demo-bots --p1-character x
 --p2-character zero --p3-character sigma --p4-character vile`. Demo mode
@@ -104,7 +105,8 @@ WebRTC transport; `--no-default-features` builds without it.
 
 Hotkeys: Tab hold fast-forward (8 frames per present, muted), F5 save state,
 F7 load state, 1-9 pick slot, F11 fullscreen, F10 next widescreen setting (off, 16:10, 16:9, 21:9, auto; also online: display only), P or F6 pause, `.` single-step
-while paused, Esc quit. States live in `$HOME/.mmxrs/slotN.state` (format and
+while paused, F2 fps and % of full speed in the picture's corner (also `--show-fps`;
+display only, so also online), Esc quit. States live in `$HOME/.mmxrs/slotN.state` (format and
 bug reports: [savestates.md](savestates.md)).
 Title bar: fps, `[coop]` or `[NET ...]`, `[SLOT n]`, `[PAUSED]`, `[FF]`.
 
@@ -157,6 +159,15 @@ The layout is positional, the same on every pad: bottom face button = SNES B
 `buttonA` is the bottom button on every pad, so Nintendo's printed labels come
 out swapped against Xbox's (Switch B is jump, Switch A is dash), which is what
 a SNES player expects since the Switch layout is the SNES one.
+
+`--pad-map 'South=A,East=B'` rebinds buttons: comma-separated `PAD=BUTTON`
+pairs with gilrs pad names (`South`, `East`, `West`, `North`, `LeftTrigger`,
+`RightTrigger`, `LeftTrigger2`, `RightTrigger2`, `Start`, `Select`,
+`DPadUp/Down/Left/Right`, `LeftThumb`, `RightThumb`) and SNES buttons (`A`,
+`B`, `X`, `Y`, `L`, `R`, `Start`, `Select`, `Up`, `Down`, `Left`, `Right`, or
+`none` to unbind). Unlisted pad buttons keep the positional default. The same
+spec drives both sources: GameController buttons are matched by position
+(`buttonA` is `South`, and so on). The d-pad and left stick always steer.
 
 | SNES | Xbox | PlayStation | Switch Pro | gilrs | GameController |
 |---|---|---|---|---|---|

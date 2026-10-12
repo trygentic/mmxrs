@@ -61,15 +61,18 @@ struct App {
     tex: (usize, usize),
     audio: Option<Audio>,
     gilrs: Option<gilrs::Gilrs>,
+    pad_map: keys::PadMap,
     /// macOS GameController pads seen last frame (see `gc_pad`).
     #[cfg(target_os = "macos")]
     gc: Vec<crate::gc_pad::GcPad>,
-    pads: [Option<PadId>; 4],
+    /// The pad driving each local player (`pad_slots`).
+    slots: crate::pad_slots::PadSlots<PadId>,
     /// `--pads` / `MMX_PAD_DEBUG=1`: log every pad bit change.
     pad_debug: bool,
     /// Last bits logged per pad (`pad_debug` only).
     pad_seen: Vec<(PadId, u16)>,
-    kb: [u16; 2],
+    /// Keyboard pad bits per local player (`keys::PLAYER_KEYS`).
+    kb: [u16; 4],
     fast: bool,
     paused: bool,
     frame_step: bool,
@@ -81,6 +84,10 @@ struct App {
     fps: f64,
     title: String,
     audio_stats: bool,
+    /// `--show-fps` / F2: `osd` speed readout.
+    show_fps: bool,
+    /// `osd` notice and when it goes away (no audio device).
+    notice: Option<(&'static str, Instant)>,
     /// Online co-op session (`--coop-host/--coop-join`).
     net: Option<Net>,
     /// Local fighter and arena selection, shown before the first ROM frame.
@@ -90,6 +97,7 @@ struct App {
 
 pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), String> {
     let audio = Audio::open();
+    let no_audio = audio.is_none();
     match &audio {
         Some(a) => game.set_audio_rate(a.rate),
         None => eprintln!("audio: no output device, pacing by timer"),
@@ -104,6 +112,7 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
     // and GameController delivers nothing to inactive apps otherwise.
     crate::gc_pad::monitor_background(true);
     let _ = pad_debug;
+    let pad_map = keys::PadMap::parse(args.pad_map.as_deref())?;
     let gilrs = gilrs::Gilrs::new()
         .map_err(|e| eprintln!("gamepads: {e}"))
         .ok();
@@ -148,12 +157,16 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         tex: (args.widescreen.initial().width(), 224),
         audio,
         gilrs,
+        pad_map,
         #[cfg(target_os = "macos")]
         gc: Vec::new(),
-        pads: [None; 4],
+        slots: crate::pad_slots::PadSlots::new(
+            usize::from(args.players.max(if args.coop_local { 2 } else { 1 })),
+            args.vs_mode || args.players > 1 || args.coop_local,
+        ),
         pad_debug,
         pad_seen: Vec::new(),
-        kb: [0; 2],
+        kb: [0; 4],
         fast: false,
         paused: false,
         frame_step: false,
@@ -165,6 +178,8 @@ pub fn run(mut game: Game, args: &Args, mut net: Option<Net>) -> Result<(), Stri
         fps: 0.0,
         title: String::new(),
         audio_stats: std::env::var_os("MMX_AUDIO_STATS").is_some_and(|v| v == "1"),
+        show_fps: args.show_fps,
+        notice: no_audio.then(|| ("NO AUDIO DEVICE - SOUND OFF", Instant::now() + Duration::from_secs(6))),
         net,
         vs_select,
         vs_prev_inputs: [0; 4],
@@ -205,7 +220,9 @@ impl App {
         let Some(gp) = self.gilrs.as_ref().and_then(|g| g.connected_gamepad(id)) else {
             return 0;
         };
-        let buttons = keys::PAD_BUTTONS
+        let buttons = self
+            .pad_map
+            .gilrs
             .iter()
             .filter(|(b, _)| gp.is_pressed(*b))
             .fold(0, |a, (_, bit)| a | bit);
@@ -214,27 +231,33 @@ impl App {
                 gp.value(gilrs::Axis::LeftStickX),
                 gp.value(gilrs::Axis::LeftStickY),
             )
+            // Pads without a d-pad mapping report it as a hat axis.
+            | keys::stick_bits(gp.value(gilrs::Axis::DPadX), gp.value(gilrs::Axis::DPadY))
     }
 
-    /// Assign each newly used controller to the first open local player slot.
-    /// Single player retains the historical last-pressed-controller behavior.
+    /// Give a newly used controller the first open local player slot
+    /// (`pad_slots`). Single player keeps the last-pressed controller.
     fn claim(&mut self, id: PadId) {
-        if !self.coop {
-            self.pads[0] = Some(id);
-        } else if !self.pads.contains(&Some(id)) {
-            if let Some(slot) = self.pads[..self.players].iter_mut().find(|slot| slot.is_none()) {
-                *slot = Some(id);
+        if let Some(slot) = self.slots.claim(id) {
+            if self.coop {
+                eprintln!("gamepad joined as P{}", slot + 1);
             }
         }
     }
 
     fn forget(&mut self, id: PadId) {
-        for slot in &mut self.pads {
-            if *slot == Some(id) {
-                *slot = None;
-            }
-        }
+        self.slots.forget(id);
         self.pad_seen.retain(|(p, _)| *p != id);
+    }
+
+    /// Local players whose keyboard table is live.
+    fn key_players(&self) -> usize {
+        if self.coop { self.players.max(2) } else { 1 }
+    }
+
+    /// Each local player's keyboard and pad bits.
+    fn local_inputs(&self) -> [u16; 4] {
+        std::array::from_fn(|i| self.kb[i] | self.pad_bits(self.slots.pads[i]))
     }
 
     fn poll_pads(&mut self) {
@@ -250,6 +273,12 @@ impl App {
         for (id, event, name) in events {
             match event {
                 gilrs::EventType::ButtonPressed(..) if !gc_active => self.claim(PadId::Gilrs(id)),
+                // Sticks and hat-style d-pads move a player too, so they join one.
+                gilrs::EventType::AxisChanged(axis, value, _)
+                    if !gc_active && keys::MOVE_AXES.contains(&axis) && value.abs() > 0.5 =>
+                {
+                    self.claim(PadId::Gilrs(id))
+                }
                 gilrs::EventType::Connected => eprintln!("gamepad connected (gilrs): {name}"),
                 gilrs::EventType::Disconnected => {
                     eprintln!("gamepad disconnected (gilrs): {name}");
@@ -267,7 +296,7 @@ impl App {
     /// connects/disconnects, and a newly pressed bit counts as a press.
     #[cfg(target_os = "macos")]
     fn poll_gc(&mut self) {
-        let now = crate::gc_pad::snapshot();
+        let now = crate::gc_pad::snapshot(&self.pad_map.gc);
         let old = std::mem::replace(&mut self.gc, now.clone());
         for o in &old {
             match now.iter().find(|p| p.key == o.key) {
@@ -310,7 +339,7 @@ impl App {
                 Some(l) => l.1 = bits,
                 None => self.pad_seen.push((id, bits)),
             }
-            let slot = self.pads.iter().position(|p| *p == Some(id))
+            let slot = self.slots.pads.iter().position(|p| *p == Some(id))
                 .map_or_else(|| "--".to_string(), |i| format!("P{}", i + 1));
             eprintln!("pad {slot} {name}: {bits:#06x} {}", keys::bit_names(bits));
         }
@@ -318,12 +347,7 @@ impl App {
 
     fn step(&mut self) {
         if self.vs_select.is_some() {
-            let inputs = [
-                self.kb[0] | self.pad_bits(self.pads[0]),
-                self.kb[1] | self.pad_bits(self.pads[1]),
-                self.pad_bits(self.pads[2]),
-                self.pad_bits(self.pads[3]),
-            ];
+            let inputs = self.local_inputs();
             let choice = self.vs_select.as_mut().and_then(|select| select.step(inputs));
             if let Some(choice) = choice {
                 for (slot, character) in choice.characters.into_iter().enumerate() {
@@ -370,12 +394,7 @@ impl App {
             movie.next(&self.game)
         } else { match self.demo_bots.as_mut() {
             Some(bots) => bots.pads(&self.game),
-            None => [
-                self.kb[0] | self.pad_bits(self.pads[0]),
-                self.kb[1] | self.pad_bits(self.pads[1]),
-                self.pad_bits(self.pads[2]),
-                self.pad_bits(self.pads[3]),
-            ],
+            None => self.local_inputs(),
         }};
         if self.game.vs_status().is_some_and(|status| status.round_over) {
             if self.vs_bots.is_some() {
@@ -431,7 +450,7 @@ impl App {
 
     /// One online tick (this peer's pad is always the P1 keys / first pad).
     fn net_tick(&mut self) -> u32 {
-        let pad = self.kb[0] | self.pad_bits(self.pads[0]);
+        let pad = self.kb[0] | self.pad_bits(self.slots.pads[0]);
         let Some(net) = self.net.as_mut() else { return 0 };
         let n = net.tick(&mut self.game, pad);
         self.push_audio();
@@ -440,7 +459,7 @@ impl App {
 
     /// Online tick paced by the audio device: always queues one frame of audio.
     fn net_tick_audio(&mut self) -> u32 {
-        let pad = self.kb[0] | self.pad_bits(self.pads[0]);
+        let pad = self.kb[0] | self.pad_bits(self.slots.pads[0]);
         let (Some(net), Some(a)) = (self.net.as_mut(), &self.audio) else {
             return 0;
         };
@@ -464,11 +483,11 @@ impl App {
     }
 
     fn hotkey(&mut self, h: Hotkey, pressed: bool, event_loop: &ActiveEventLoop) {
-        if self.vs_select.is_some() && !matches!(h, Hotkey::Quit | Hotkey::Fullscreen | Hotkey::Widescreen) {
+        if self.vs_select.is_some() && !matches!(h, Hotkey::Quit | Hotkey::Fullscreen | Hotkey::Widescreen | Hotkey::ShowFps) {
             return;
         }
         // Pause, fast-forward and save states would desync an online session.
-        if self.net.is_some() && !matches!(h, Hotkey::Quit | Hotkey::Fullscreen | Hotkey::Widescreen) {
+        if self.net.is_some() && !matches!(h, Hotkey::Quit | Hotkey::Fullscreen | Hotkey::Widescreen | Hotkey::ShowFps) {
             return;
         }
         // Game states do not contain the movie cursor. Loading one would
@@ -544,6 +563,7 @@ impl App {
                 }
             }
             Hotkey::FrameStep => self.frame_step = self.paused,
+            Hotkey::ShowFps => self.show_fps = !self.show_fps,
         }
     }
 
@@ -648,6 +668,12 @@ impl App {
             }
             crate::effects::apply(p.frame_mut(), w, h, &self.game, self.dynamic_lighting, self.charge_effects);
             self.game.draw_ui_rgba(p.frame_mut(), w, h);
+            self.notice = self.notice.filter(|(_, until)| Instant::now() < *until);
+            let speed = self.show_fps.then(|| crate::osd::speed_line(self.fps, self.game.fps()));
+            let lines: Vec<&str> = speed.as_deref().into_iter().chain(self.notice.map(|(n, _)| n)).collect();
+            if !lines.is_empty() {
+                crate::osd::draw(p.frame_mut(), w, h, &lines, usize::from(self.game.frame_scale()));
+            }
             if let Some(status) = self.game.vs_status().filter(|status| status.round_over) {
                 crate::vs_select::draw_result_scaled(p.frame_mut(), w, h, status, self.game.frame_scale());
             }
@@ -722,13 +748,21 @@ impl ApplicationHandler for App {
                     return;
                 };
                 let pressed = event.state == ElementState::Pressed;
-                match keys::map_key(code, self.coop) {
-                    Some(KeyAction::P1(b)) => set_bit(&mut self.kb[0], b, pressed),
-                    Some(KeyAction::P2(b)) => set_bit(&mut self.kb[1], b, pressed),
+                let (slot, b) = match keys::map_key(code, self.key_players()) {
+                    Some(KeyAction::P1(b)) => (0, b),
+                    Some(KeyAction::P2(b)) => (1, b),
+                    Some(KeyAction::P3(b)) => (2, b),
+                    Some(KeyAction::P4(b)) => (3, b),
                     Some(KeyAction::Hot(h)) if !event.repeat || h == Hotkey::FrameStep => {
-                        self.hotkey(h, pressed, event_loop)
+                        return self.hotkey(h, pressed, event_loop);
                     }
-                    _ => {}
+                    _ => return,
+                };
+                set_bit(&mut self.kb[slot], b, pressed);
+                if pressed {
+                    if let Some((from, to)) = self.slots.keyboard(slot, b) {
+                        eprintln!("keyboard took P{}: its gamepad moved to P{}", from + 1, to + 1);
+                    }
                 }
             }
             WindowEvent::RedrawRequested => self.draw(),

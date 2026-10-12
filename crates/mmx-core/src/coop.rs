@@ -356,6 +356,7 @@ pub fn register_coop_traps(game: &mut Game) -> Result<(), String> {
     game.traps.register(game.hook(HOOK_SHOT_SLOT_DONE), "coop_shot_slot_done", TrapReturn::Observe, local_shot_slot_done);
     game.traps.register(game.hook(crate::saber::HOOK_SHOTS_DONE), "coop_saber_shot", TrapReturn::Observe, crate::saber::shots_done);
     crate::coop_hud::register(game);
+    crate::capsule::register(game);
     Ok(())
 }
 
@@ -489,8 +490,10 @@ fn p2_update(game: &mut Game) {
     if crate::saber::uses_saber(game.player_characters[game.local_player_index]) {
         // X swings the saber; during a swing the ROM gets a masked pad.
         let duration = crate::saber::duration(game, game.local_player_index);
+        let armed = crate::saber::armed(game, game.local_player_index);
         crate::saber::face_attack_start(&game.coop.saber, &mut game.coop.p2, pad);
-        pad = crate::saber::update_timed(&mut game.coop.saber, &game.coop.p2, pad, duration);
+        pad = crate::saber::update_timed(&mut game.coop.saber, &game.coop.p2, pad, duration, armed);
+        crate::saber::wave_for(game, game.local_player_index);
         if crate::saber::whoosh(&game.coop.saber) {
             game.coop.sfx[crate::sfx::P2] = 1;
         }
@@ -603,6 +606,7 @@ fn shot_slot(game: &mut Game) {
 fn shot_slot_done(game: &mut Game) {
     let p2 = game.coop.enabled && p2_shot_slot(game);
     if (p2 && game.current_shadow_is_zero()) || (!p2 && game.p1_zero()) {
+        // Zero's muzzle is drawn for a sprite pack too: it is body art, the buster stays.
         zero_muzzle(game);
     }
     let character = game.player_characters[if p2 { game.local_player_index } else { 0 }];
@@ -839,6 +843,7 @@ fn p2_display(game: &mut Game) {
     let need = if let Some(b) = &boss {
         (game.coop.p2[0x0E] != 0).then(|| {
             std::iter::once(b.idle_frame).chain(b.run_frames.iter().copied())
+                .chain(b.jump_frame).chain(b.fall_frame)
                 .filter_map(|f| b.frames.get(f))
                 .map(|f| f.sprites.len())
                 .max().unwrap_or(0)
@@ -847,6 +852,7 @@ fn p2_display(game: &mut Game) {
         Some(z) => {
             crate::zero::x3_frame(&game.coop.p2, &game.coop.saber).map_or(0, |f| z.frames[f].sprites.len())
                 + crate::zero::wave_len(z, &game.coop.saber)
+                + crate::zero::thrown_len(z, &game.waves[game.local_player_index])
         }
         None => {
             layout_len(game, &game.coop.p2)
@@ -877,7 +883,7 @@ fn p2_display(game: &mut Game) {
     }
     let pal = game.coop.zero_palette;
     if let Some(b) = boss {
-        let page = match game.local_player_index { 2 => 4, 3 => 5, _ => 0 };
+        let page = crate::p2tiles::body_page(game);
         let last = crate::zero::emit_boss(game, &b, first, pal, page);
         game.oam_slots[1] |= crate::display::slots(first.into(), last.into());
         game.local_oam_end = last;
@@ -953,7 +959,7 @@ fn p2_display(game: &mut Game) {
     game.coop.p2_oam_count = usize::from(last - base);
     game.oam_slots[1] |= p2_slots;
     game.local_oam_end = last;
-    game.add_p2_palette_slots(p2_slots);
+    crate::zero::add_shadow_palette_slots(game, p2_slots);
     // Route P2's slots to the PPU's shadow tile page (p2tiles.rs).
     crate::p2tiles::mark_p2_slots(game);
 }

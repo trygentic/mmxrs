@@ -7,6 +7,7 @@ members = [
     "crates/mmx-native",
     "crates/mmx-net",
     "tools/mmx-signal",
+    "tools/mmx-bridge",
     "crates/mmx-web",
     "crates/mmx-launcher",
 ]
@@ -34,6 +35,16 @@ rust-version = "1.96"
 
 [profile.release]
 debug = 1
+
+# Shipped binaries (`make dist`): whole-program LTO, one codegen unit. About
+# 9% fewer instructions per frame than release (the emulator core's per-cycle
+# tick inlines across crates), same output; slower to build, so day-to-day
+# release builds stay as they are.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+debug = 0
 
 [profile.dev.package."*"]
 # The vendored emulator core is unusable unoptimised; z2rs learnt this the hard way.

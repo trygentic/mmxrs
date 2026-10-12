@@ -26,7 +26,8 @@ pub const NO_TILE: u16 = u16::MAX;
 
 /// One hardware sprite, relative to the object's origin (facing left, the
 /// game's unflipped direction; mirror with `x' = -x - w`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Sprite {
     pub x: i8,
     pub y: i8,
@@ -769,6 +770,34 @@ pub fn extract_x3_sounds(rom: &[u8]) -> Result<ZeroSounds, String> {
     Ok(ZeroSounds { swing: Sample { pcm, rate: DSP_RATE } })
 }
 
+// ------------------------------------------------------------ capsule dialog
+
+/// Dr. Light's lines for Zero in the capsule scenes (`capsule.rs` builds the
+/// messages around them). Pages of lines in the ROM's alphabet (ASCII, the
+/// printer `$80:E6BE` draws `$20..$7E`); at most 16 characters a line (the
+/// box holds ~20 at column 6, the portrait covers the right of the first
+/// two lines), at most 5 lines a page.
+pub type Pages = &'static [&'static [&'static str]];
+
+/// Flame Mammoth's capsule (the arm part = the Z-Saber), Zero alone.
+pub const ZERO_ARM: Pages = &[
+    &["You are not X...", "but you fight", "at his side."],
+    &["This part will", "tune the energy", "of your Z-Saber."],
+    &["Let its blade", "guide you, Zero!"],
+];
+/// The same, appended to X's own pages when X and Zero play together.
+pub const ZERO_ARM_TOO: Pages = &[&["And Zero...", "it will also", "awaken the power", "of your Z-Saber."]];
+/// Armored Armadillo's hidden capsule (the Hadouken; with the X3 ROM a
+/// Zero's charged-saber wave), Zero alone. The last page keeps Light's
+/// "enter the capsule" cue.
+pub const ZERO_WAVE: Pages = &[
+    &["Zero, I give you", "a special gift."],
+    &["Charge your", "Z-Saber fully,", "then swing it", "to hurl a wave!"],
+    &["Now, enter the", "capsule, please!"],
+];
+/// Appended to X's pages when X and Zero play together.
+pub const ZERO_WAVE_TOO: Pages = &[&["Zero, charge", "your Z-Saber,", "then swing it", "to hurl a wave!"]];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,5 +1091,134 @@ mod tests {
                 assert_eq!(page[(usize::from(s.tile) + d) * 32..][..32], vram[..], "tile {:02X}", o.tile);
             }
         }
+    }
+}
+
+/// A custom Zero body-art pack (docs/sprite-packs.md): version 1 JSON with
+/// SNES 4bpp tiles, a BGR555 palette and 138 frames in the playable X3
+/// numbering. The result is a [`ZeroSet`] without slash arc, wave, sounds
+/// or HUD icon: the saber swings (`saber::armed`) without X3's effects.
+pub fn import_sprite_pack(bytes: &[u8]) -> Result<ZeroSet, String> {
+    /// X3's page: three rows of 16 tiles (`ZeroSet::page`).
+    const PAGE_TILES: usize = 48;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Pack {
+        version: u32,
+        tiles: Vec<u8>,
+        palette: [u16; 16],
+        frames: Vec<PackFrame>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PackFrame {
+        sprites: Vec<Sprite>,
+        tiles_used: Vec<u16>,
+    }
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("sprite pack exceeds 8 MiB".into());
+    }
+    let pack: Pack = serde_json::from_slice(bytes).map_err(|e| format!("sprite pack: {e}"))?;
+    if pack.version != 1 {
+        return Err("sprite pack version must be 1".into());
+    }
+    if pack.tiles.is_empty() || pack.tiles.len() % 32 != 0 || pack.tiles.len() / 32 > usize::from(NO_TILE) {
+        return Err("sprite pack tiles must contain whole 32-byte 4bpp tiles".into());
+    }
+    if pack.palette.iter().any(|c| *c > 0x7FFF) {
+        return Err("sprite pack palette must be BGR555".into());
+    }
+    if pack.frames.len() != 138 {
+        return Err("sprite pack needs 138 playable frames (repeat a standing pose for missing animations)".into());
+    }
+    let count = pack.tiles.len() / 32;
+    for (i, f) in pack.frames.iter().enumerate() {
+        if f.tiles_used.len() != PAGE_TILES || f.sprites.len() > 64 {
+            return Err(format!("sprite pack frame {i}: need {PAGE_TILES} tile slots and at most 64 sprites"));
+        }
+        if f.tiles_used.iter().any(|t| *t != NO_TILE && usize::from(*t) >= count) {
+            return Err(format!("sprite pack frame {i}: tile index out of range"));
+        }
+        // A 16x16 sprite uses n, n+1, n+16, n+17: it must not cross the page's
+        // right edge or run past its last row.
+        if f.sprites.iter().any(|s| usize::from(s.tile) >= PAGE_TILES || (s.big && (usize::from(s.tile) + 17 >= PAGE_TILES || s.tile % 16 == 15))) {
+            return Err(format!("sprite pack frame {i}: sprite exceeds the tile page"));
+        }
+    }
+    Ok(ZeroSet {
+        tiles: pack.tiles,
+        palette: pack.palette,
+        frames: pack.frames.into_iter().map(|f| Frame { name: "custom", sprites: f.sprites, tiles_used: f.tiles_used }).collect(),
+        ..Default::default()
+    })
+}
+
+#[cfg(test)]
+mod sprite_pack_tests {
+    use super::*;
+
+    #[test]
+    fn sprite_pack_validates_before_use() {
+        let frame = serde_json::json!({"sprites": [{"x": -8, "y": -24, "big": true, "tile": 0, "hflip": false, "vflip": false}], "tiles_used": vec![0; 48]});
+        let mut pack = serde_json::json!({"version": 1, "tiles": vec![0u8; 32], "palette": vec![0; 16], "frames": vec![frame; 138]});
+        let enc = |p: &serde_json::Value| serde_json::to_vec(p).unwrap();
+        let set = import_sprite_pack(&enc(&pack)).unwrap();
+        assert_eq!(set.frames.len(), 138);
+        assert!(set.slash.is_none() && set.wave.frames.is_empty());
+        pack["frames"][0]["sprites"][0]["tile"] = 31.into(); // big sprite past the last row
+        assert!(import_sprite_pack(&enc(&pack)).is_err());
+        pack["frames"][0]["sprites"][0]["tile"] = 0.into();
+        pack["frames"][0]["tiles_used"][0] = 1.into(); // only one tile in the pack
+        assert!(import_sprite_pack(&enc(&pack)).is_err());
+        pack["frames"][0]["tiles_used"][0] = 0.into();
+        pack["version"] = 2.into();
+        assert!(import_sprite_pack(&enc(&pack)).is_err());
+    }
+
+    /// A pack built from X3's own frames: Zero P1 draws from it (`hw-spiky`,
+    /// walk 26 frames, saber at 28, arm part given) and the saber still
+    /// works: the Spiky takes the hit (2 -> 1) on the pack's slash pose 88.
+    #[test]
+    fn sprite_pack_draws_zero_without_the_saber() {
+        use crate::{BTN_RIGHT, BTN_X};
+        let (Some(x1), Some(x3)) = (std::env::var_os("MMX_ROM"), std::env::var_os("MMX_X3_ROM")) else {
+            eprintln!("MMX_ROM / MMX_X3_ROM not set; skipping");
+            return;
+        };
+        let st = concat!(env!("CARGO_MANIFEST_DIR"), "/../../states/hw-spiky.state");
+        let Ok(state) = std::fs::read(st) else {
+            eprintln!("{st} missing; skipping");
+            return;
+        };
+        let x3 = std::fs::read(x3).unwrap();
+        let x3 = if x3.len() % 0x8000 == 512 { &x3[512..] } else { &x3[..] };
+        let set = extract_x3(x3).unwrap();
+        let frames: Vec<_> = set.frames.iter().map(|f| serde_json::json!({
+            "tiles_used": f.tiles_used,
+            "sprites": f.sprites.iter().map(|s| serde_json::json!({"x": s.x, "y": s.y, "big": s.big, "tile": s.tile, "hflip": s.hflip, "vflip": s.vflip})).collect::<Vec<_>>(),
+        })).collect();
+        let pack = serde_json::to_vec(&serde_json::json!({"version": 1, "tiles": set.tiles, "palette": set.palette, "frames": frames})).unwrap();
+        let mut g = crate::Game::from_rom(std::fs::read(x1).unwrap()).unwrap();
+        g.import_sprite_pack(&pack).unwrap();
+        assert!(g.zero_set().unwrap().slash.is_none());
+        let body = |fs: &[Frame]| fs.iter().map(|f| (f.sprites.clone(), f.tiles_used.clone())).collect::<Vec<_>>();
+        assert_eq!(body(&g.zero_set().unwrap().frames), body(&set.frames));
+        g.load_state(&state).unwrap();
+        g.wram_mut()[crate::ram::wram_index(crate::ram::ARMOR)] = 0x0F; // every part, the saber included
+        g.set_p1_zero(true).unwrap();
+        let hp = |g: &crate::Game| g.wram()[0x0E68 + 0x27] & 0x7F;
+        let mut seen = Vec::new();
+        for f in 1..=44 {
+            let p1 = match f {
+                ..=26 => BTN_RIGHT,
+                28 | 29 => BTN_X,
+                _ => 0,
+            };
+            g.step(crate::Pads { p1, p2: 0 });
+            seen.push((g.coop.p1.frame, hp(&g)));
+        }
+        assert_eq!(seen[30].1, 2, "alive before the arc: {seen:?}");
+        assert!(seen[31..44].iter().any(|&(zf, hp)| zf == 88 && hp == 1), "the saber works in a pack: {seen:?}");
+        assert!(seen.iter().all(|&(zf, _)| zf != u16::MAX), "pack frames drawn: {seen:?}");
     }
 }

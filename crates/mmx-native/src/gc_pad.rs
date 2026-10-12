@@ -52,7 +52,7 @@ pub fn monitor_background(on: bool) {
 }
 
 /// Every connected controller with an extended gamepad profile.
-pub fn snapshot() -> Vec<GcPad> {
+pub fn snapshot(gc_buttons: &[(&str, u16); 10]) -> Vec<GcPad> {
     let mut out = Vec::new();
     // SAFETY: class/property reads on the main thread (the winit loop).
     unsafe {
@@ -75,7 +75,7 @@ pub fn snapshot() -> Vec<GcPad> {
             ];
             let mut bits = buttons
                 .iter()
-                .zip(keys::GC_BUTTONS)
+                .zip(gc_buttons.iter())
                 .filter(|(b, _)| b.as_deref().is_some_and(pressed))
                 .fold(0, |a, (_, (_, bit))| a | bit);
             bits |= dpad_bits(&gp.dpad());

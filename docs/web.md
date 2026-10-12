@@ -56,6 +56,9 @@ margins' columns are spawned at once.
 
 P1 L/R are Q/E. F5 saves and F7 loads one
 in-memory slot (gone on reload). Hold Tab to fast-forward (audio muted).
+F2 (or `?fps=1`) shows fps and % of full speed over the picture. Until the
+browser lets audio start (first click or key press), a badge over the
+picture says "Click or press a key to enable sound".
 
 ## Timing and audio
 

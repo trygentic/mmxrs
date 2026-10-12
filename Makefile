@@ -3,6 +3,7 @@
 #
 #   make / make run   build release binaries and open the launcher
 #   make game         build and start the game directly (ARGS="--coop-local ...")
+#   make dist       optimised binaries to ship (target/dist/, slower build)
 #   make test       workspace tests (ROM-gated tests skip without MMX_ROM)
 #   make check      clippy + wasm checks + parity verify
 #
@@ -11,25 +12,28 @@
 ROM     ?= $(or $(MMX_ROM),roms/Mega Man X (USA) (Rev 1).sfc)
 X3_ROM  ?= $(or $(MMX_X3_ROM),roms/Mega Man X3 (USA).sfc)
 ARGS    ?=
-BIN      = target/release/mmxrs
-LAUNCHER = target/release/mmxrs-launcher
 
-.PHONY: all build launcher run game coop zero test check help
+.PHONY: all build dist launcher run game coop zero test check help
 
 all: launcher
 
 build:
 	cargo build --release -p mmx-native -p mmx-launcher
 
+# Release zips: the launcher and game land side by side in target/dist/.
+dist:
+	cargo build --profile dist -p mmx-native -p mmx-launcher
+
+# cargo run finds the binaries under a shared CARGO_TARGET_DIR too.
 launcher: build
-	./$(LAUNCHER)
+	cargo run --release -p mmx-launcher
 
 run: launcher
 
 # Direct launch. X3 is passed only when the file exists (paths may contain spaces).
 HAVE_X3 := $(shell test -f "$(X3_ROM)" && echo yes)
 game: build
-	./$(BIN) --rom "$(ROM)" $(if $(HAVE_X3),--x3-rom "$(X3_ROM)") $(ARGS)
+	cargo run --release -p mmx-native -- --rom "$(ROM)" $(if $(HAVE_X3),--x3-rom "$(X3_ROM)") $(ARGS)
 
 coop: ARGS += --coop-local
 coop: game
@@ -46,4 +50,4 @@ check:
 	MMX_ROM="$(ROM)" cargo run --release -q -p xtask -- verify --frames 2400 --coop-off --tap 200,400,600,800,1000 --hold 0100
 
 help:
-	@sed -n '2,10p' Makefile
+	@sed -n '2,11p' Makefile

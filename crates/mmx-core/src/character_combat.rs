@@ -246,6 +246,7 @@ mod tests {
             if g.wram()[enemy]!=0 && g.wram()[enemy+0x27]&0x7f==2 {spawned=true;break;}
         }
         assert!(spawned,"real Highway Spiky did not spawn");
+        g.wram_mut()[crate::ram::wram_index(crate::ram::ARMOR)] |= crate::ram::ARMOR_ARM; // Zero's saber is the arm part
         let start=g.save_state();
         for player in [1,2,3] {
             g.load_state(&start).unwrap();
@@ -433,6 +434,7 @@ mod tests {
             block[2] = 0;
             block[0x11] |= 0x40;
         }
+        game.wram_mut()[crate::ram::wram_index(crate::ram::ARMOR)] |= crate::ram::ARMOR_ARM; // Zero's saber is the arm part
         // Roundtrip new pending state and reset it when loading older tails.
         game.active_shot_initial = true;
         game.active_shot_extra = Some(1);
@@ -442,7 +444,9 @@ mod tests {
         game.load_state(&pending).unwrap();
         assert!(game.active_shot_initial);
         assert_eq!(game.active_shot_extra, Some(1));
-        let old = &pending[..pending.len() - 7]; // SHP1 + bool + Some discriminator + index.
+        // The WAVE tail sits last (body, u32 length, magic); SHP1 is right before it.
+        let wave = 8 + u32::from_le_bytes(pending[pending.len() - 8..pending.len() - 4].try_into().unwrap()) as usize;
+        let old = &pending[..pending.len() - wave - 7]; // SHP1 + bool + Some discriminator + index.
         game.load_state(old).unwrap();
         assert!(!game.active_shot_initial);
         assert_eq!(game.active_shot_extra, None);

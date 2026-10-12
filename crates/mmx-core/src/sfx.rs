@@ -77,6 +77,7 @@ mod tests {
                 g.set_zero_set(Some(z));
             }
             g.load_state(&state).unwrap();
+            crate::saber::tests::give_arm(&mut g);
             g.set_audio_rate(32_000); // after the load: the state carries the rate
             g.set_p1_zero(true).unwrap();
             let (mut pcm, mut starts, mut arc) = (Vec::new(), Vec::new(), None);

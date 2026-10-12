@@ -73,6 +73,9 @@ pub enum HookId {
     CollapseTrigger,
     PaletteLoadAt,
     PaletteLoad,
+    TextPtr,
+    TextRead,
+    HadoukenCheck,
 }
 
 const fn hook(id: HookId, name: &'static str, addr_pal: u32, sig_offset: i32, sig: &'static str) -> Hook {
@@ -84,7 +87,7 @@ use HookId::*;
 /// Indexed by `HookId as usize`. Signatures extracted from the PAL dump
 /// (unique in the whole ROM with their wildcards; `hooks::tests`).
 #[rustfmt::skip]
-pub const HOOKS: [Hook; 42] = [
+pub const HOOKS: [Hook; 45] = [
     hook(P2Update, "p2_update", 0x80D1EF, -4, "22 ?? ?? ?? 9C D4 0B AE 13 1F F0 05 20 ?? ?? 80"),
     hook(P2Physics, "p2_physics", 0x80D241, -4, "22 ?? ?? ?? 9C 1C 1F AE 19 1F D0 09 20 ?? ?? 20"),
     hook(P2Display, "p2_display", 0x809A86, -3, "20 ?? ?? AD 30 1F C9 80 D0 07 9C 30 1F A9 0F 85"),
@@ -143,6 +146,15 @@ pub const HOOKS: [Hook; 42] = [
     // CGRAM slot `X`): zero.rs keeps a P2 slice's charge flash out of X's slot.
     hook(PaletteLoadAt, "palette_load_at", 0x828000, 0, "08 0B E2 20 C2 10 8E 02 00 9C 03 00 0E 02 00 80 0C"),
     hook(PaletteLoad, "palette_load", 0x828011, 0, "08 0B E2 20 C2 10 9C 02 00 9C 03 00 F4 00 00 2B B9 ?? ?? 85 10"),
+    // The text task's message pointer load (`LDA $1F32; AND #$3F; ASL; TAX;
+    // REP #$20; LDA $84xxxx,X; STA $68`; read only: capsule.rs takes the
+    // table from its operand) and its byte reader (`PEA $8684; PLB; LDA
+    // ($68),Y; INY; PLB; RTS`): Zero's capsule dialog.
+    hook(TextPtr, "text_ptr", 0x80E692, 0, "AD 32 1F 29 3F 0A AA C2 20 BF ?? ?? ?? 85 68 64 6C"),
+    hook(TextRead, "text_read", 0x80E953, 0, "F4 ?? ?? AB B1 68 C8 AB 60 A9 00 85 00 80 04 A9 25"),
+    // The Hadouken motion check (`JSR` from `$81:A0DC`; `RTS` with Z set =
+    // allowed: no weapon, full HP $20, `$1F7E` bit 7, standing/walking).
+    hook(HadoukenCheck, "hadouken_check", 0x81A0EA, 0, "A5 8D D0 25 A5 7D D0 21 A5 33 D0 1D A5 27 C9 20 D0 17 AD 7E 1F 29 80"),
 ];
 
 impl HookId {

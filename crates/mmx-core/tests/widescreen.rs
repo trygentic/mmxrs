@@ -272,3 +272,25 @@ fn presets_parse() {
     assert_eq!(Widescreen::OFF.next(), Widescreen::W16_10);
     assert_eq!(Widescreen::W21_9.next(), Widescreen::OFF);
 }
+
+/// Outside a stage the margins are black (docs/widescreen.md "Pillarbox"):
+/// the copyright screen right after power-on, whose 32-column map would
+/// otherwise wrap its text into them. Needs only the ROM.
+#[test]
+fn margins_are_black_outside_a_stage() {
+    let Some(rom) = std::env::var_os("MMX_ROM").and_then(|p| std::fs::read(p).ok()) else {
+        return eprintln!("MMX_ROM not set; skipping");
+    };
+    let mut g = Game::from_rom(rom).expect("load ROM");
+    g.set_widescreen(Widescreen::W21_9);
+    for _ in 0..100 {
+        g.step(Pads::default());
+    }
+    let (px, w, h) = g.frame();
+    assert_eq!((w, h), (528, 224));
+    let centre_lit = px.chunks_exact(w).any(|row| row[136..392].iter().any(|&p| p != 0));
+    assert!(centre_lit, "the copyright text is on screen");
+    for row in px.chunks_exact(w) {
+        assert!(row[..136].iter().chain(&row[392..]).all(|&p| p == 0));
+    }
+}

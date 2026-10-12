@@ -15,6 +15,8 @@ bincode = "2"
 mmx-net = { path = "../mmx-net" }
 crc = "3" # already pulled in by snes-core
 sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1" # sprite packs (docs/sprite-packs.md)
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # rand (via jgenesis-common / snes-core) needs a wasm entropy backend to link.

@@ -56,6 +56,8 @@ pub struct MarginState {
     pub last: Vec<MarginSprite>,
     /// P2's HP bar slots this step (coop_hud), for widescreen::update_margin_tiles.
     pub(crate) p2_bar: u128,
+    /// What the next rendered frame's margins black out (widescreen.rs).
+    pub(crate) blank: crate::widescreen::MarginBlank,
     /// Debug check (`MMX_MARGIN_CHECK`, or [`MarginState::enable_check`]).
     pub check: Option<Box<Check>>,
 }
@@ -326,7 +328,7 @@ fn p2(game: &mut Game, emitter: u32, m: i16, saved: &[u8], out: &mut Vec<MarginS
     }
     let pal = game.coop.zero_palette;
     let start = out.len();
-    if let Some(z) = game.zero_set.clone() {
+    if let Some(z) = game.zero_set.clone().filter(|_| game.current_shadow_is_zero()) {
         let shift = if x < 128 { -SHIFT } else { SHIFT };
         set_camera(game, saved, shift);
         for (e, hi, page) in crate::zero::margin_entries(game, &z) {
